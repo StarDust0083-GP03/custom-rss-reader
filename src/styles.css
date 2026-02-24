@@ -44,6 +44,35 @@ body {
     height: 100vh;
 }
 
+/* 滚动条样式 */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 5px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--text-secondary);
+    border: 2px solid transparent;
+    background-clip: content-box;
+}
+
+/* Firefox 滚动条 */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-color) transparent;
+}
+
 .app-container {
     display: grid;
     grid-template-columns: 280px 380px 1fr;
@@ -552,8 +581,6 @@ body {
 
 .webpage-translation .translated-content {
     color: #333;
-}
-    z-index: 10;
 }
 
 .detail-placeholder {
