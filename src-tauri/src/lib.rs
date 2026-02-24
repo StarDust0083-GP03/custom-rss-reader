@@ -21,7 +21,7 @@ use commands::{
         add_subscription, get_subscription, list_subscriptions, remove_subscription,
         toggle_use_website, toggle_auto_classify, update_subscription,
     },
-    ai::{translate_content_bilingual, translate_item_bilingual, classify_item, set_ai_config},
+    ai::{translate_content_bilingual, translate_item_bilingual, translate_item_bilingual_streaming, classify_item, set_ai_config},
     webview::open_url_in_webview,
 };
 
@@ -81,6 +81,7 @@ pub fn run() {
             // AI commands
             translate_content_bilingual,
             translate_item_bilingual,
+            translate_item_bilingual_streaming,
             classify_item,
             set_ai_config,
         ])

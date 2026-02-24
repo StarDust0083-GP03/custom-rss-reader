@@ -48,11 +48,13 @@ let currentTagFilter: string | null = null; // Current tag filter
 let currentSubscriptionId: number | null = null;
 let currentItems: FeedItem[] = [];
 let selectedItem: FeedItem | null = null;
+let unreadFilterEnabled: boolean = false; // Whether unread filter is additionally enabled
 let useWebView = false;
 // 按订阅源 ID 记住 webview 状态
 let webviewPerSubscription: Map<number, boolean> = new Map();
 // AI 设置
 let useTranslation = false; // 是否显示翻译内容
+let currentTranslationAbortController: AbortController | null = null; // 用于取消翻译
 
 // ==================== 类型定义 ====================
 
@@ -365,10 +367,16 @@ function renderSubscriptions() {
 
   // 添加 "All Items" 选项
   const allItem = document.createElement("div");
+  // "All Items" is active when: no subscription selected AND filter is "all" (not unread, favorites, etc.)
   allItem.className = `subscription-item ${currentSubscriptionId === null && currentFilter === "all" ? "active" : ""}`;
   allItem.dataset.id = "all";
   allItem.innerHTML = `<span class="subscription-title">All Items</span>`;
-  allItem.addEventListener("click", () => selectSubscription(null));
+  allItem.addEventListener("click", () => {
+    currentSubscriptionId = null;
+    currentFilter = "all";
+    renderSubscriptions();
+    loadItems();
+  });
   list.appendChild(allItem);
 
   subscriptions.forEach((sub) => {
@@ -419,6 +427,8 @@ function renderSubscriptions() {
 // 选择订阅
 function selectSubscription(id: number | null) {
   currentSubscriptionId = id;
+  // When selecting a specific subscription, don't reset filter (allows unread + subscription)
+  // When selecting "All Items" (id === null), keep current filter to allow "unread" for all subscriptions
   renderSubscriptions();
   loadItems();
 }
@@ -440,7 +450,12 @@ async function loadItems() {
     } else if (currentFilter === "read-later") {
       items = await invoke<FeedItem[]>("get_read_later", { limit: 100, offset: 0 });
     } else if (currentFilter === "today") {
-      items = await invoke<FeedItem[]>("get_today_items", { limit: 100, offset: 0 });
+      items = await invoke<FeedItem[]>("get_today_items", {
+        subscriptionId: currentSubscriptionId,
+        unreadOnly: unreadFilterEnabled,
+        limit: 100,
+        offset: 0,
+      });
     } else if (currentFilter === "tag" && currentTagFilter) {
       items = await invoke<FeedItem[]>("get_items_by_tag", {
         tag: currentTagFilter,
@@ -1166,30 +1181,100 @@ function closeAiSettingsModal() {
 
 // AI Functions
 async function translateItem(item: FeedItem) {
+  // 如果正在翻译同一篇文章，取消翻译
+  if (currentTranslationAbortController) {
+    currentTranslationAbortController.abort();
+    currentTranslationAbortController = null;
+    showSuccess("Translation cancelled");
+    return;
+  }
+
+  // 检查是否已经有翻译内容（缓存）
+  if (item.translated_content) {
+    // 直接使用已有的翻译
+    useTranslation = true;
+    renderItemDetail(item);
+    showSuccess("Using cached translation");
+    return;
+  }
+
+  // 创建新的 AbortController
+  const abortController = new AbortController();
+  currentTranslationAbortController = abortController;
+
+  // 清空之前的翻译内容（从头开始）
+  item.translated_content = null;
+
   try {
     showSuccess("Translating...");
 
-    // 使用带缓存的双语对照翻译
-    const bilingual = await invoke<string>("translate_item_bilingual", {
+    // Listen for translation progress events
+    const unlistenProgress = await listen<{ total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean }>(
+      "translation-progress",
+      (event) => {
+        // 检查是否已取消
+        if (abortController.signal.aborted) {
+          return;
+        }
+
+        const { completed, total, html_chunk, is_complete, cached } = event.payload;
+
+        // Check if this is still the selected item
+        if (selectedItem?.id !== item.id) {
+          return;
+        }
+
+        // 如果是缓存命中，直接设置完整内容
+        if (cached && html_chunk) {
+          item.translated_content = html_chunk;
+          useTranslation = true;
+          renderItemDetail(item);
+          showSuccess("Using cached translation");
+          currentTranslationAbortController = null;
+          return;
+        }
+
+        // Update progress indicator
+        if (!cached) {
+          showSuccess(`Translating... ${completed}/${total}`);
+        }
+
+        // Append the chunk to the item (build progressively)
+        if (is_complete) {
+          // Final event - close wrapper and render complete content
+          if (item.translated_content && !item.translated_content.endsWith("</div>")) {
+            item.translated_content += "</div>";
+          }
+          renderItemDetail(item);
+          showSuccess("Translation complete");
+          currentTranslationAbortController = null;
+        } else if (html_chunk) {
+          // Append this paragraph chunk
+          if (!item.translated_content) {
+            item.translated_content = `<div class="bilingual-content">\n${html_chunk}`;
+          } else {
+            item.translated_content += `\n${html_chunk}`;
+          }
+          useTranslation = true;
+          // Re-render to show new paragraph
+          renderItemDetail(item);
+        }
+      }
+    );
+
+    // 使用流式双语对照翻译
+    await invoke<string>("translate_item_bilingual_streaming", {
       itemId: item.id,
     });
 
-    // Check if this is still the selected item
-    if (selectedItem?.id !== item.id) {
-      showSuccess("Translation complete (cached)");
-      return;
-    }
-
-    // 更新当前选中项的翻译内容
-    item.translated_content = bilingual;
-    item.translated_at = new Date().toISOString(); // Update local timestamp
-    useTranslation = true;
-
-    // 重新渲染详情
-    renderItemDetail(item);
-    showSuccess("Translation complete");
+    unlistenProgress();
   } catch (error) {
-    showError(`Translation failed: ${error}`);
+    if (abortController.signal.aborted) {
+      showSuccess("Translation cancelled");
+    } else {
+      showError(`Translation failed: ${error}`);
+    }
+    currentTranslationAbortController = null;
   }
 }
 
@@ -1291,7 +1376,18 @@ function setFilter(filter: typeof currentFilter) {
   if (filter !== "tag") {
     currentTagFilter = null;
   }
-  currentSubscriptionId = null;
+  // Don't reset subscription when switching to/from unread or today filters
+  // This allows combining unread/today with specific subscription
+  if (filter !== "unread" && filter !== "today") {
+    currentSubscriptionId = null;
+    unreadFilterEnabled = false;
+  } else if (filter === "today") {
+    // When switching to today, keep unread filter state if it was enabled
+    // But reset it when switching from unread to today (to avoid double unread)
+    if (currentFilter === "unread") {
+      unreadFilterEnabled = false;
+    }
+  }
 
   // 更新筛选标签
   document.querySelectorAll(".filter-tab").forEach(tab => {
@@ -1309,12 +1405,23 @@ function updateFilterTabs() {
     if (currentFilter === "tag" && currentTagFilter && tabFilter === "tag") {
       tab.classList.add("active");
       tab.textContent = `#${currentTagFilter}`;
+    } else if (tabFilter === "today" && unreadFilterEnabled) {
+      // Show "Today + Unread" when both filters are active
+      tab.classList.add("active");
+      tab.textContent = "Today + Unread";
     } else if (tabFilter === currentFilter && currentFilter !== "tag") {
       tab.classList.add("active");
+      // Reset text to default
+      if (tabFilter === "today") {
+        tab.textContent = "Today";
+      }
     } else {
       tab.classList.remove("active");
       if (tabFilter === "tag") {
         tab.textContent = "Tags";
+      }
+      if (tabFilter === "today") {
+        tab.textContent = "Today";
       }
     }
   });
@@ -1365,6 +1472,11 @@ async function init() {
       if (filter === "tag") {
         // For tag filter, show tag selection instead of just setting filter
         showTagSelector();
+      } else if (filter === "unread" && currentFilter === "today") {
+        // Special case: clicking Unread while in Today mode toggles "Today + Unread"
+        unreadFilterEnabled = !unreadFilterEnabled;
+        updateFilterTabs();
+        loadItems();
       } else {
         setFilter(filter);
       }

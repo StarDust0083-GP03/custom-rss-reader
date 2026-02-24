@@ -542,22 +542,22 @@ pub async fn translate_website_content(
     let fetcher = FeedFetcher::new();
     let content = fetcher.fetch_website_content(&url).await
         .map_err(|e| format!("Failed to fetch website: {}", e))?;
-    
+
     // Extract main content while preserving HTML structure
     let html_content = extract_main_content_for_translation(&content);
-    
+
     // Translate the content using AI (preserves HTML structure)
     let config = load_ai_config(&app_handle)
         .ok_or_else(|| "No AI configuration found. Please configure API key first.".to_string())?;
-    
+
     let ai_service = AiService::new(config)?;
-    
+
     let bilingual = ai_service.translate_bilingual_segmented(
         &html_content,
         "auto",
         "zh-CN",
     ).await?;
-    
+
     Ok(bilingual)
 }
 

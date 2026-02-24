@@ -1,6 +1,15 @@
 use crate::ai::{AiService, AiConfig, ClassificationRequest};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Emitter};
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranslationProgress {
+    pub total: usize,
+    pub completed: usize,
+    pub html_chunk: String,
+    pub is_complete: bool,
+}
 
 // Default configuration
 const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
@@ -158,6 +167,127 @@ pub async fn set_ai_config(
     app_handle.manage(config);
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn translate_item_bilingual_streaming(
+    app_handle: AppHandle,
+    pool: tauri::State<'_, sqlx::SqlitePool>,
+    item_id: i64,
+) -> Result<String, String> {
+    // Get item from database
+    let item: crate::database::schema::FeedItem = sqlx::query_as::<_, _>("SELECT * FROM feed_items WHERE id = $1")
+        .bind(item_id)
+        .fetch_one(pool.inner())
+        .await
+        .map_err(|e| format!("Failed to get item: {}", e))?;
+
+    // Check if we have a cached translation that's still valid
+    if let Some(translated_content) = &item.translated_content {
+        if let Some(translated_at) = item.translated_at {
+            let cache_age = Utc::now() - translated_at;
+            if cache_age.num_days() < TRANSLATION_CACHE_DAYS {
+                // Emit cache hit event
+                let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+                    "total": 1,
+                    "completed": 1,
+                    "html_chunk": translated_content,
+                    "is_complete": true,
+                    "cached": true
+                }));
+                return Ok(format!(
+                    r#"<div class="bilingual-content" data-cached="true">{}</div>"#,
+                    translated_content
+                ));
+            }
+        }
+    }
+
+    // Need to fetch new translation
+    let content = item.content.as_ref()
+        .or(item.description.as_ref())
+        .ok_or_else(|| "No content to translate".to_string())?;
+
+    let config = get_ai_config(&app_handle).await?;
+    let ai_service = AiService::new(config)?;
+
+    // Extract paragraphs
+    let paragraphs = ai_service.extract_paragraphs(content);
+    let total = paragraphs.len();
+    let mut completed = 0;
+    let mut all_chunks = Vec::new();
+
+    // Translate each paragraph and emit progress
+    for paragraph in paragraphs {
+        if paragraph.trim().is_empty() {
+            continue;
+        }
+
+        match ai_service.translate_single_paragraph_bilingual(
+            &paragraph,
+            "auto",
+            "zh-CN"
+        ).await {
+            Ok(translated_para) => {
+                completed += 1;
+                all_chunks.push(translated_para.clone());
+
+                // Emit progress event for this paragraph
+                let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+                    "total": total,
+                    "completed": completed,
+                    "html_chunk": translated_para,
+                    "is_complete": false,
+                    "cached": false
+                }));
+            }
+            Err(e) => {
+                // On error, still emit original paragraph
+                eprintln!("Failed to translate paragraph: {}", e);
+                completed += 1;
+                let fallback = format!(r#"<div class="translation-paragraph"><div class="paragraph-original">{}</div></div>"#, paragraph);
+                all_chunks.push(fallback.clone());
+
+                let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+                    "total": total,
+                    "completed": completed,
+                    "html_chunk": fallback,
+                    "is_complete": false,
+                    "cached": false
+                }));
+            }
+        }
+    }
+
+    // Combine all chunks
+    let bilingual = all_chunks.join("\n");
+    let result = format!(
+        r#"<div class="bilingual-content" data-cached="false">{}</div>"#,
+        bilingual
+    );
+
+    // Emit final completion event
+    let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+        "total": total,
+        "completed": total,
+        "html_chunk": "",
+        "is_complete": true,
+        "cached": false
+    }));
+
+    // Save to database with timestamp
+    let now = Utc::now();
+    sqlx::query(
+        "UPDATE feed_items SET translated_content = $1, translated_at = $2 WHERE id = $3"
+    )
+    .bind(&result)
+    .bind(&now)
+    .bind(item_id)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| format!("Failed to save translation: {}", e))?;
+
+    Ok(result)
 }
 
 async fn get_ai_config(app_handle: &AppHandle) -> Result<AiConfig, String> {

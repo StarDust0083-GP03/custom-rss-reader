@@ -694,7 +694,7 @@ body {
     font-weight: 500;
 }
 
-/* Bilingual content styles */
+/* Bilingual content styles - clean, no box display */
 .bilingual-container {
     margin-bottom: 1rem;
 }
@@ -705,7 +705,6 @@ body {
     align-items: center;
     padding: 0.5rem 1rem;
     background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
     border-radius: 6px 6px 0 0;
 }
 
@@ -729,16 +728,36 @@ body {
 }
 
 .bilingual-content {
-    padding: 1rem;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-top: none;
-    border-radius: 0 0 6px 6px;
-    max-height: 400px;
-    overflow-y: auto;
+    /* No border, no background, clean display */
+    padding: 0;
+    max-height: none;
+    overflow-y: visible;
 }
 
-/* Translation segment styles */
+/* Translation paragraph styles - paragraph-by-paragraph bilingual display */
+.translation-paragraph {
+    margin-bottom: 2rem;
+    padding-bottom: 1rem;
+}
+
+.translation-paragraph:last-child {
+    margin-bottom: 0;
+    padding-bottom: 0;
+}
+
+.paragraph-original {
+    opacity: 0.5;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    margin-bottom: 0.5rem;
+}
+
+.paragraph-translated {
+    font-size: 1rem;
+    line-height: 1.8;
+}
+
+/* Legacy segment styles (for backward compatibility) */
 .translation-segment {
     margin-bottom: 1.5rem;
     padding-bottom: 1rem;
@@ -783,24 +802,10 @@ body {
     font-size: 1rem;
 }
 
-/* Segment labels */
+/* Remove segment labels */
 .translation-segment > .original-content::before,
 .translation-segment > .translated-content::before {
-    display: block;
-    font-size: 0.7rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-bottom: 0.25rem;
-    color: var(--text-secondary);
-}
-
-.translation-segment > .original-content::before {
-    content: "Original";
-}
-
-.translation-segment > .translated-content::before {
-    content: "Translation";
+    display: none;
 }
 
 /* 状态栏 */

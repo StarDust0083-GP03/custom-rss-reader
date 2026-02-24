@@ -174,22 +174,56 @@ pub async fn get_unread(
 #[tauri::command]
 pub async fn get_today_items(
     pool: State<'_, SqlitePool>,
+    subscription_id: Option<i64>,
+    unread_only: Option<bool>,
     limit: Option<i32>,
     offset: Option<i32>,
 ) -> Result<Vec<crate::database::schema::FeedItem>, String> {
     let limit = limit.unwrap_or(50);
     let offset = offset.unwrap_or(0);
+    let unread_only = unread_only.unwrap_or(false);
 
-    let items = sqlx::query_as::<_, crate::database::schema::FeedItem>(
-        "SELECT * FROM feed_items WHERE DATE(published_at) = DATE('now') ORDER BY published_at DESC LIMIT $1 OFFSET $2"
-    )
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool.inner())
-    .await
-    .map_err(|e| format!("Failed to get today items: {}", e))?;
+    let items = if let Some(sub_id) = subscription_id {
+        if unread_only {
+            sqlx::query_as::<_, crate::database::schema::FeedItem>(
+                "SELECT * FROM feed_items WHERE subscription_id = $1 AND DATE(published_at) = DATE('now') AND is_read = 0 ORDER BY published_at DESC LIMIT $2 OFFSET $3"
+            )
+            .bind(sub_id)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool.inner())
+            .await
+        } else {
+            sqlx::query_as::<_, crate::database::schema::FeedItem>(
+                "SELECT * FROM feed_items WHERE subscription_id = $1 AND DATE(published_at) = DATE('now') ORDER BY published_at DESC LIMIT $2 OFFSET $3"
+            )
+            .bind(sub_id)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool.inner())
+            .await
+        }
+    } else {
+        if unread_only {
+            sqlx::query_as::<_, crate::database::schema::FeedItem>(
+                "SELECT * FROM feed_items WHERE DATE(published_at) = DATE('now') AND is_read = 0 ORDER BY published_at DESC LIMIT $1 OFFSET $2"
+            )
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool.inner())
+            .await
+        } else {
+            sqlx::query_as::<_, crate::database::schema::FeedItem>(
+                "SELECT * FROM feed_items WHERE DATE(published_at) = DATE('now') ORDER BY published_at DESC LIMIT $1 OFFSET $2"
+            )
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool.inner())
+            .await
+        }
+    };
 
-    Ok(items)
+    items.map_err(|e| format!("Failed to get today items: {}", e))
 }
 
 #[tauri::command]
