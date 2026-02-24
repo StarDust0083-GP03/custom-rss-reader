@@ -115,10 +115,14 @@ body {
     cursor: pointer;
     font-size: 0.85rem;
     transition: all 0.2s;
+    color: var(--text-primary);
+    font-weight: 500;
 }
 
 .sidebar-actions button:hover {
-    background: var(--border-color);
+    background: var(--accent-color);
+    color: white;
+    border-color: var(--accent-color);
 }
 
 .sidebar-content {
@@ -304,6 +308,14 @@ body {
     cursor: pointer;
     font-size: 0.8rem;
     transition: all 0.2s;
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+.header-actions button:hover {
+    background: var(--accent-color);
+    color: white;
+    border-color: var(--accent-color);
 }
 
 .search-box input {
@@ -484,11 +496,14 @@ body {
     transition: all 0.2s;
     text-decoration: none;
     color: var(--text-primary);
+    font-weight: 500;
 }
 
 .detail-actions button:hover,
 .detail-item-actions button:hover {
-    background: var(--border-color);
+    background: var(--accent-color);
+    color: white;
+    border-color: var(--accent-color);
 }
 
 .detail-item-actions button.active {
