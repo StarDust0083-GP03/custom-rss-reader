@@ -162,11 +162,11 @@ impl AiService {
     }
 
     /// Extract paragraphs from HTML content by <p> tags or double line breaks
-    /// Splits paragraphs that exceed MAX_CHARS_PER_SEGMENT into smaller chunks
+    /// Then merge small paragraphs into batches up to MAX_CHARS_PER_SEGMENT
     pub fn extract_paragraphs(&self, content: &str) -> Vec<String> {
-        let mut paragraphs = Vec::new();
+        let mut raw_paragraphs = Vec::new();
 
-        // First try: extract by <p> tags
+        // First: extract raw paragraphs by <p> tags
         if content.contains("<p") {
             let mut current = String::new();
             let mut in_p_tag = false;
@@ -181,7 +181,7 @@ impl AiService {
                     if next_char == '>' || next_char == ' ' || next_char == '\t' || next_char == '/' {
                         // Save any content before this <p> tag
                         if !in_p_tag && !current.trim().is_empty() {
-                            self.split_and_push_paragraph(&mut paragraphs, current.trim().to_string());
+                            raw_paragraphs.push(current.trim().to_string());
                             current.clear();
                         }
                         in_p_tag = true;
@@ -208,7 +208,7 @@ impl AiService {
                     if p_depth == 0 {
                         in_p_tag = false;
                         if !current.trim().is_empty() {
-                            self.split_and_push_paragraph(&mut paragraphs, current.trim().to_string());
+                            raw_paragraphs.push(current.trim().to_string());
                         }
                         current.clear();
                     }
@@ -223,47 +223,89 @@ impl AiService {
 
             // Add any remaining content
             if !current.trim().is_empty() {
-                self.split_and_push_paragraph(&mut paragraphs, current.trim().to_string());
+                raw_paragraphs.push(current.trim().to_string());
             }
         }
 
         // Second fallback: split by double newlines (plain text paragraphs)
-        if paragraphs.is_empty() {
+        if raw_paragraphs.is_empty() {
             for para in content.split("\n\n") {
                 let trimmed = para.trim();
                 if !trimmed.is_empty() {
-                    self.split_and_push_paragraph(&mut paragraphs, trimmed.to_string());
+                    raw_paragraphs.push(trimmed.to_string());
                 }
             }
         }
 
         // Final fallback: treat entire content as one paragraph
-        if paragraphs.is_empty() && !content.trim().is_empty() {
-            self.split_and_push_paragraph(&mut paragraphs, content.trim().to_string());
+        if raw_paragraphs.is_empty() && !content.trim().is_empty() {
+            raw_paragraphs.push(content.trim().to_string());
         }
 
-        paragraphs
+        // Now merge small paragraphs into batches up to MAX_CHARS_PER_SEGMENT
+        self.merge_paragraphs(raw_paragraphs)
     }
 
-    /// Split a paragraph if it exceeds MAX_CHARS_PER_SEGMENT
-    fn split_and_push_paragraph(&self, paragraphs: &mut Vec<String>, paragraph: String) {
-        if paragraph.len() <= MAX_CHARS_PER_SEGMENT {
-            paragraphs.push(paragraph);
-            return;
+    /// Merge small paragraphs into batches up to MAX_CHARS_PER_SEGMENT
+    fn merge_paragraphs(&self, paragraphs: Vec<String>) -> Vec<String> {
+        let mut merged = Vec::new();
+        let mut current_batch = String::new();
+        let mut current_length = 0;
+
+        for para in paragraphs {
+            let para_length = para.len();
+
+            // If this single paragraph exceeds the limit, split it
+            if para_length > MAX_CHARS_PER_SEGMENT {
+                // Flush current batch first
+                if !current_batch.is_empty() {
+                    merged.push(current_batch.clone());
+                    current_batch.clear();
+                    current_length = 0;
+                }
+                // Split the large paragraph
+                let chunks = self.split_large_paragraph(&para);
+                merged.extend(chunks);
+                continue;
+            }
+
+            // Check if adding this paragraph would exceed the limit
+            if current_length + para_length > MAX_CHARS_PER_SEGMENT && !current_batch.is_empty() {
+                // Flush current batch
+                merged.push(current_batch.clone());
+                current_batch.clear();
+                current_length = 0;
+            }
+
+            // Add paragraph to current batch
+            if !current_batch.is_empty() {
+                current_batch.push_str("\n\n");
+                current_length += 2;
+            }
+            current_batch.push_str(&para);
+            current_length += para_length;
         }
 
-        // Need to split the paragraph
-        // Try to split at sentence boundaries (。！？.!? etc)
+        // Add remaining batch
+        if !current_batch.is_empty() {
+            merged.push(current_batch);
+        }
+
+        merged
+    }
+
+    /// Split a large paragraph that exceeds MAX_CHARS_PER_SEGMENT
+    fn split_large_paragraph(&self, paragraph: &str) -> Vec<String> {
         let mut chunks = Vec::new();
-        let mut current_chunk = String::new();
+        let mut current = String::new();
         let mut chars = paragraph.chars().peekable();
 
         while chars.peek().is_some() {
             let c = chars.next().unwrap();
-            current_chunk.push(c);
+            current.push(c);
 
             // Check if we should split
-            if current_chunk.len() >= MAX_CHARS_PER_SEGMENT {
+            if current.len() >= MAX_CHARS_PER_SEGMENT {
                 // Look ahead to find a good breaking point
                 let mut temp = String::new();
                 let mut found_break = false;
@@ -273,9 +315,9 @@ impl AiService {
                     temp.push(next_c);
                     // Sentence endings in Chinese and English
                     if "。！？.!?".contains(next_c) {
-                        current_chunk.push_str(&temp);
-                        chunks.push(current_chunk.clone());
-                        current_chunk.clear();
+                        current.push_str(&temp);
+                        chunks.push(current.clone());
+                        current.clear();
                         temp.clear();
                         found_break = true;
                         break;
@@ -284,18 +326,18 @@ impl AiService {
 
                 if !found_break {
                     // No sentence ending found, force split at current position
-                    chunks.push(current_chunk.clone());
-                    current_chunk = temp;
+                    chunks.push(current.clone());
+                    current = temp;
                 }
             }
         }
 
         // Add remaining content
-        if !current_chunk.is_empty() {
-            chunks.push(current_chunk);
+        if !current.is_empty() {
+            chunks.push(current);
         }
 
-        paragraphs.extend(chunks);
+        chunks
     }
 
     /// Translate a single paragraph and return bilingual format

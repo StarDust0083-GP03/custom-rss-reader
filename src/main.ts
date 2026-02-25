@@ -1202,8 +1202,8 @@ async function translateItem(item: FeedItem) {
   const abortController = new AbortController();
   currentTranslationAbortController = abortController;
 
-  // 清空之前的翻译内容（从头开始）
-  item.translated_content = null;
+  // 使用局部变量存储翻译进度，只在完成时更新到 item
+  let localTranslationContent: string | null = null;
 
   try {
     showSuccess("Translating...");
@@ -1239,25 +1239,27 @@ async function translateItem(item: FeedItem) {
           showSuccess(`Translating... ${completed}/${total}`);
         }
 
-        // Append the chunk to the item (build progressively)
+        // Append the chunk to local storage (not to item yet)
         if (is_complete) {
-          // Final event - close wrapper and render complete content
-          if (item.translated_content && !item.translated_content.endsWith("</div>")) {
-            item.translated_content += "</div>";
+          // Final event - save to item and render
+          if (localTranslationContent && !localTranslationContent.endsWith("</div>")) {
+            localTranslationContent += "</div>";
           }
+          item.translated_content = localTranslationContent;
+          useTranslation = true;
           renderItemDetail(item);
           showSuccess("Translation complete");
           currentTranslationAbortController = null;
         } else if (html_chunk) {
-          // Append this paragraph chunk
-          if (!item.translated_content) {
-            item.translated_content = `<div class="bilingual-content">\n${html_chunk}`;
+          // Append this paragraph chunk to local storage
+          if (!localTranslationContent) {
+            localTranslationContent = `<div class="bilingual-content">\n${html_chunk}`;
           } else {
-            item.translated_content += `\n${html_chunk}`;
+            localTranslationContent += `\n${html_chunk}`;
           }
           useTranslation = true;
-          // Re-render to show new paragraph
-          renderItemDetail(item);
+          // Render with local content (item not updated yet)
+          renderItemDetail({ ...item, translated_content: localTranslationContent });
         }
       }
     );
