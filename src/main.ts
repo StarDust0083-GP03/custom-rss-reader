@@ -1461,6 +1461,17 @@ async function init() {
   await loadSubscriptions();
   await loadItems();
 
+  // 拦截所有链接点击，在系统浏览器中打开
+  document.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    const link = target.closest("a");
+    if (link && link.href && link.target !== "_self") {
+      e.preventDefault();
+      // 使用 shell.open 在系统浏览器中打开
+      invoke("open_url_in_webview", { url: link.href });
+    }
+  });
+
   // 事件监听
   document.getElementById("add-feed-btn")?.addEventListener("click", openAddFeedModal);
   document.getElementById("import-opml-btn")?.addEventListener("click", importOpml);

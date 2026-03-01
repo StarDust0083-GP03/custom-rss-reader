@@ -8,6 +8,9 @@ use thiserror::Error;
 // 按 token ≈ 0.75 个字符计算，设置保守的上限
 const MAX_CHARS_PER_SEGMENT: usize = 8000; // 约 6000 tokens，留有余量
 
+// 最小合并大小：小于此大小的段落会被合并
+const MIN_MERGE_SIZE: usize = 500;
+
 #[derive(Error, Debug)]
 pub enum AiError {
     #[error("HTTP error: {0}")]
@@ -247,10 +250,12 @@ impl AiService {
     }
 
     /// Merge small paragraphs into batches up to MAX_CHARS_PER_SEGMENT
+    /// Only merges paragraphs smaller than MIN_MERGE_SIZE
     fn merge_paragraphs(&self, paragraphs: Vec<String>) -> Vec<String> {
         let mut merged = Vec::new();
         let mut current_batch = String::new();
         let mut current_length = 0;
+        let mut para_count = 0;
 
         for para in paragraphs {
             let para_length = para.len();
@@ -262,6 +267,7 @@ impl AiService {
                     merged.push(current_batch.clone());
                     current_batch.clear();
                     current_length = 0;
+                    para_count = 0;
                 }
                 // Split the large paragraph
                 let chunks = self.split_large_paragraph(&para);
@@ -269,12 +275,26 @@ impl AiService {
                 continue;
             }
 
-            // Check if adding this paragraph would exceed the limit
-            if current_length + para_length > MAX_CHARS_PER_SEGMENT && !current_batch.is_empty() {
-                // Flush current batch
+            // Strategy: only merge small paragraphs together
+            // If current paragraph is large or current batch is large, flush
+            let should_flush = if para_length >= MIN_MERGE_SIZE {
+                // Large paragraph, flush current batch first
+                true
+            } else if current_length + para_length > MAX_CHARS_PER_SEGMENT {
+                // Would exceed limit
+                true
+            } else if para_count >= 5 {
+                // Don't merge too many paragraphs (max 5 per batch)
+                true
+            } else {
+                false
+            };
+
+            if should_flush && !current_batch.is_empty() {
                 merged.push(current_batch.clone());
                 current_batch.clear();
                 current_length = 0;
+                para_count = 0;
             }
 
             // Add paragraph to current batch
@@ -284,6 +304,7 @@ impl AiService {
             }
             current_batch.push_str(&para);
             current_length += para_length;
+            para_count += 1;
         }
 
         // Add remaining batch
@@ -341,12 +362,18 @@ impl AiService {
     }
 
     /// Translate a single paragraph and return bilingual format
+    /// If the paragraph contains multiple sub-paragraphs (separated by \n\n), split them for bilingual display
     pub async fn translate_single_paragraph_bilingual(
         &self,
         paragraph: &str,
         source_lang: &str,
         target_lang: &str,
     ) -> Result<String, AiError> {
+        // Check if this is a merged paragraph (contains \n\n)
+        if paragraph.contains("\n\n") {
+            return self.translate_merged_paragraph_bilingual(paragraph, source_lang, target_lang).await;
+        }
+
         let system_prompt = format!(
             "You are a professional translator. Translate the following HTML content from {} to {}. \
             Preserve ALL HTML structure, tags, and formatting exactly. Only translate the text content, \
@@ -375,6 +402,69 @@ impl AiService {
 </div>"#,
             paragraph, translated
         ))
+    }
+
+    /// Translate a merged paragraph (contains multiple sub-paragraphs) and return bilingual format
+    /// Each sub-paragraph is translated and displayed separately
+    async fn translate_merged_paragraph_bilingual(
+        &self,
+        merged_paragraph: &str,
+        source_lang: &str,
+        target_lang: &str,
+    ) -> Result<String, AiError> {
+        // Split by \n\n to get individual paragraphs
+        let sub_paragraphs: Vec<&str> = merged_paragraph.split("\n\n").collect();
+
+        let mut results = Vec::new();
+
+        for sub_para in sub_paragraphs {
+            let sub_para = sub_para.trim();
+            if sub_para.is_empty() {
+                continue;
+            }
+
+            // Translate each sub-paragraph
+            let system_prompt = format!(
+                "You are a professional translator. Translate the following HTML content from {} to {}. \
+                Preserve ALL HTML structure, tags, and formatting exactly. Only translate the text content, \
+                not the HTML tags. Return ONLY the translated HTML, no explanations.",
+                source_lang, target_lang
+            );
+
+            let messages = vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt,
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: sub_para.to_string(),
+                },
+            ];
+
+            match self.chat_completion(messages).await {
+                Ok(translated) => {
+                    results.push(format!(
+                        r#"<div class="translation-paragraph">
+<div class="paragraph-original">{}</div>
+<div class="paragraph-translated">{}</div>
+</div>"#,
+                        sub_para, translated
+                    ));
+                }
+                Err(e) => {
+                    // On error, keep original
+                    results.push(format!(
+                        r#"<div class="translation-paragraph">
+<div class="paragraph-original">{}</div>
+</div>"#,
+                        sub_para
+                    ));
+                }
+            }
+        }
+
+        Ok(results.join("\n"))
     }
 
     /// Translate a single segment and return bilingual format (legacy, kept for compatibility)
