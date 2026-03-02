@@ -101,10 +101,9 @@ pub fn export_opml(subscriptions: &[Subscription]) -> Result<String, OpmlExportE
 
     for sub in subscriptions {
         xml.push_str("<outline");
-        xml.push_str(&format!(" type=\"rss\""));
+        xml.push_str(" type=\"rss\"");
 
         if let Some(title) = &sub.title {
-            xml.push_str(&format!(" text=\"{}\"", escape_xml(title)));
             xml.push_str(&format!(" title=\"{}\"", escape_xml(title)));
         }
 
