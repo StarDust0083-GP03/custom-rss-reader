@@ -2,6 +2,7 @@ use crate::ai::{AiService, AiConfig, ClassificationRequest};
 use tauri::{AppHandle, Manager, Emitter};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use dirs;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranslationProgress {
@@ -149,14 +150,16 @@ pub async fn set_ai_config(
                   - 404 error usually means the model doesn't exist or base URL is incorrect", e)
     })?;
 
-    // Save to persistent storage
-    let resource_path = app_handle.path().app_config_dir()
-        .map_err(|e| format!("Failed to get config dir: {}", e))?;
+    // Save to persistent storage using home directory for better compatibility
+    let home_dir = dirs::home_dir()
+        .ok_or_else(|| "Failed to get home directory".to_string())?;
 
-    std::fs::create_dir_all(&resource_path)
+    let app_dir = home_dir.join(".rss-reader");
+
+    std::fs::create_dir_all(&app_dir)
         .map_err(|e| format!("Failed to create config dir: {}", e))?;
 
-    let config_file = resource_path.join("ai_config.json");
+    let config_file = app_dir.join("ai_config.json");
     let config_json = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
 
@@ -189,6 +192,7 @@ pub async fn translate_item_bilingual_streaming(
             if cache_age.num_days() < TRANSLATION_CACHE_DAYS {
                 // Emit cache hit event
                 let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+                    "item_id": item_id,
                     "total": 1,
                     "completed": 1,
                     "html_chunk": translated_content,
@@ -234,6 +238,7 @@ pub async fn translate_item_bilingual_streaming(
 
                 // Emit progress event for this paragraph
                 let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+                    "item_id": item_id,
                     "total": total,
                     "completed": completed,
                     "html_chunk": translated_para,
@@ -249,6 +254,7 @@ pub async fn translate_item_bilingual_streaming(
                 all_chunks.push(fallback.clone());
 
                 let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+                    "item_id": item_id,
                     "total": total,
                     "completed": completed,
                     "html_chunk": fallback,
@@ -268,6 +274,7 @@ pub async fn translate_item_bilingual_streaming(
 
     // Emit final completion event
     let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+        "item_id": item_id,
         "total": total,
         "completed": total,
         "html_chunk": "",
@@ -296,14 +303,16 @@ async fn get_ai_config(app_handle: &AppHandle) -> Result<AiConfig, String> {
         return Ok(config.inner().clone());
     }
 
-    // Try to load from persistent storage
-    let resource_path = app_handle.path().app_config_dir()
-        .map_err(|e| format!("Failed to get config dir: {}", e))?;
+    // Try to load from persistent storage using home directory for better compatibility
+    let home_dir = dirs::home_dir()
+        .ok_or_else(|| "Failed to get home directory".to_string())?;
 
-    std::fs::create_dir_all(&resource_path)
+    let app_dir = home_dir.join(".rss-reader");
+
+    std::fs::create_dir_all(&app_dir)
         .map_err(|e| format!("Failed to create config dir: {}", e))?;
 
-    let config_file = resource_path.join("ai_config.json");
+    let config_file = app_dir.join("ai_config.json");
 
     if config_file.exists() {
         let content = std::fs::read_to_string(&config_file)

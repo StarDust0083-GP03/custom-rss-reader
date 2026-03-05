@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, ask } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 
 interface Subscription {
@@ -52,8 +52,12 @@ let unreadFilterEnabled: boolean = false; // Whether unread filter is additional
 let useWebView = false;
 // 按订阅源 ID 记住 webview 状态
 let webviewPerSubscription: Map<number, boolean> = new Map();
-// AI 设置
-let useTranslation = false; // 是否显示翻译内容
+// AI 设置 - 翻译状态按文章ID管理
+let translationStateByItemId: Map<number, {
+  useTranslation: boolean;
+  inProgressContent: string | null;
+  abortController: AbortController | null;
+}> = new Map();
 let currentTranslationAbortController: AbortController | null = null; // 用于取消翻译
 
 // ==================== 类型定义 ====================
@@ -591,12 +595,15 @@ function renderItemDetail(item: FeedItem) {
   // 获取订阅源名称
   const subscription = subscriptions.find(s => s.id === item.subscription_id);
   const subName = subscription?.title || subscription?.url || "Unknown";
+  // 从该文章的订阅源获取 webview 状态
+  const useWebViewForItem = webviewPerSubscription.get(item.subscription_id) ?? false;
 
   // 更新操作按钮状态
   const markReadBtn = document.getElementById("mark-read-btn");
   const favoriteBtn = document.getElementById("favorite-btn");
   const readLaterBtn = document.getElementById("read-later-btn");
   const openLinkBtn = document.getElementById("open-link-btn") as HTMLAnchorElement;
+  const translateBtn = document.getElementById("translate-btn");
 
   if (markReadBtn) {
     markReadBtn.textContent = item.is_read ? "Unread" : "Read";
@@ -612,8 +619,32 @@ function renderItemDetail(item: FeedItem) {
     openLinkBtn.href = item.link;
   }
 
+  // 更新翻译按钮状态
+  if (translateBtn) {
+    const translationState = translationStateByItemId.get(item.id);
+    const isTranslating = translationState?.abortController !== null;
+    const hasCache = item.translated_content !== null;
+
+    // 移除所有状态类
+    translateBtn.classList.remove("translating", "has-cache");
+
+    if (isTranslating) {
+      // 正在翻译 - 高亮显示
+      translateBtn.classList.add("translating");
+      translateBtn.textContent = "Translating...";
+    } else if (hasCache) {
+      // 有缓存 - 黄色显示
+      translateBtn.classList.add("has-cache");
+      const useTranslationForItem = translationState?.useTranslation ?? false;
+      translateBtn.textContent = useTranslationForItem ? "Show Original" : "Translate";
+    } else {
+      // 无缓存
+      translateBtn.textContent = "Translate";
+    }
+  }
+
   // 显示内容
-  if (useWebView && item.link) {
+  if (useWebViewForItem && item.link) {
     try {
       // 创建 webview 容器
       const { iframe, loading } = createWebviewContainer(detail);
@@ -657,6 +688,9 @@ function renderItemDetail(item: FeedItem) {
 
     // 显示文本内容（支持翻译）
     const originalContent = item.content || item.description || "No content available";
+    // 从该文章的翻译状态中获取是否使用翻译
+    const translationState = translationStateByItemId.get(item.id);
+    const useTranslationForItem = translationState?.useTranslation ?? false;
 
     detail.innerHTML = `
       <div class="detail-source">${subName}${item.category ? ` • ${item.category}` : ""}</div>
@@ -666,10 +700,10 @@ function renderItemDetail(item: FeedItem) {
         ${item.published_at ? `<span>${formatDate(item.published_at)}</span>` : ""}
         ${item.author ? `<span>${item.author}</span>` : ""}
         ${item.link ? `<a href="${item.link}" target="_blank">Open in browser →</a>` : ""}
-        ${useTranslation ? `<span class="translation-badge">Bilingual View</span>` : ""}
+        ${useTranslationForItem ? `<span class="translation-badge">Bilingual View</span>` : ""}
       </div>
       <div class="detail-body">
-        ${useTranslation && item.translated_content ? item.translated_content : originalContent}
+        ${useTranslationForItem && item.translated_content ? item.translated_content : originalContent}
       </div>
     `;
   }
@@ -978,7 +1012,13 @@ async function addSubscription(data: {
 
 // 删除订阅
 async function deleteSubscription(id: number) {
-  if (!confirm("Are you sure you want to delete this subscription?")) return;
+  // 使用 Tauri 的原生对话框
+  const confirmed = await ask("Are you sure you want to delete this subscription?", {
+    title: "Confirm Delete",
+    kind: "warning"
+  });
+
+  if (!confirmed) return;
 
   setLoadingWithStatus("", "Deleting subscription...");
   try {
@@ -1181,9 +1221,13 @@ function closeAiSettingsModal() {
 
 // AI Functions
 async function translateItem(item: FeedItem) {
+  // 获取或创建该文章的翻译状态
+  let translationState = translationStateByItemId.get(item.id);
+
   // 如果正在翻译同一篇文章，取消翻译
-  if (currentTranslationAbortController) {
-    currentTranslationAbortController.abort();
+  if (translationState?.abortController) {
+    translationState.abortController.abort();
+    translationStateByItemId.delete(item.id);
     currentTranslationAbortController = null;
     showSuccess("Translation cancelled");
     return;
@@ -1192,74 +1236,100 @@ async function translateItem(item: FeedItem) {
   // 检查是否已经有翻译内容（缓存）
   if (item.translated_content) {
     // 直接使用已有的翻译
-    useTranslation = true;
+    translationState = {
+      useTranslation: true,
+      inProgressContent: null,
+      abortController: null
+    };
+    translationStateByItemId.set(item.id, translationState);
     renderItemDetail(item);
     showSuccess("Using cached translation");
     return;
   }
 
-  // 创建新的 AbortController
+  // 创建新的 AbortController 和翻译状态
   const abortController = new AbortController();
   currentTranslationAbortController = abortController;
+  translationState = {
+    useTranslation: true,
+    inProgressContent: null,
+    abortController
+  };
+  translationStateByItemId.set(item.id, translationState);
 
-  // 使用局部变量存储翻译进度，只在完成时更新到 item
-  let localTranslationContent: string | null = null;
+  // 立即更新按钮状态
+  if (selectedItem?.id === item.id) {
+    renderItemDetail(item);
+  }
 
   try {
     showSuccess("Translating...");
 
     // Listen for translation progress events
-    const unlistenProgress = await listen<{ total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean }>(
+    const unlistenProgress = await listen<{ item_id: number; total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean }>(
       "translation-progress",
       (event) => {
+        const { item_id, completed, total, html_chunk, is_complete, cached } = event.payload;
+
+        // 确保事件属于正确的文章
+        if (item_id !== item.id) {
+          return;
+        }
+
         // 检查是否已取消
         if (abortController.signal.aborted) {
           return;
         }
 
-        const { completed, total, html_chunk, is_complete, cached } = event.payload;
-
-        // Check if this is still the selected item
-        if (selectedItem?.id !== item.id) {
-          return;
-        }
+        // 获取最新的翻译状态
+        const currentState = translationStateByItemId.get(item.id);
+        if (!currentState) return;
 
         // 如果是缓存命中，直接设置完整内容
         if (cached && html_chunk) {
           item.translated_content = html_chunk;
-          useTranslation = true;
-          renderItemDetail(item);
-          showSuccess("Using cached translation");
+          currentState.inProgressContent = null;
+          currentState.abortController = null;
+          // 只有当前选中的文章才渲染和显示提示
+          if (selectedItem?.id === item.id) {
+            renderItemDetail(item);
+            showSuccess("Using cached translation");
+          }
           currentTranslationAbortController = null;
           return;
         }
 
-        // Update progress indicator
-        if (!cached) {
+        // Update progress indicator - 只在当前选中时显示
+        if (!cached && selectedItem?.id === item.id) {
           showSuccess(`Translating... ${completed}/${total}`);
         }
 
-        // Append the chunk to local storage (not to item yet)
+        // Append the chunk to state storage (not to item yet)
         if (is_complete) {
-          // Final event - save to item and render
-          if (localTranslationContent && !localTranslationContent.endsWith("</div>")) {
-            localTranslationContent += "</div>";
+          // Final event - save to item and clean up state
+          if (currentState.inProgressContent && !currentState.inProgressContent.endsWith("</div>")) {
+            currentState.inProgressContent += "</div>";
           }
-          item.translated_content = localTranslationContent;
-          useTranslation = true;
-          renderItemDetail(item);
-          showSuccess("Translation complete");
+          item.translated_content = currentState.inProgressContent;
+          currentState.inProgressContent = null;
+          currentState.abortController = null;
+          // 只有当前选中的文章才渲染
+          if (selectedItem?.id === item.id) {
+            renderItemDetail(item);
+            showSuccess("Translation complete");
+          }
           currentTranslationAbortController = null;
         } else if (html_chunk) {
-          // Append this paragraph chunk to local storage
-          if (!localTranslationContent) {
-            localTranslationContent = `<div class="bilingual-content">\n${html_chunk}`;
+          // Append this paragraph chunk to state storage
+          if (!currentState.inProgressContent) {
+            currentState.inProgressContent = `<div class="bilingual-content">\n${html_chunk}`;
           } else {
-            localTranslationContent += `\n${html_chunk}`;
+            currentState.inProgressContent += `\n${html_chunk}`;
           }
-          useTranslation = true;
-          // Render with local content (item not updated yet)
-          renderItemDetail({ ...item, translated_content: localTranslationContent });
+          // 只有当前选中的文章才渲染
+          if (selectedItem?.id === item.id) {
+            renderItemDetail({ ...item, translated_content: currentState.inProgressContent });
+          }
         }
       }
     );
@@ -1276,6 +1346,8 @@ async function translateItem(item: FeedItem) {
     } else {
       showError(`Translation failed: ${error}`);
     }
+    // 清理状态
+    translationStateByItemId.delete(item.id);
     currentTranslationAbortController = null;
   }
 }
@@ -1523,6 +1595,11 @@ async function init() {
   document.querySelector(".cancel-btn")?.addEventListener("click", closeAddFeedModal);
   document.querySelector(".close-modal")?.addEventListener("click", closeAddFeedModal);
 
+  // AI settings modal close buttons
+  const aiModal = document.getElementById("ai-settings-modal");
+  aiModal?.querySelector(".close-modal")?.addEventListener("click", closeAiSettingsModal);
+  aiModal?.querySelector(".cancel-btn")?.addEventListener("click", closeAiSettingsModal);
+
   // 详情操作按钮
   document.getElementById("toggle-webview-btn")?.addEventListener("click", async () => {
     if (selectedItem) {
@@ -1581,16 +1658,34 @@ async function init() {
 
   // AI 功能按钮
   document.getElementById("translate-btn")?.addEventListener("click", async () => {
-    if (!selectedItem || !selectedItem.link) return;
-    
-    if (useWebView) {
+    if (!selectedItem) return;
+
+    // 获取当前文章的翻译状态
+    const translationState = translationStateByItemId.get(selectedItem.id);
+
+    // 如果有缓存翻译，切换显示模式
+    if (selectedItem.translated_content) {
+      translationState!.useTranslation = !translationState!.useTranslation;
+      renderItemDetail(selectedItem);
+      showSuccess(translationState!.useTranslation ? "Showing translation" : "Showing original");
+      return;
+    }
+
+    // 如果正在翻译，不重复开始
+    if (translationState?.abortController) {
+      showSuccess("Translation in progress...");
+      return;
+    }
+
+    // 开始新的翻译
+    if (useWebView && selectedItem.link) {
       // 网页模式翻译
       showSuccess("Translating webpage...");
       try {
-        const bilingual = await invoke<string>("translate_website_content", { 
-          url: selectedItem.link 
+        const bilingual = await invoke<string>("translate_website_content", {
+          url: selectedItem.link
         });
-        
+
         // 显示翻译内容
         const detail = document.getElementById("detail-content");
         if (detail) {
@@ -1598,7 +1693,7 @@ async function init() {
           if (existingTranslation) {
             existingTranslation.remove();
           }
-          
+
           const translationDiv = document.createElement('div');
           translationDiv.className = 'webpage-translation';
           translationDiv.innerHTML = `
@@ -1608,11 +1703,11 @@ async function init() {
             </div>
             <div class="translation-content">${bilingual}</div>
           `;
-          
+
           translationDiv.querySelector('.hide-translation-btn')?.addEventListener('click', () => {
             translationDiv.remove();
           });
-          
+
           detail.insertBefore(translationDiv, detail.firstChild);
         }
         showSuccess("Translation complete");

@@ -3,13 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
 
-// DeepSeek 上下文限制：每个段落最大字符数
+// DeepSeek 上下文限制：每个批次最大字符数
 // DeepSeek-V3: 64K tokens, DeepSeek-V3-32K: 32K tokens
-// 按 token ≈ 0.75 个字符计算，设置保守的上限
-const MAX_CHARS_PER_SEGMENT: usize = 8000; // 约 6000 tokens，留有余量
-
-// 最小合并大小：小于此大小的段落会被合并
-const MIN_MERGE_SIZE: usize = 500;
+// 按 token ≈ 0.75 个字符计算
+const MAX_CHARS_PER_SEGMENT: usize = 6000; // 约 4500 tokens，留有余量给系统提示和响应
 
 #[derive(Error, Debug)]
 pub enum AiError {
@@ -275,16 +272,10 @@ impl AiService {
                 continue;
             }
 
-            // Strategy: only merge small paragraphs together
-            // If current paragraph is large or current batch is large, flush
-            let should_flush = if para_length >= MIN_MERGE_SIZE {
-                // Large paragraph, flush current batch first
-                true
-            } else if current_length + para_length > MAX_CHARS_PER_SEGMENT {
-                // Would exceed limit
-                true
-            } else if para_count >= 5 {
-                // Don't merge too many paragraphs (max 5 per batch)
+            // 更激进的合并策略：只有超过字符限制时才刷新
+            // 不限制段落数量，让更多段落合并在一起
+            let should_flush = if current_length + para_length > MAX_CHARS_PER_SEGMENT {
+                // Would exceed limit, must flush
                 true
             } else {
                 false
@@ -413,55 +404,67 @@ impl AiService {
         target_lang: &str,
     ) -> Result<String, AiError> {
         // Split by \n\n to get individual paragraphs
-        let sub_paragraphs: Vec<&str> = merged_paragraph.split("\n\n").collect();
+        let sub_paragraphs: Vec<&str> = merged_paragraph.split("\n\n")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
 
+        if sub_paragraphs.is_empty() {
+            return Ok(String::new());
+        }
+
+        // 构造系统提示：要求 LLM 保持段落结构
+        let system_prompt = format!(
+            "You are a professional translator. Translate the following HTML content from {} to {}. \
+            The content contains multiple paragraphs separated by double newlines (\\n\\n). \
+            \n\n\
+            IMPORTANT: \
+            1. Preserve ALL HTML structure, tags, and formatting exactly. \
+            2. Only translate the text content, not the HTML tags. \
+            3. Keep the exact same paragraph structure - use \\n\\n between translated paragraphs. \
+            4. Return ONLY the translated HTML with \\n\\n separators, no explanations.",
+            source_lang, target_lang
+        );
+
+        let user_content = sub_paragraphs.join("\n\n");
+
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: user_content,
+            },
+        ];
+
+        // 一次性翻译所有段落
+        let translated = self.chat_completion(messages).await?;
+
+        // 按段落拆分翻译结果
+        let translated_paragraphs: Vec<&str> = translated.split("\n\n")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // 组合原文和译文，每个段落分别对照
         let mut results = Vec::new();
+        for (i, original) in sub_paragraphs.iter().enumerate() {
+            let translated_para = if i < translated_paragraphs.len() {
+                translated_paragraphs[i]
+            } else {
+                // 如果翻译结果段落不够，使用原文
+                original
+            };
 
-        for sub_para in sub_paragraphs {
-            let sub_para = sub_para.trim();
-            if sub_para.is_empty() {
-                continue;
-            }
-
-            // Translate each sub-paragraph
-            let system_prompt = format!(
-                "You are a professional translator. Translate the following HTML content from {} to {}. \
-                Preserve ALL HTML structure, tags, and formatting exactly. Only translate the text content, \
-                not the HTML tags. Return ONLY the translated HTML, no explanations.",
-                source_lang, target_lang
-            );
-
-            let messages = vec![
-                ChatMessage {
-                    role: "system".to_string(),
-                    content: system_prompt,
-                },
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: sub_para.to_string(),
-                },
-            ];
-
-            match self.chat_completion(messages).await {
-                Ok(translated) => {
-                    results.push(format!(
-                        r#"<div class="translation-paragraph">
+            results.push(format!(
+                r#"<div class="translation-paragraph">
 <div class="paragraph-original">{}</div>
 <div class="paragraph-translated">{}</div>
 </div>"#,
-                        sub_para, translated
-                    ));
-                }
-                Err(e) => {
-                    // On error, keep original
-                    results.push(format!(
-                        r#"<div class="translation-paragraph">
-<div class="paragraph-original">{}</div>
-</div>"#,
-                        sub_para
-                    ));
-                }
-            }
+                original, translated_para
+            ));
         }
 
         Ok(results.join("\n"))
