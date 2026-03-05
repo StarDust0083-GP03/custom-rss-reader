@@ -58,7 +58,6 @@ let translationStateByItemId: Map<number, {
   inProgressContent: string | null;
   abortController: AbortController | null;
 }> = new Map();
-let currentTranslationAbortController: AbortController | null = null; // 用于取消翻译
 
 // ==================== 类型定义 ====================
 
@@ -622,23 +621,23 @@ function renderItemDetail(item: FeedItem) {
   // 更新翻译按钮状态
   if (translateBtn) {
     const translationState = translationStateByItemId.get(item.id);
-    const isTranslating = translationState?.abortController !== null;
+    const isTranslating = translationState?.abortController != null;
     const hasCache = item.translated_content !== null;
 
     // 移除所有状态类
     translateBtn.classList.remove("translating", "has-cache");
 
     if (isTranslating) {
-      // 正在翻译 - 高亮显示
+      // 正在翻译 - 高亮显示，点击可取消
       translateBtn.classList.add("translating");
-      translateBtn.textContent = "Translating...";
+      translateBtn.textContent = "Cancel";
     } else if (hasCache) {
-      // 有缓存 - 黄色显示
+      // 有缓存 - 黄色显示，点击切换
       translateBtn.classList.add("has-cache");
       const useTranslationForItem = translationState?.useTranslation ?? false;
       translateBtn.textContent = useTranslationForItem ? "Show Original" : "Translate";
     } else {
-      // 无缓存
+      // 无缓存 - 暗色，点击开始翻译
       translateBtn.textContent = "Translate";
     }
   }
@@ -1228,7 +1227,6 @@ async function translateItem(item: FeedItem) {
   if (translationState?.abortController) {
     translationState.abortController.abort();
     translationStateByItemId.delete(item.id);
-    currentTranslationAbortController = null;
     showSuccess("Translation cancelled");
     return;
   }
@@ -1249,7 +1247,6 @@ async function translateItem(item: FeedItem) {
 
   // 创建新的 AbortController 和翻译状态
   const abortController = new AbortController();
-  currentTranslationAbortController = abortController;
   translationState = {
     useTranslation: true,
     inProgressContent: null,
@@ -1295,7 +1292,6 @@ async function translateItem(item: FeedItem) {
             renderItemDetail(item);
             showSuccess("Using cached translation");
           }
-          currentTranslationAbortController = null;
           return;
         }
 
@@ -1318,7 +1314,6 @@ async function translateItem(item: FeedItem) {
             renderItemDetail(item);
             showSuccess("Translation complete");
           }
-          currentTranslationAbortController = null;
         } else if (html_chunk) {
           // Append this paragraph chunk to state storage
           if (!currentState.inProgressContent) {
@@ -1348,7 +1343,6 @@ async function translateItem(item: FeedItem) {
     }
     // 清理状态
     translationStateByItemId.delete(item.id);
-    currentTranslationAbortController = null;
   }
 }
 
@@ -1661,63 +1655,42 @@ async function init() {
     if (!selectedItem) return;
 
     // 获取当前文章的翻译状态
-    const translationState = translationStateByItemId.get(selectedItem.id);
+    let translationState = translationStateByItemId.get(selectedItem.id);
+    const isTranslating = translationState?.abortController != null;
+    const hasCache = selectedItem.translated_content !== null;
 
-    // 如果有缓存翻译，切换显示模式
-    if (selectedItem.translated_content) {
-      translationState!.useTranslation = !translationState!.useTranslation;
+    // 1. 如果正在翻译，点击取消
+    if (isTranslating) {
+      translationState!.abortController!.abort();
+      translationStateByItemId.delete(selectedItem.id);
       renderItemDetail(selectedItem);
-      showSuccess(translationState!.useTranslation ? "Showing translation" : "Showing original");
+      showSuccess("Translation cancelled");
       return;
     }
 
-    // 如果正在翻译，不重复开始
-    if (translationState?.abortController) {
-      showSuccess("Translation in progress...");
-      return;
-    }
-
-    // 开始新的翻译
-    if (useWebView && selectedItem.link) {
-      // 网页模式翻译
-      showSuccess("Translating webpage...");
-      try {
-        const bilingual = await invoke<string>("translate_website_content", {
-          url: selectedItem.link
-        });
-
-        // 显示翻译内容
-        const detail = document.getElementById("detail-content");
-        if (detail) {
-          const existingTranslation = detail.querySelector('.webpage-translation');
-          if (existingTranslation) {
-            existingTranslation.remove();
-          }
-
-          const translationDiv = document.createElement('div');
-          translationDiv.className = 'webpage-translation';
-          translationDiv.innerHTML = `
-            <div class="translation-header">
-              <span class="translation-title">Translation</span>
-              <button class="hide-translation-btn">×</button>
-            </div>
-            <div class="translation-content">${bilingual}</div>
-          `;
-
-          translationDiv.querySelector('.hide-translation-btn')?.addEventListener('click', () => {
-            translationDiv.remove();
-          });
-
-          detail.insertBefore(translationDiv, detail.firstChild);
-        }
-        showSuccess("Translation complete");
-      } catch (error) {
-        showError(`Translation failed: ${error}`);
+    // 2. 如果有缓存，切换显示模式
+    if (hasCache) {
+      if (!translationState) {
+        translationState = { useTranslation: true, inProgressContent: null, abortController: null };
+        translationStateByItemId.set(selectedItem.id, translationState);
+      } else {
+        translationState.useTranslation = !translationState.useTranslation;
       }
-    } else {
-      // 文本模式翻译
-      await translateItem(selectedItem);
+      renderItemDetail(selectedItem);
+      showSuccess(translationState.useTranslation ? "Showing translation" : "Showing original");
+      return;
     }
+
+    // 3. 开始新的翻译
+    // 标记为未读
+    if (selectedItem.is_read) {
+      selectedItem.is_read = false;
+      await invoke("mark_item_read", { itemId: selectedItem.id, read: false });
+      renderItems();
+    }
+
+    // 开始翻译
+    await translateItem(selectedItem);
   });
 
   document.getElementById("classify-btn")?.addEventListener("click", async () => {
