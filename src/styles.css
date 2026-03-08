@@ -238,6 +238,17 @@ body {
     color: white;
 }
 
+.badge.translating-badge {
+    background: var(--accent-color);
+    color: white;
+    animation: pulse 1.5s infinite;
+}
+
+.badge.translated-badge {
+    background: var(--warning-color);
+    color: #1a1a1a;
+}
+
 .icon-btn {
     width: 22px;
     height: 22px;

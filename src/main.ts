@@ -517,6 +517,16 @@ function renderItems(preserveScroll = false) {
       }
     }
 
+    // 检查翻译状态
+    const itemTranslationState = translationStateByItemId.get(item.id);
+    const isTranslating = !!(itemTranslationState && itemTranslationState.abortController);
+    const hasTranslation = item.translated_content !== null;
+    const translationBadge = isTranslating 
+      ? '<span class="badge translating-badge">Translating...</span>' 
+      : hasTranslation 
+        ? '<span class="badge translated-badge">Translated</span>' 
+        : '';
+
     div.innerHTML = `
       <div class="item-header">
         <h3 class="item-title">${item.title}</h3>
@@ -527,6 +537,7 @@ function renderItems(preserveScroll = false) {
       <div class="item-meta">
         ${item.is_favorite ? '<span class="badge">★ Favorite</span>' : ""}
         ${item.is_read_later ? '<span class="badge">Later</span>' : ""}
+        ${translationBadge}
         ${item.author ? `<span class="item-author">${item.author}</span>` : ""}
       </div>
     `;
@@ -1656,7 +1667,7 @@ async function init() {
 
     // 获取当前文章的翻译状态
     let translationState = translationStateByItemId.get(selectedItem.id);
-    const isTranslating = translationState?.abortController != null;
+    const isTranslating = !!(translationState && translationState.abortController);
     const hasCache = selectedItem.translated_content !== null;
 
     // 1. 如果正在翻译，点击取消
@@ -1685,7 +1696,7 @@ async function init() {
     // 标记为未读
     if (selectedItem.is_read) {
       selectedItem.is_read = false;
-      await invoke("mark_item_read", { itemId: selectedItem.id, read: false });
+      await invoke("mark_item_read", { itemId: selectedItem.id, isRead: false });
       renderItems();
     }
 
