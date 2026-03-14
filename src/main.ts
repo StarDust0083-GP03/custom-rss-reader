@@ -654,7 +654,42 @@ function renderItemDetail(item: FeedItem) {
   }
 
   // 显示内容
-  if (useWebViewForItem && item.link) {
+  // 从该文章的翻译状态中获取是否使用翻译
+  const translationState = translationStateByItemId.get(item.id);
+  const useTranslationForItem = translationState?.useTranslation ?? false;
+
+  // 如果启用了翻译且有翻译内容，则显示翻译内容（无论 webview 还是 text 模式）
+  if (useTranslationForItem && item.translated_content) {
+    detail.classList.remove('webview-mode');
+    // 解析标签
+    let tagsHtml = "";
+    if (item.tags) {
+      try {
+        const tags = JSON.parse(item.tags);
+        if (Array.isArray(tags) && tags.length > 0) {
+          tagsHtml = `<div class="detail-tags">${tags.map((tag: string) => `<span class="tag">#${tag}</span>`).join(" ")}</div>`;
+        }
+      } catch (e) {
+        // Ignore parse errors
+      }
+    }
+
+    const originalContent = item.content || item.description || "No content available";
+    detail.innerHTML = `
+      <div class="detail-source">${subName}${item.category ? ` • ${item.category}` : ""}</div>
+      <h1>${item.title}</h1>
+      ${tagsHtml}
+      <div class="detail-meta">
+        ${item.published_at ? `<span>${formatDate(item.published_at)}</span>` : ""}
+        ${item.author ? `<span>${item.author}</span>` : ""}
+        ${item.link ? `<a href="${item.link}" target="_blank">Open in browser →</a>` : ""}
+        <span class="translation-badge">Bilingual View</span>
+      </div>
+      <div class="detail-body">
+        ${item.translated_content}
+      </div>
+    `;
+  } else if (useWebViewForItem && item.link) {
     try {
       // 创建 webview 容器
       const { iframe, loading } = createWebviewContainer(detail);
@@ -698,9 +733,6 @@ function renderItemDetail(item: FeedItem) {
 
     // 显示文本内容（支持翻译）
     const originalContent = item.content || item.description || "No content available";
-    // 从该文章的翻译状态中获取是否使用翻译
-    const translationState = translationStateByItemId.get(item.id);
-    const useTranslationForItem = translationState?.useTranslation ?? false;
 
     detail.innerHTML = `
       <div class="detail-source">${subName}${item.category ? ` • ${item.category}` : ""}</div>
@@ -1273,11 +1305,27 @@ async function translateItem(item: FeedItem) {
   try {
     showSuccess("Translating...");
 
+    // Track translation errors
+    let translationHasError = false;
+    let errorMessages: string[] = [];
+
+    // Listen for translation error events
+    const unlistenError = await listen<{ item_id: number; error: string; paragraph_index: number }>(
+      "translation-error",
+      (event) => {
+        if (event.payload.item_id !== item.id) return;
+        translationHasError = true;
+        errorMessages.push(event.payload.error);
+        // Show error in status bar
+        showError(`Translation error: ${event.payload.error}`);
+      }
+    );
+
     // Listen for translation progress events
-    const unlistenProgress = await listen<{ item_id: number; total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean }>(
+    const unlistenProgress = await listen<{ item_id: number; total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean; has_error?: boolean }>(
       "translation-progress",
       (event) => {
-        const { item_id, completed, total, html_chunk, is_complete, cached } = event.payload;
+        const { item_id, completed, total, html_chunk, is_complete, cached, has_error } = event.payload;
 
         // 确保事件属于正确的文章
         if (item_id !== item.id) {
@@ -1307,7 +1355,7 @@ async function translateItem(item: FeedItem) {
         }
 
         // Update progress indicator - 只在当前选中时显示
-        if (!cached && selectedItem?.id === item.id) {
+        if (!cached && selectedItem?.id === item.id && !translationHasError) {
           showSuccess(`Translating... ${completed}/${total}`);
         }
 
@@ -1323,7 +1371,12 @@ async function translateItem(item: FeedItem) {
           // 只有当前选中的文章才渲染
           if (selectedItem?.id === item.id) {
             renderItemDetail(item);
-            showSuccess("Translation complete");
+            // Show error message if there were errors
+            if (has_error || translationHasError) {
+              showError(`Translation completed with errors (${errorMessages.length} paragraphs failed)`);
+            } else {
+              showSuccess("Translation complete");
+            }
           }
         } else if (html_chunk) {
           // Append this paragraph chunk to state storage
@@ -1346,6 +1399,7 @@ async function translateItem(item: FeedItem) {
     });
 
     unlistenProgress();
+    unlistenError();
   } catch (error) {
     if (abortController.signal.aborted) {
       showSuccess("Translation cancelled");

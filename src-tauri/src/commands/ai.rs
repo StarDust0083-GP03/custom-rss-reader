@@ -220,6 +220,7 @@ pub async fn translate_item_bilingual_streaming(
     let total = paragraphs.len();
     let mut completed = 0;
     let mut all_chunks = Vec::new();
+    let mut has_error = false;
 
     // Translate each paragraph and emit progress
     for paragraph in paragraphs {
@@ -247,9 +248,19 @@ pub async fn translate_item_bilingual_streaming(
                 }));
             }
             Err(e) => {
-                // On error, still emit original paragraph
+                // On error, emit error event
+                has_error = true;
                 eprintln!("Failed to translate paragraph: {}", e);
                 completed += 1;
+
+                // Emit error event
+                let _ = app_handle.emit_to("main", "translation-error", serde_json::json!({
+                    "item_id": item_id,
+                    "error": format!("Translation failed: {}", e),
+                    "paragraph_index": completed
+                }));
+
+                // Use original paragraph as fallback
                 let fallback = format!(r#"<div class="translation-paragraph"><div class="paragraph-original">{}</div></div>"#, paragraph);
                 all_chunks.push(fallback.clone());
 
@@ -259,7 +270,8 @@ pub async fn translate_item_bilingual_streaming(
                     "completed": completed,
                     "html_chunk": fallback,
                     "is_complete": false,
-                    "cached": false
+                    "cached": false,
+                    "error": true
                 }));
             }
         }
@@ -279,20 +291,23 @@ pub async fn translate_item_bilingual_streaming(
         "completed": total,
         "html_chunk": "",
         "is_complete": true,
-        "cached": false
+        "cached": false,
+        "has_error": has_error
     }));
 
-    // Save to database with timestamp
-    let now = Utc::now();
-    sqlx::query(
-        "UPDATE feed_items SET translated_content = $1, translated_at = $2 WHERE id = $3"
-    )
-    .bind(&result)
-    .bind(&now)
-    .bind(item_id)
-    .execute(pool.inner())
-    .await
-    .map_err(|e| format!("Failed to save translation: {}", e))?;
+    // Only save to database if no errors occurred
+    if !has_error {
+        let now = Utc::now();
+        sqlx::query(
+            "UPDATE feed_items SET translated_content = $1, translated_at = $2 WHERE id = $3"
+        )
+        .bind(&result)
+        .bind(&now)
+        .bind(item_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| format!("Failed to save translation: {}", e))?;
+    }
 
     Ok(result)
 }
