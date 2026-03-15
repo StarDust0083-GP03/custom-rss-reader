@@ -57,6 +57,8 @@ let translationStateByItemId: Map<number, {
   useTranslation: boolean;
   inProgressContent: string | null;
   abortController: AbortController | null;
+  hasError: boolean;
+  errorMessage: string | null;
 }> = new Map();
 
 // ==================== 类型定义 ====================
@@ -520,12 +522,15 @@ function renderItems(preserveScroll = false) {
     // 检查翻译状态
     const itemTranslationState = translationStateByItemId.get(item.id);
     const isTranslating = !!(itemTranslationState && itemTranslationState.abortController);
+    const hasTranslationError = !!(itemTranslationState && itemTranslationState.hasError);
     const hasTranslation = item.translated_content !== null;
-    const translationBadge = isTranslating 
-      ? '<span class="badge translating-badge">Translating...</span>' 
-      : hasTranslation 
-        ? '<span class="badge translated-badge">Translated</span>' 
-        : '';
+    const translationBadge = isTranslating
+      ? '<span class="badge translating-badge">Translating...</span>'
+      : hasTranslationError
+        ? '<span class="badge translation-error-badge">Error</span>'
+        : hasTranslation
+          ? '<span class="badge translated-badge">Translated</span>'
+          : '';
 
     div.innerHTML = `
       <div class="item-header">
@@ -633,23 +638,31 @@ function renderItemDetail(item: FeedItem) {
   if (translateBtn) {
     const translationState = translationStateByItemId.get(item.id);
     const isTranslating = translationState?.abortController != null;
+    const hasError = translationState?.hasError ?? false;
     const hasCache = item.translated_content !== null;
 
     // 移除所有状态类
-    translateBtn.classList.remove("translating", "has-cache");
+    translateBtn.classList.remove("translating", "has-cache", "has-error");
 
     if (isTranslating) {
       // 正在翻译 - 高亮显示，点击可取消
       translateBtn.classList.add("translating");
       translateBtn.textContent = "Cancel";
+    } else if (hasError) {
+      // 翻译失败 - 红色显示，点击重试
+      translateBtn.classList.add("has-error");
+      translateBtn.textContent = "Retry";
+      translateBtn.title = translationState?.errorMessage || "Translation failed";
     } else if (hasCache) {
       // 有缓存 - 黄色显示，点击切换
       translateBtn.classList.add("has-cache");
       const useTranslationForItem = translationState?.useTranslation ?? false;
       translateBtn.textContent = useTranslationForItem ? "Show Original" : "Translate";
+      translateBtn.title = "";
     } else {
       // 无缓存 - 暗色，点击开始翻译
       translateBtn.textContent = "Translate";
+      translateBtn.title = "";
     }
   }
 
@@ -1281,8 +1294,16 @@ async function translateItem(item: FeedItem) {
   if (translationState?.abortController) {
     translationState.abortController.abort();
     translationStateByItemId.delete(item.id);
+    renderItems(true); // Update badge
+    renderItemDetail(item);
     showSuccess("Translation cancelled");
     return;
+  }
+
+  // 如果之前翻译失败，清除错误状态，允许重试
+  if (translationState?.hasError) {
+    translationStateByItemId.delete(item.id);
+    translationState = undefined;
   }
 
   // 检查是否已经有翻译内容（缓存）
@@ -1291,9 +1312,12 @@ async function translateItem(item: FeedItem) {
     translationState = {
       useTranslation: true,
       inProgressContent: null,
-      abortController: null
+      abortController: null,
+      hasError: false,
+      errorMessage: null
     };
     translationStateByItemId.set(item.id, translationState);
+    renderItems(true); // Update badge
     renderItemDetail(item);
     showSuccess("Using cached translation");
     return;
@@ -1302,41 +1326,40 @@ async function translateItem(item: FeedItem) {
   // 创建新的 AbortController 和翻译状态
   const abortController = new AbortController();
   translationState = {
-    useTranslation: true,
+    useTranslation: false, // Don't show translation until complete
     inProgressContent: null,
-    abortController
+    abortController,
+    hasError: false,
+    errorMessage: null
   };
   translationStateByItemId.set(item.id, translationState);
 
-  // 立即更新按钮状态
-  if (selectedItem?.id === item.id) {
-    renderItemDetail(item);
-  }
+  // 立即更新按钮和徽章状态
+  renderItems(true); // Show translating badge
+  renderItemDetail(item);
 
   try {
     showSuccess("Translating...");
-
-    // Track translation errors
-    let translationHasError = false;
-    let errorMessages: string[] = [];
 
     // Listen for translation error events
     const unlistenError = await listen<{ item_id: number; error: string; paragraph_index: number }>(
       "translation-error",
       (event) => {
         if (event.payload.item_id !== item.id) return;
-        translationHasError = true;
-        errorMessages.push(event.payload.error);
-        // Show error in status bar
+        const currentState = translationStateByItemId.get(item.id);
+        if (currentState) {
+          currentState.hasError = true;
+          currentState.errorMessage = event.payload.error;
+        }
         showError(`Translation error: ${event.payload.error}`);
       }
     );
 
     // Listen for translation progress events
-    const unlistenProgress = await listen<{ item_id: number; total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean; has_error?: boolean; error_messages?: string[] }>(
+    const unlistenProgress = await listen<{ item_id: number; total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean; has_error?: boolean; error_messages?: string[]; partial_content?: string }>(
       "translation-progress",
       (event) => {
-        const { item_id, completed, total, html_chunk, is_complete, cached, has_error, error_messages } = event.payload;
+        const { item_id, completed, total, html_chunk, is_complete, cached, has_error, error_messages, partial_content } = event.payload;
 
         // 确保事件属于正确的文章
         if (item_id !== item.id) {
@@ -1355,10 +1378,13 @@ async function translateItem(item: FeedItem) {
         // 如果是缓存命中，直接设置完整内容
         if (cached && html_chunk) {
           item.translated_content = html_chunk;
+          currentState.useTranslation = true;
           currentState.inProgressContent = null;
           currentState.abortController = null;
+          currentState.hasError = false;
           // 只有当前选中的文章才渲染和显示提示
           if (selectedItem?.id === item.id) {
+            renderItems(true);
             renderItemDetail(item);
             showSuccess("Using cached translation");
           }
@@ -1366,35 +1392,51 @@ async function translateItem(item: FeedItem) {
         }
 
         // Update progress indicator - 只在当前选中时显示
-        if (!cached && selectedItem?.id === item.id && !translationHasError) {
+        if (!cached && selectedItem?.id === item.id && !currentState.hasError) {
           showSuccess(`Translating... ${completed}/${total}`);
         }
 
         // Append the chunk to state storage (not to item yet)
         if (is_complete) {
           // Final event - clean up state
+          currentState.abortController = null;
+
+          // Handle error case
+          if (has_error) {
+            currentState.hasError = true;
+            currentState.errorMessage = error_messages?.[0] || "Translation failed";
+            currentState.inProgressContent = null;
+            currentState.useTranslation = false;
+
+            // 更新列表徽章
+            renderItems(true);
+
+            // 只有当前选中的文章才渲染
+            if (selectedItem?.id === item.id) {
+              renderItemDetail(item);
+              showError(`Translation failed: ${currentState.errorMessage}. Check ~/.rss-reader/ai_errors.log for details.`);
+            }
+            return;
+          }
+
+          // Success case
           if (currentState.inProgressContent && !currentState.inProgressContent.endsWith("</div>")) {
             currentState.inProgressContent += "</div>";
           }
-          currentState.inProgressContent = null;
-          currentState.abortController = null;
 
-          // 只有在没有错误时才缓存翻译结果
-          if (!has_error && !translationHasError) {
-            item.translated_content = currentState.inProgressContent;
-          }
+          // 缓存翻译结果到 item
+          item.translated_content = currentState.inProgressContent;
+          currentState.useTranslation = true;
+          currentState.inProgressContent = null;
+          currentState.hasError = false;
+
+          // 更新列表徽章
+          renderItems(true);
 
           // 只有当前选中的文章才渲染
           if (selectedItem?.id === item.id) {
             renderItemDetail(item);
-            // Show error message if there were errors
-            if (has_error || translationHasError) {
-              const errorMsgs = error_messages || errorMessages;
-              const errorCount = errorMsgs.length;
-              showError(`Translation failed (${errorCount} errors). Result not cached. Check ~/.rss-reader/ai_errors.log for details.`);
-            } else {
-              showSuccess("Translation complete");
-            }
+            showSuccess("Translation complete");
           }
         } else if (html_chunk) {
           // Append this paragraph chunk to state storage
@@ -1419,13 +1461,25 @@ async function translateItem(item: FeedItem) {
     unlistenProgress();
     unlistenError();
   } catch (error) {
+    const currentState = translationStateByItemId.get(item.id);
     if (abortController.signal.aborted) {
+      // User cancelled
+      if (currentState) {
+        currentState.abortController = null;
+        currentState.hasError = false;
+      }
       showSuccess("Translation cancelled");
     } else {
+      // Error occurred
+      if (currentState) {
+        currentState.hasError = true;
+        currentState.errorMessage = String(error);
+        currentState.abortController = null;
+      }
       showError(`Translation failed: ${error}`);
+      renderItems(true); // Update badge to show error
+      renderItemDetail(item); // Update button to show error state
     }
-    // 清理状态
-    translationStateByItemId.delete(item.id);
   }
 }
 

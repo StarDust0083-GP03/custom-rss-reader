@@ -249,6 +249,11 @@ body {
     color: #1a1a1a;
 }
 
+.badge.translation-error-badge {
+    background: var(--danger-color);
+    color: white;
+}
+
 .icon-btn {
     width: 22px;
     height: 22px;
@@ -535,6 +540,13 @@ body {
     background: var(--warning-color);
     color: #1a1a1a;
     border-color: var(--warning-color);
+    font-weight: 600;
+}
+
+#translate-btn.has-error {
+    background: var(--danger-color);
+    color: white;
+    border-color: var(--danger-color);
     font-weight: 600;
 }
 

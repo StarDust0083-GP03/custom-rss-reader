@@ -245,11 +245,35 @@ pub async fn translate_item_bilingual_streaming(
         .ok_or_else(|| "No content to translate".to_string())?;
 
     let config = get_ai_config_internal(&app_handle).await.map_err(|e| {
-        log_to_file(&format!("AI config error: {}", e));
+        let err = format!("AI config error: {}", e);
+        log_to_file(&err);
+        // Emit error event
+        let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+            "item_id": item_id,
+            "total": 0,
+            "completed": 0,
+            "html_chunk": "",
+            "is_complete": true,
+            "cached": false,
+            "has_error": true,
+            "error_messages": [e.clone()]
+        }));
         e
     })?;
     let ai_service = AiService::new(config.clone()).map_err(|e| {
-        log_to_file(&format!("AI service init error: {}", e));
+        let err = format!("AI service init error: {}", e);
+        log_to_file(&err);
+        // Emit error event
+        let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+            "item_id": item_id,
+            "total": 0,
+            "completed": 0,
+            "html_chunk": "",
+            "is_complete": true,
+            "cached": false,
+            "has_error": true,
+            "error_messages": [err.clone()]
+        }));
         e
     })?;
 
@@ -258,8 +282,7 @@ pub async fn translate_item_bilingual_streaming(
     let total = paragraphs.len();
     let mut completed = 0;
     let mut all_chunks = Vec::new();
-    let mut has_error = false;
-    let mut error_messages: Vec<String> = Vec::new();
+    let mut first_error: Option<String> = None;
 
     // Translate each paragraph and emit progress
     for paragraph in &paragraphs {
@@ -287,46 +310,53 @@ pub async fn translate_item_bilingual_streaming(
                 }));
             }
             Err(e) => {
-                // On error, emit error event
-                has_error = true;
-                let error_msg = format!("Translation failed for paragraph {}: {}", completed + 1, e);
-                error_messages.push(error_msg.clone());
+                // On first error, stop immediately and report failure
+                let error_msg = format!("Translation failed at paragraph {}: {}", completed + 1, e);
                 log_to_file(&error_msg);
                 eprintln!("{}", error_msg);
-                completed += 1;
+                first_error = Some(error_msg.clone());
 
                 // Emit error event
                 let _ = app_handle.emit_to("main", "translation-error", serde_json::json!({
                     "item_id": item_id,
                     "error": error_msg,
-                    "paragraph_index": completed
+                    "paragraph_index": completed + 1
                 }));
 
-                // Use original paragraph as fallback (not cached)
-                let fallback = format!(r#"<div class="translation-paragraph error"><div class="paragraph-original">{}</div><div class="error-message">Translation failed</div></div>"#, paragraph);
-                all_chunks.push(fallback.clone());
-
-                let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
-                    "item_id": item_id,
-                    "total": total,
-                    "completed": completed,
-                    "html_chunk": fallback,
-                    "is_complete": false,
-                    "cached": false,
-                    "error": true
-                }));
+                // Break immediately on error - don't continue translating
+                break;
             }
         }
     }
 
-    // Combine all chunks
+    // Check if we had an error
+    if let Some(error) = first_error {
+        // Emit final failure event
+        let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+            "item_id": item_id,
+            "total": total,
+            "completed": completed,
+            "html_chunk": "",
+            "is_complete": true,
+            "cached": false,
+            "has_error": true,
+            "error_messages": [error],
+            "partial_content": all_chunks.join("\n")
+        }));
+
+        log_to_file(&format!("Translation stopped due to error (item {})", item_id));
+        // Return error so frontend knows it failed
+        return Err(format!("Translation failed. Check ~/.rss-reader/ai_errors.log for details."));
+    }
+
+    // Success - combine all chunks
     let bilingual = all_chunks.join("\n");
     let result = format!(
-        r#"<div class="bilingual-content" data-cached="false" data-has-error="{}">{}</div>"#,
-        has_error, bilingual
+        r#"<div class="bilingual-content" data-cached="false">{}</div>"#,
+        bilingual
     );
 
-    // Emit final completion event with error details
+    // Emit final completion event
     let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
         "item_id": item_id,
         "total": total,
@@ -334,29 +364,25 @@ pub async fn translate_item_bilingual_streaming(
         "html_chunk": "",
         "is_complete": true,
         "cached": false,
-        "has_error": has_error,
-        "error_messages": error_messages
+        "has_error": false,
+        "error_messages": []
     }));
 
-    // Only save to database if no errors occurred
-    if !has_error {
-        let now = Utc::now();
-        sqlx::query(
-            "UPDATE feed_items SET translated_content = $1, translated_at = $2 WHERE id = $3"
-        )
-        .bind(&result)
-        .bind(&now)
-        .bind(item_id)
-        .execute(pool.inner())
-        .await
-        .map_err(|e| {
-            let err = format!("Failed to save translation: {}", e);
-            log_to_file(&err);
-            err
-        })?;
-    } else {
-        log_to_file(&format!("Translation not cached due to errors (item {})", item_id));
-    }
+    // Save to database
+    let now = Utc::now();
+    sqlx::query(
+        "UPDATE feed_items SET translated_content = $1, translated_at = $2 WHERE id = $3"
+    )
+    .bind(&result)
+    .bind(&now)
+    .bind(item_id)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| {
+        let err = format!("Failed to save translation: {}", e);
+        log_to_file(&err);
+        err
+    })?;
 
     Ok(result)
 }
