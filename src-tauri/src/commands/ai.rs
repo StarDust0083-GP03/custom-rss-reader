@@ -50,7 +50,7 @@ pub async fn translate_item_bilingual(
         .or(item.description.as_ref())
         .ok_or_else(|| "No content to translate".to_string())?;
 
-    let config = get_ai_config(&app_handle).await?;
+    let config = get_ai_config_internal(&app_handle).await?;
     let ai_service = AiService::new(config)?;
 
     let bilingual = ai_service.translate_bilingual_segmented(
@@ -86,7 +86,7 @@ pub async fn translate_content_bilingual(
     source_lang: String,
     target_lang: String,
 ) -> Result<String, String> {
-    let config = get_ai_config(&app_handle).await?;
+    let config = get_ai_config_internal(&app_handle).await?;
     let ai_service = AiService::new(config)?;
 
     let bilingual = ai_service.translate_bilingual_segmented(
@@ -112,7 +112,7 @@ pub async fn classify_item(
     rss_title: Option<String>,
     existing_tags: Option<Vec<String>>,
 ) -> Result<ClassificationResponse, String> {
-    let config = get_ai_config(&app_handle).await?;
+    let config = get_ai_config_internal(&app_handle).await?;
     let ai_service = AiService::new(config)?;
 
     let request = ClassificationRequest {
@@ -212,7 +212,7 @@ pub async fn translate_item_bilingual_streaming(
         .or(item.description.as_ref())
         .ok_or_else(|| "No content to translate".to_string())?;
 
-    let config = get_ai_config(&app_handle).await?;
+    let config = get_ai_config_internal(&app_handle).await?;
     let ai_service = AiService::new(config)?;
 
     // Extract paragraphs
@@ -312,7 +312,61 @@ pub async fn translate_item_bilingual_streaming(
     Ok(result)
 }
 
-async fn get_ai_config(app_handle: &AppHandle) -> Result<AiConfig, String> {
+#[tauri::command]
+pub async fn get_ai_config(
+    app_handle: AppHandle,
+) -> Result<AiConfigResponse, String> {
+    // Try to get from app state
+    if let Some(config) = app_handle.try_state::<AiConfig>() {
+        let cfg = config.inner();
+        return Ok(AiConfigResponse {
+            api_key: cfg.api_key.clone(),
+            base_url: cfg.base_url.clone(),
+            model: cfg.model.clone(),
+        });
+    }
+
+    // Try to load from persistent storage using home directory for better compatibility
+    let home_dir = dirs::home_dir()
+        .ok_or_else(|| "Failed to get home directory".to_string())?;
+
+    let app_dir = home_dir.join(".rss-reader");
+
+    let config_file = app_dir.join("ai_config.json");
+
+    if config_file.exists() {
+        let content = std::fs::read_to_string(&config_file)
+            .map_err(|e| format!("Failed to read config file: {}", e))?;
+
+        let config: AiConfig = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse config file: {}", e))?;
+
+        // Store in app state for future use
+        app_handle.manage(config.clone());
+
+        Ok(AiConfigResponse {
+            api_key: config.api_key,
+            base_url: config.base_url,
+            model: config.model,
+        })
+    } else {
+        // Return default values if no config exists
+        Ok(AiConfigResponse {
+            api_key: String::new(),
+            base_url: DEFAULT_BASE_URL.to_string(),
+            model: DEFAULT_MODEL.to_string(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiConfigResponse {
+    pub api_key: String,
+    pub base_url: String,
+    pub model: String,
+}
+
+async fn get_ai_config_internal(app_handle: &AppHandle) -> Result<AiConfig, String> {
     // Try to get from app state
     if let Some(config) = app_handle.try_state::<AiConfig>() {
         return Ok(config.inner().clone());

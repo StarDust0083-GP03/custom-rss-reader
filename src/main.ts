@@ -1249,9 +1249,20 @@ function closeAddFeedModal() {
 }
 
 // AI Settings Modal
-function openAiSettingsModal() {
+async function openAiSettingsModal() {
   const modal = document.getElementById("ai-settings-modal");
   if (modal) modal.classList.add("visible");
+
+  // Load current AI config and fill the form
+  try {
+    const config = await invoke<{ api_key: string; base_url: string; model: string }>("get_ai_config");
+    (document.getElementById("ai-api-key") as HTMLInputElement).value = config.api_key || "";
+    (document.getElementById("ai-base-url") as HTMLInputElement).value = config.base_url || "";
+    (document.getElementById("ai-model") as HTMLInputElement).value = config.model || "";
+  } catch (error) {
+    // If no config exists, just leave the fields empty or with defaults
+    console.log("No AI config found, using defaults");
+  }
 }
 
 function closeAiSettingsModal() {
