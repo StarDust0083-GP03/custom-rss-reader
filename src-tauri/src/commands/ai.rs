@@ -3,6 +3,8 @@ use tauri::{AppHandle, Manager, Emitter};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use dirs;
+use std::fs::OpenOptions;
+use std::io::Write;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranslationProgress {
@@ -17,6 +19,26 @@ const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 const DEFAULT_MODEL: &str = "deepseek-chat";
 // Translation cache expiry: 3 days
 const TRANSLATION_CACHE_DAYS: i64 = 3;
+
+/// Write log message to file
+fn log_to_file(message: &str) {
+    if let Some(home_dir) = dirs::home_dir() {
+        let app_dir = home_dir.join(".rss-reader");
+        let _ = std::fs::create_dir_all(&app_dir);
+        let log_file = app_dir.join("ai_errors.log");
+
+        let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+        let log_entry = format!("[{}] {}\n", timestamp, message);
+
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_file)
+        {
+            let _ = file.write_all(log_entry.as_bytes());
+        }
+    }
+}
 
 #[tauri::command]
 pub async fn translate_item_bilingual(
@@ -132,6 +154,7 @@ pub async fn set_ai_config(
     api_key: String,
     base_url: Option<String>,
     model: Option<String>,
+    skip_test: Option<bool>,
 ) -> Result<(), String> {
     let config = AiConfig {
         api_key,
@@ -141,14 +164,19 @@ pub async fn set_ai_config(
         temperature: Some(0.3),
     };
 
-    // Test the configuration before saving
-    let test_service = AiService::new(config.clone())?;
-    test_service.test_connection().await.map_err(|e| {
-        format!("API connection test failed: {}. Please check your base URL and model name. Common issues:\n\
-                  - For OpenAI-compatible APIs, use base URL like: https://api.openai.com/v1\n\
-                  - Model name should match your provider (e.g., gpt-4o-mini, gpt-4o, gpt-3.5-turbo)\n\
-                  - 404 error usually means the model doesn't exist or base URL is incorrect", e)
-    })?;
+    // Test the configuration before saving (unless skip_test is true)
+    let skip = skip_test.unwrap_or(false);
+    if !skip {
+        let test_service = AiService::new(config.clone())?;
+        test_service.test_connection().await.map_err(|e| {
+            let error_msg = format!("API connection test failed: {}. Please check your base URL and model name. Common issues:\n\
+                      - For OpenAI-compatible APIs, use base URL like: https://api.openai.com/v1\n\
+                      - Model name should match your provider (e.g., gpt-4o-mini, gpt-4o, gpt-3.5-turbo)\n\
+                      - 404 error usually means the model doesn't exist or base URL is incorrect", e);
+            log_to_file(&error_msg);
+            error_msg
+        })?;
+    }
 
     // Save to persistent storage using home directory for better compatibility
     let home_dir = dirs::home_dir()
@@ -183,7 +211,11 @@ pub async fn translate_item_bilingual_streaming(
         .bind(item_id)
         .fetch_one(pool.inner())
         .await
-        .map_err(|e| format!("Failed to get item: {}", e))?;
+        .map_err(|e| {
+            let err = format!("Failed to get item: {}", e);
+            log_to_file(&err);
+            err
+        })?;
 
     // Check if we have a cached translation that's still valid
     if let Some(translated_content) = &item.translated_content {
@@ -212,8 +244,14 @@ pub async fn translate_item_bilingual_streaming(
         .or(item.description.as_ref())
         .ok_or_else(|| "No content to translate".to_string())?;
 
-    let config = get_ai_config_internal(&app_handle).await?;
-    let ai_service = AiService::new(config)?;
+    let config = get_ai_config_internal(&app_handle).await.map_err(|e| {
+        log_to_file(&format!("AI config error: {}", e));
+        e
+    })?;
+    let ai_service = AiService::new(config.clone()).map_err(|e| {
+        log_to_file(&format!("AI service init error: {}", e));
+        e
+    })?;
 
     // Extract paragraphs
     let paragraphs = ai_service.extract_paragraphs(content);
@@ -221,15 +259,16 @@ pub async fn translate_item_bilingual_streaming(
     let mut completed = 0;
     let mut all_chunks = Vec::new();
     let mut has_error = false;
+    let mut error_messages: Vec<String> = Vec::new();
 
     // Translate each paragraph and emit progress
-    for paragraph in paragraphs {
+    for paragraph in &paragraphs {
         if paragraph.trim().is_empty() {
             continue;
         }
 
         match ai_service.translate_single_paragraph_bilingual(
-            &paragraph,
+            paragraph,
             "auto",
             "zh-CN"
         ).await {
@@ -250,18 +289,21 @@ pub async fn translate_item_bilingual_streaming(
             Err(e) => {
                 // On error, emit error event
                 has_error = true;
-                eprintln!("Failed to translate paragraph: {}", e);
+                let error_msg = format!("Translation failed for paragraph {}: {}", completed + 1, e);
+                error_messages.push(error_msg.clone());
+                log_to_file(&error_msg);
+                eprintln!("{}", error_msg);
                 completed += 1;
 
                 // Emit error event
                 let _ = app_handle.emit_to("main", "translation-error", serde_json::json!({
                     "item_id": item_id,
-                    "error": format!("Translation failed: {}", e),
+                    "error": error_msg,
                     "paragraph_index": completed
                 }));
 
-                // Use original paragraph as fallback
-                let fallback = format!(r#"<div class="translation-paragraph"><div class="paragraph-original">{}</div></div>"#, paragraph);
+                // Use original paragraph as fallback (not cached)
+                let fallback = format!(r#"<div class="translation-paragraph error"><div class="paragraph-original">{}</div><div class="error-message">Translation failed</div></div>"#, paragraph);
                 all_chunks.push(fallback.clone());
 
                 let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
@@ -280,11 +322,11 @@ pub async fn translate_item_bilingual_streaming(
     // Combine all chunks
     let bilingual = all_chunks.join("\n");
     let result = format!(
-        r#"<div class="bilingual-content" data-cached="false">{}</div>"#,
-        bilingual
+        r#"<div class="bilingual-content" data-cached="false" data-has-error="{}">{}</div>"#,
+        has_error, bilingual
     );
 
-    // Emit final completion event
+    // Emit final completion event with error details
     let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
         "item_id": item_id,
         "total": total,
@@ -292,7 +334,8 @@ pub async fn translate_item_bilingual_streaming(
         "html_chunk": "",
         "is_complete": true,
         "cached": false,
-        "has_error": has_error
+        "has_error": has_error,
+        "error_messages": error_messages
     }));
 
     // Only save to database if no errors occurred
@@ -306,7 +349,13 @@ pub async fn translate_item_bilingual_streaming(
         .bind(item_id)
         .execute(pool.inner())
         .await
-        .map_err(|e| format!("Failed to save translation: {}", e))?;
+        .map_err(|e| {
+            let err = format!("Failed to save translation: {}", e);
+            log_to_file(&err);
+            err
+        })?;
+    } else {
+        log_to_file(&format!("Translation not cached due to errors (item {})", item_id));
     }
 
     Ok(result)

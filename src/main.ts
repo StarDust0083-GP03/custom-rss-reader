@@ -1333,10 +1333,10 @@ async function translateItem(item: FeedItem) {
     );
 
     // Listen for translation progress events
-    const unlistenProgress = await listen<{ item_id: number; total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean; has_error?: boolean }>(
+    const unlistenProgress = await listen<{ item_id: number; total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean; has_error?: boolean; error_messages?: string[] }>(
       "translation-progress",
       (event) => {
-        const { item_id, completed, total, html_chunk, is_complete, cached, has_error } = event.payload;
+        const { item_id, completed, total, html_chunk, is_complete, cached, has_error, error_messages } = event.payload;
 
         // 确保事件属于正确的文章
         if (item_id !== item.id) {
@@ -1372,19 +1372,26 @@ async function translateItem(item: FeedItem) {
 
         // Append the chunk to state storage (not to item yet)
         if (is_complete) {
-          // Final event - save to item and clean up state
+          // Final event - clean up state
           if (currentState.inProgressContent && !currentState.inProgressContent.endsWith("</div>")) {
             currentState.inProgressContent += "</div>";
           }
-          item.translated_content = currentState.inProgressContent;
           currentState.inProgressContent = null;
           currentState.abortController = null;
+
+          // 只有在没有错误时才缓存翻译结果
+          if (!has_error && !translationHasError) {
+            item.translated_content = currentState.inProgressContent;
+          }
+
           // 只有当前选中的文章才渲染
           if (selectedItem?.id === item.id) {
             renderItemDetail(item);
             // Show error message if there were errors
             if (has_error || translationHasError) {
-              showError(`Translation completed with errors (${errorMessages.length} paragraphs failed)`);
+              const errorMsgs = error_messages || errorMessages;
+              const errorCount = errorMsgs.length;
+              showError(`Translation failed (${errorCount} errors). Result not cached. Check ~/.rss-reader/ai_errors.log for details.`);
             } else {
               showSuccess("Translation complete");
             }
@@ -1776,7 +1783,7 @@ async function init() {
 
   document.getElementById("ai-settings-btn")?.addEventListener("click", openAiSettingsModal);
 
-  // 测试 AI 连接按钮
+  // 测试 AI 连接按钮 - 测试连接并保存
   document.getElementById("test-ai-btn")?.addEventListener("click", async () => {
     const apiKey = (document.getElementById("ai-api-key") as HTMLInputElement).value;
     const baseUrl = (document.getElementById("ai-base-url") as HTMLInputElement).value;
@@ -1793,8 +1800,9 @@ async function init() {
     btn.disabled = true;
 
     try {
-      await invoke("set_ai_config", { apiKey, baseUrl: baseUrl || undefined, model: model || undefined });
-      showSuccess("API connection successful!");
+      // 测试连接（会同时保存配置）
+      await invoke("set_ai_config", { apiKey, baseUrl: baseUrl || undefined, model: model || undefined, skipTest: false });
+      showSuccess("API connection successful! Configuration saved.");
     } catch (error) {
       showError(`Connection test failed: ${error}`);
     } finally {
@@ -1803,17 +1811,23 @@ async function init() {
     }
   });
 
-  // AI 设置表单
+  // AI 设置表单 - 直接保存（跳过测试）
   document.getElementById("ai-settings-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const apiKey = (document.getElementById("ai-api-key") as HTMLInputElement).value;
     const baseUrl = (document.getElementById("ai-base-url") as HTMLInputElement).value;
     const model = (document.getElementById("ai-model") as HTMLInputElement).value;
 
+    if (!apiKey) {
+      showError("Please enter an API key");
+      return;
+    }
+
     try {
-      await invoke("set_ai_config", { apiKey, baseUrl: baseUrl || undefined, model: model || undefined });
+      // 直接保存，跳过连接测试
+      await invoke("set_ai_config", { apiKey, baseUrl: baseUrl || undefined, model: model || undefined, skipTest: true });
       closeAiSettingsModal();
-      showSuccess("AI configuration saved");
+      showSuccess("AI configuration saved (not tested)");
     } catch (error) {
       showError(`Failed to save AI configuration: ${error}`);
     }
