@@ -687,7 +687,6 @@ function renderItemDetail(item: FeedItem) {
       }
     }
 
-    const originalContent = item.content || item.description || "No content available";
     detail.innerHTML = `
       <div class="detail-source">${subName}${item.category ? ` • ${item.category}` : ""}</div>
       <h1>${item.title}</h1>
@@ -1359,7 +1358,7 @@ async function translateItem(item: FeedItem) {
     const unlistenProgress = await listen<{ item_id: number; total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean; has_error?: boolean; error_messages?: string[]; partial_content?: string }>(
       "translation-progress",
       (event) => {
-        const { item_id, completed, total, html_chunk, is_complete, cached, has_error, error_messages, partial_content } = event.payload;
+        const { item_id, completed, total, html_chunk, is_complete, cached, has_error, error_messages } = event.payload;
 
         // 确保事件属于正确的文章
         if (item_id !== item.id) {
@@ -1808,13 +1807,14 @@ async function init() {
     // 2. 如果有缓存，切换显示模式
     if (hasCache) {
       if (!translationState) {
-        translationState = { useTranslation: true, inProgressContent: null, abortController: null };
-        translationStateByItemId.set(selectedItem.id, translationState);
+        const newState = { useTranslation: true, inProgressContent: null, abortController: null, hasError: false, errorMessage: null };
+        translationStateByItemId.set(selectedItem.id, newState);
+        showSuccess("Showing translation");
       } else {
         translationState.useTranslation = !translationState.useTranslation;
+        showSuccess(translationState.useTranslation ? "Showing translation" : "Showing original");
       }
       renderItemDetail(selectedItem);
-      showSuccess(translationState.useTranslation ? "Showing translation" : "Showing original");
       return;
     }
 
