@@ -102,6 +102,22 @@ impl AiService {
             temperature: self.config.temperature,
         };
 
+        self.send_request(request).await
+    }
+
+    /// Chat completion with custom max_tokens (for translation)
+    async fn chat_completion_with_tokens(&self, messages: Vec<ChatMessage>, max_tokens: u32) -> Result<String, AiError> {
+        let request = ChatRequest {
+            model: self.config.model.clone(),
+            messages,
+            max_tokens: Some(max_tokens),
+            temperature: self.config.temperature,
+        };
+
+        self.send_request(request).await
+    }
+
+    async fn send_request(&self, request: ChatRequest) -> Result<String, AiError> {
         let response = self
             .client
             .post(format!("{}/chat/completions", self.config.base_url))
@@ -374,6 +390,14 @@ impl AiService {
             source_lang, target_lang
         );
 
+        // Calculate max_tokens based on paragraph length
+        // Translation typically needs 1.5-2x the input tokens
+        // Approximate: 1 token ≈ 2 chars for Chinese, 0.75 chars for English
+        // Use 1.5x multiplier for safety
+        let paragraph_chars = paragraph.len() as u32;
+        let estimated_tokens = (paragraph_chars as f32 / 1.5).ceil() as u32;
+        let max_tokens = std::cmp::max(estimated_tokens * 2, 1000); // At least 1000 tokens, 2x for translation
+
         // Retry logic for transient failures
         let mut attempt = 0;
         loop {
@@ -388,7 +412,7 @@ impl AiService {
                 },
             ];
 
-            match self.chat_completion(messages).await {
+            match self.chat_completion_with_tokens(messages, max_tokens).await {
                 Ok(translated) => {
                     // Return paragraph with bilingual format
                     return Ok(format!(
@@ -445,6 +469,11 @@ impl AiService {
 
         let user_content = sub_paragraphs.join("\n\n");
 
+        // Calculate max_tokens based on content length
+        let content_chars = user_content.len() as u32;
+        let estimated_tokens = (content_chars as f32 / 1.5).ceil() as u32;
+        let max_tokens = std::cmp::max(estimated_tokens * 2, 1000);
+
         // Retry logic
         let mut attempt = 0;
         let translated = loop {
@@ -459,7 +488,7 @@ impl AiService {
                 },
             ];
 
-            match self.chat_completion(messages).await {
+            match self.chat_completion_with_tokens(messages, max_tokens).await {
                 Ok(result) => break result,
                 Err(e) => {
                     if attempt >= MAX_RETRIES {
