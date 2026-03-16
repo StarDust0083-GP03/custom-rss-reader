@@ -3,10 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
 
-// DeepSeek 上下文限制：每个批次最大字符数
-// DeepSeek-V3: 64K tokens, DeepSeek-V3-32K: 32K tokens
-// 按 token ≈ 0.75 个字符计算
-const MAX_CHARS_PER_SEGMENT: usize = 6000; // 约 4500 tokens，留有余量给系统提示和响应
+// 翻译分段配置
+// 每段最大字符数 - 设置较小值以提高成功率
+// 长段落容易导致 LLM 超时或失败
+const MAX_CHARS_PER_SEGMENT: usize = 3000; // 约 2000-2500 tokens
+// 最大重试次数
+const MAX_RETRIES: usize = 2;
 
 #[derive(Error, Debug)]
 pub enum AiError {
@@ -50,7 +52,7 @@ pub struct ClassificationResponse {
     pub category: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChatMessage {
     role: String,
     content: String,
@@ -86,7 +88,7 @@ impl AiService {
         }
 
         let client = Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_secs(120)) // 增加到 2 分钟
             .build()?;
 
         Ok(Self { client, config })
@@ -372,27 +374,42 @@ impl AiService {
             source_lang, target_lang
         );
 
-        let messages = vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: system_prompt,
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: paragraph.to_string(),
-            },
-        ];
+        // Retry logic for transient failures
+        let mut attempt = 0;
+        loop {
+            let messages = vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt.clone(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: paragraph.to_string(),
+                },
+            ];
 
-        let translated = self.chat_completion(messages).await?;
-
-        // Return paragraph with bilingual format
-        Ok(format!(
-            r#"<div class="translation-paragraph">
+            match self.chat_completion(messages).await {
+                Ok(translated) => {
+                    // Return paragraph with bilingual format
+                    return Ok(format!(
+                        r#"<div class="translation-paragraph">
 <div class="paragraph-original">{}</div>
 <div class="paragraph-translated">{}</div>
 </div>"#,
-            paragraph, translated
-        ))
+                        paragraph, translated
+                    ));
+                }
+                Err(e) => {
+                    if attempt >= MAX_RETRIES {
+                        return Err(e);
+                    }
+                    // Wait before retry (exponential backoff)
+                    tokio::time::sleep(Duration::from_millis(500 * (attempt + 1) as u64)).await;
+                    eprintln!("Translation attempt {} failed, retrying... Error: {}", attempt + 1, e);
+                    attempt += 1;
+                }
+            }
+        }
     }
 
     /// Translate a merged paragraph (contains multiple sub-paragraphs) and return bilingual format
@@ -428,19 +445,32 @@ impl AiService {
 
         let user_content = sub_paragraphs.join("\n\n");
 
-        let messages = vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: system_prompt,
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: user_content,
-            },
-        ];
+        // Retry logic
+        let mut attempt = 0;
+        let translated = loop {
+            let messages = vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt.clone(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: user_content.clone(),
+                },
+            ];
 
-        // 一次性翻译所有段落
-        let translated = self.chat_completion(messages).await?;
+            match self.chat_completion(messages).await {
+                Ok(result) => break result,
+                Err(e) => {
+                    if attempt >= MAX_RETRIES {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(Duration::from_millis(500 * (attempt + 1) as u64)).await;
+                    eprintln!("Merged translation attempt {} failed, retrying... Error: {}", attempt + 1, e);
+                    attempt += 1;
+                }
+            }
+        };
 
         // 按段落拆分翻译结果
         let translated_paragraphs: Vec<&str> = translated.split("\n\n")
