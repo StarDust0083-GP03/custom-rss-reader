@@ -372,6 +372,7 @@ impl AiService {
 
     /// Translate a single paragraph and return bilingual format
     /// If the paragraph contains multiple sub-paragraphs (separated by \n\n), split them for bilingual display
+    /// Handles long paragraphs by splitting if translation is truncated
     pub async fn translate_single_paragraph_bilingual(
         &self,
         paragraph: &str,
@@ -380,7 +381,13 @@ impl AiService {
     ) -> Result<String, AiError> {
         // Check if this is a merged paragraph (contains \n\n)
         if paragraph.contains("\n\n") {
-            return self.translate_merged_paragraph_bilingual(paragraph, source_lang, target_lang).await;
+            // Use Box::pin for recursive async call
+            return Box::pin(self.translate_merged_paragraph_bilingual(paragraph, source_lang, target_lang)).await;
+        }
+
+        // Check if paragraph is too long and should be split proactively
+        if paragraph.len() > MAX_CHARS_PER_SEGMENT {
+            return self.translate_long_paragraph_bilingual(paragraph, source_lang, target_lang).await;
         }
 
         let system_prompt = format!(
@@ -414,6 +421,16 @@ impl AiService {
 
             match self.chat_completion_with_tokens(messages, max_tokens).await {
                 Ok(translated) => {
+                    // Check if translation appears to be truncated
+                    // A truncated translation is typically much shorter than expected
+                    let min_expected_length = (paragraph.len() as f32 * 0.5) as usize;
+                    if translated.len() < min_expected_length && paragraph.len() > 500 {
+                        eprintln!("Warning: Translation may be truncated (input: {}, output: {}). Retrying with split.",
+                            paragraph.len(), translated.len());
+                        // Try splitting the paragraph and translating in parts
+                        return self.translate_long_paragraph_bilingual(paragraph, source_lang, target_lang).await;
+                    }
+
                     // Return paragraph with bilingual format
                     return Ok(format!(
                         r#"<div class="translation-paragraph">
@@ -436,8 +453,97 @@ impl AiService {
         }
     }
 
+    /// Translate a single chunk without recursion (helper for long paragraphs)
+    async fn translate_single_chunk(
+        &self,
+        chunk: &str,
+        source_lang: &str,
+        target_lang: &str,
+    ) -> Result<String, AiError> {
+        let system_prompt = format!(
+            "You are a professional translator. Translate the following HTML content from {} to {}. \
+            Preserve ALL HTML structure, tags, and formatting exactly. Only translate the text content, \
+            not the HTML tags. Return ONLY the translated HTML, no explanations.",
+            source_lang, target_lang
+        );
+
+        let chunk_chars = chunk.len() as u32;
+        let estimated_tokens = (chunk_chars as f32 / 1.5).ceil() as u32;
+        let max_tokens = std::cmp::max(estimated_tokens * 2, 1000);
+
+        let mut attempt = 0;
+        loop {
+            let messages = vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt.clone(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: chunk.to_string(),
+                },
+            ];
+
+            match self.chat_completion_with_tokens(messages, max_tokens).await {
+                Ok(translated) => {
+                    return Ok(format!(
+                        r#"<div class="translation-paragraph">
+<div class="paragraph-original">{}</div>
+<div class="paragraph-translated">{}</div>
+</div>"#,
+                        chunk, translated
+                    ));
+                }
+                Err(e) => {
+                    if attempt >= MAX_RETRIES {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(Duration::from_millis(500 * (attempt + 1) as u64)).await;
+                    eprintln!("Chunk translation attempt {} failed, retrying... Error: {}", attempt + 1, e);
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// Translate a long paragraph by splitting it into smaller chunks
+    async fn translate_long_paragraph_bilingual(
+        &self,
+        paragraph: &str,
+        source_lang: &str,
+        target_lang: &str,
+    ) -> Result<String, AiError> {
+        let chunks = self.split_large_paragraph(paragraph);
+        let mut results = Vec::new();
+
+        for chunk in chunks {
+            if chunk.trim().is_empty() {
+                continue;
+            }
+
+            // Use the non-recursive chunk translator
+            match self.translate_single_chunk(&chunk, source_lang, target_lang).await {
+                Ok(translated) => results.push(translated),
+                Err(e) => {
+                    // If a chunk fails, keep original
+                    eprintln!("Failed to translate chunk: {}", e);
+                    results.push(format!(
+                        r#"<div class="translation-paragraph">
+<div class="paragraph-original">{}</div>
+<div class="paragraph-translated">{}</div>
+</div>"#,
+                        chunk, chunk
+                    ));
+                }
+            }
+        }
+
+        Ok(results.join("\n"))
+    }
+
     /// Translate a merged paragraph (contains multiple sub-paragraphs) and return bilingual format
     /// Each sub-paragraph is translated and displayed separately
+    /// If translation is truncated (fewer output paragraphs than input), translate remaining individually
     async fn translate_merged_paragraph_bilingual(
         &self,
         merged_paragraph: &str,
@@ -454,6 +560,12 @@ impl AiService {
             return Ok(String::new());
         }
 
+        // If only one paragraph, use single paragraph translation
+        if sub_paragraphs.len() == 1 {
+            // Use Box::pin for recursive async call
+            return Box::pin(self.translate_single_paragraph_bilingual(sub_paragraphs[0], source_lang, target_lang)).await;
+        }
+
         // 构造系统提示：要求 LLM 保持段落结构
         let system_prompt = format!(
             "You are a professional translator. Translate the following HTML content from {} to {}. \
@@ -463,7 +575,8 @@ impl AiService {
             1. Preserve ALL HTML structure, tags, and formatting exactly. \
             2. Only translate the text content, not the HTML tags. \
             3. Keep the exact same paragraph structure - use \\n\\n between translated paragraphs. \
-            4. Return ONLY the translated HTML with \\n\\n separators, no explanations.",
+            4. You MUST translate ALL paragraphs, not just some of them. \
+            5. Return ONLY the translated HTML with \\n\\n separators, no explanations.",
             source_lang, target_lang
         );
 
@@ -507,13 +620,53 @@ impl AiService {
             .filter(|s| !s.is_empty())
             .collect();
 
+        // 检查是否有漏翻（翻译结果段落数量少于原文）
+        if translated_paragraphs.len() < sub_paragraphs.len() {
+            eprintln!("Warning: Translation truncated ({} input, {} output paragraphs). Translating remaining individually.",
+                sub_paragraphs.len(), translated_paragraphs.len());
+
+            // 翻译结果不完整，需要单独翻译缺失的段落
+            let mut results = Vec::new();
+
+            // 先添加已翻译的部分
+            for (i, original) in sub_paragraphs.iter().enumerate() {
+                if i < translated_paragraphs.len() {
+                    results.push(format!(
+                        r#"<div class="translation-paragraph">
+<div class="paragraph-original">{}</div>
+<div class="paragraph-translated">{}</div>
+</div>"#,
+                        original, translated_paragraphs[i]
+                    ));
+                } else {
+                    // 单独翻译这个段落
+                    match self.translate_single_paragraph_bilingual(original, source_lang, target_lang).await {
+                        Ok(translated_single) => results.push(translated_single),
+                        Err(e) => {
+                            // 翻译失败，使用原文
+                            eprintln!("Failed to translate remaining paragraph {}: {}", i + 1, e);
+                            results.push(format!(
+                                r#"<div class="translation-paragraph">
+<div class="paragraph-original">{}</div>
+<div class="paragraph-translated">{}</div>
+</div>"#,
+                                original, original
+                            ));
+                        }
+                    }
+                }
+            }
+
+            return Ok(results.join("\n"));
+        }
+
         // 组合原文和译文，每个段落分别对照
         let mut results = Vec::new();
         for (i, original) in sub_paragraphs.iter().enumerate() {
             let translated_para = if i < translated_paragraphs.len() {
                 translated_paragraphs[i]
             } else {
-                // 如果翻译结果段落不够，使用原文
+                // 不应该发生，但作为保护
                 original
             };
 

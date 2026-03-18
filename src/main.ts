@@ -1285,7 +1285,7 @@ function closeAiSettingsModal() {
 }
 
 // AI Functions
-async function translateItem(item: FeedItem) {
+async function translateItem(item: FeedItem, htmlContent?: string) {
   // 获取或创建该文章的翻译状态
   let translationState = translationStateByItemId.get(item.id);
 
@@ -1452,10 +1452,19 @@ async function translateItem(item: FeedItem) {
       }
     );
 
-    // 使用流式双语对照翻译
-    await invoke<string>("translate_item_bilingual_streaming", {
-      itemId: item.id,
-    });
+    // 如果提供了 htmlContent（从 webview iframe 获取），使用新的翻译命令
+    // 否则使用原来的翻译命令（翻译 RSS 内容）
+    if (htmlContent) {
+      await invoke<string>("translate_html_content_streaming", {
+        itemId: item.id,
+        content: htmlContent,
+      });
+    } else {
+      // 使用流式双语对照翻译
+      await invoke<string>("translate_item_bilingual_streaming", {
+        itemId: item.id,
+      });
+    }
 
     unlistenProgress();
     unlistenError();
@@ -1826,8 +1835,37 @@ async function init() {
       renderItems();
     }
 
+    // 检查是否在 webview 模式下，如果是则获取 iframe 内容
+    const useWebViewForItem = webviewPerSubscription.get(selectedItem.subscription_id) ?? false;
+    let htmlContent: string | undefined = undefined;
+
+    if (useWebViewForItem && selectedItem.link) {
+      // 尝试从已加载的 iframe 获取内容
+      const iframe = document.getElementById('content-iframe') as HTMLIFrameElement;
+      if (iframe && iframe.contentDocument && iframe.contentDocument.body) {
+        const bodyHtml = iframe.contentDocument.body.innerHTML;
+        if (bodyHtml && bodyHtml.length > 100) {
+          // iframe 已加载内容，使用它进行翻译
+          htmlContent = bodyHtml;
+          console.log('[Translate] Using iframe content for translation, length:', htmlContent.length);
+        }
+      }
+
+      // 如果 iframe 没有内容，则从后端获取网站内容
+      if (!htmlContent) {
+        try {
+          console.log('[Translate] Fetching website content for translation');
+          htmlContent = await invoke<string>("fetch_website_content", { url: selectedItem.link });
+        } catch (error) {
+          console.error('[Translate] Failed to fetch website content:', error);
+          // 回退到使用 RSS 内容
+          htmlContent = undefined;
+        }
+      }
+    }
+
     // 开始翻译
-    await translateItem(selectedItem);
+    await translateItem(selectedItem, htmlContent);
   });
 
   document.getElementById("classify-btn")?.addEventListener("click", async () => {

@@ -125,6 +125,183 @@ pub async fn translate_content_bilingual(
     ))
 }
 
+/// Translate HTML content with streaming progress events
+/// Used for translating website content loaded in webview
+#[tauri::command]
+pub async fn translate_html_content_streaming(
+    app_handle: AppHandle,
+    pool: tauri::State<'_, sqlx::SqlitePool>,
+    item_id: i64,
+    content: String,
+) -> Result<String, String> {
+    // Check if we have a cached translation that's still valid
+    let cached: Option<(Option<String>, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+        "SELECT translated_content, translated_at FROM feed_items WHERE id = $1"
+    )
+    .bind(item_id)
+    .fetch_optional(pool.inner())
+    .await
+    .map_err(|e| {
+        let err = format!("Failed to check cache: {}", e);
+        log_to_file(&err);
+        err
+    })?;
+
+    if let Some((Some(translated_content), Some(translated_at))) = cached {
+        let cache_age = chrono::Utc::now() - translated_at;
+        if cache_age.num_days() < TRANSLATION_CACHE_DAYS {
+            // Emit cache hit event
+            let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+                "item_id": item_id,
+                "total": 1,
+                "completed": 1,
+                "html_chunk": translated_content,
+                "is_complete": true,
+                "cached": true
+            }));
+            return Ok(format!(
+                r#"<div class="bilingual-content" data-cached="true">{}</div>"#,
+                translated_content
+            ));
+        }
+    }
+
+    let config = get_ai_config_internal(&app_handle).await.map_err(|e| {
+        let err = format!("AI config error: {}", e);
+        log_to_file(&err);
+        let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+            "item_id": item_id,
+            "total": 0,
+            "completed": 0,
+            "html_chunk": "",
+            "is_complete": true,
+            "cached": false,
+            "has_error": true,
+            "error_messages": [e.clone()]
+        }));
+        e
+    })?;
+
+    let ai_service = AiService::new(config.clone()).map_err(|e| {
+        let err = format!("AI service init error: {}", e);
+        log_to_file(&err);
+        let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+            "item_id": item_id,
+            "total": 0,
+            "completed": 0,
+            "html_chunk": "",
+            "is_complete": true,
+            "cached": false,
+            "has_error": true,
+            "error_messages": [err.clone()]
+        }));
+        e
+    })?;
+
+    // Extract paragraphs from the provided content
+    let paragraphs = ai_service.extract_paragraphs(&content);
+    let total = paragraphs.len();
+    let mut completed = 0;
+    let mut all_chunks = Vec::new();
+    let mut first_error: Option<String> = None;
+
+    // Translate each paragraph and emit progress
+    for paragraph in &paragraphs {
+        if paragraph.trim().is_empty() {
+            continue;
+        }
+
+        match ai_service.translate_single_paragraph_bilingual(
+            paragraph,
+            "auto",
+            "zh-CN"
+        ).await {
+            Ok(translated_para) => {
+                completed += 1;
+                all_chunks.push(translated_para.clone());
+
+                // Emit progress event
+                let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+                    "item_id": item_id,
+                    "total": total,
+                    "completed": completed,
+                    "html_chunk": translated_para,
+                    "is_complete": false,
+                    "cached": false
+                }));
+            }
+            Err(e) => {
+                let error_msg = format!("Translation failed at paragraph {}: {}", completed + 1, e);
+                log_to_file(&error_msg);
+                eprintln!("{}", error_msg);
+                first_error = Some(error_msg.clone());
+
+                let _ = app_handle.emit_to("main", "translation-error", serde_json::json!({
+                    "item_id": item_id,
+                    "error": error_msg,
+                    "paragraph_index": completed + 1
+                }));
+
+                break;
+            }
+        }
+    }
+
+    // Check if we had an error
+    if let Some(error) = first_error {
+        let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+            "item_id": item_id,
+            "total": total,
+            "completed": completed,
+            "html_chunk": "",
+            "is_complete": true,
+            "cached": false,
+            "has_error": true,
+            "error_messages": [error],
+            "partial_content": all_chunks.join("\n")
+        }));
+
+        return Err(format!("Translation failed. Check ~/.rss-reader/ai_errors.log for details."));
+    }
+
+    // Success - combine all chunks
+    let bilingual = all_chunks.join("\n");
+    let result = format!(
+        r#"<div class="bilingual-content" data-cached="false">{}</div>"#,
+        bilingual
+    );
+
+    // Emit final completion event
+    let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
+        "item_id": item_id,
+        "total": total,
+        "completed": total,
+        "html_chunk": "",
+        "is_complete": true,
+        "cached": false,
+        "has_error": false,
+        "error_messages": []
+    }));
+
+    // Save to database
+    let now = chrono::Utc::now();
+    sqlx::query(
+        "UPDATE feed_items SET translated_content = $1, translated_at = $2 WHERE id = $3"
+    )
+    .bind(&result)
+    .bind(&now)
+    .bind(item_id)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| {
+        let err = format!("Failed to save translation: {}", e);
+        log_to_file(&err);
+        err
+    })?;
+
+    Ok(result)
+}
+
 #[tauri::command]
 pub async fn classify_item(
     app_handle: AppHandle,
