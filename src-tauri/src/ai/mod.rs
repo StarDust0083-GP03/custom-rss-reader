@@ -325,44 +325,81 @@ impl AiService {
     }
 
     /// Split a large paragraph that exceeds MAX_CHARS_PER_SEGMENT
+    /// 尽可能在句子末尾断开，避免句子被截断
     fn split_large_paragraph(&self, paragraph: &str) -> Vec<String> {
         let mut chunks = Vec::new();
         let mut current = String::new();
-        let mut chars = paragraph.chars().peekable();
+        let mut last_sentence_end = 0; // 记录上一个句子结尾的位置
 
-        while chars.peek().is_some() {
-            let c = chars.next().unwrap();
+        // 句子结束标点（中英文）
+        let sentence_endings = ['。', '！', '？', '.', '!', '?', '；', ';', '…'];
+
+        let chars: Vec<char> = paragraph.chars().collect();
+        let mut i = 0;
+
+        while i < chars.len() {
+            let c = chars[i];
             current.push(c);
 
-            // Check if we should split
-            if current.len() >= MAX_CHARS_PER_SEGMENT {
-                // Look ahead to find a good breaking point
-                let mut temp = String::new();
-                let mut found_break = false;
+            // 检查是否是句子结尾
+            let is_sentence_end = sentence_endings.contains(&c);
 
-                // Check next 100 characters for sentence ending
-                for next_c in chars.by_ref().take(100) {
-                    temp.push(next_c);
-                    // Sentence endings in Chinese and English
-                    if "。！？.!?".contains(next_c) {
-                        current.push_str(&temp);
+            // 检查特殊标点：省略号
+            if c == '…' && i + 1 < chars.len() && chars[i + 1] == '…' {
+                // 省略号是句子结尾，继续添加下一个字符
+                i += 1;
+                current.push('…');
+            }
+
+            if is_sentence_end {
+                last_sentence_end = current.len();
+            }
+
+            // 检查是否需要分割
+            if current.len() >= MAX_CHARS_PER_SEGMENT {
+                // 策略1：如果在限制内有句子结尾，在那里断开
+                if last_sentence_end > MAX_CHARS_PER_SEGMENT / 2 {
+                    // 有合适的句子结尾位置
+                    let sentence_content: String = current.drain(..last_sentence_end).collect();
+                    chunks.push(sentence_content);
+                    last_sentence_end = 0;
+                } else {
+                    // 策略2：向前查找句子结尾（最多看200字符）
+                    let mut found = false;
+                    let look_ahead = std::cmp::min(200, chars.len() - i - 1);
+
+                    for j in 1..=look_ahead {
+                        let next_idx = i + j;
+                        if next_idx >= chars.len() {
+                            break;
+                        }
+                        let next_c = chars[next_idx];
+                        current.push(next_c);
+
+                        if sentence_endings.contains(&next_c) {
+                            // 找到句子结尾，在此断开
+                            i = next_idx;
+                            chunks.push(current.clone());
+                            current.clear();
+                            last_sentence_end = 0;
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if !found {
+                        // 策略3：找不到句子结尾，强制在当前位置断开
                         chunks.push(current.clone());
                         current.clear();
-                        temp.clear();
-                        found_break = true;
-                        break;
+                        last_sentence_end = 0;
                     }
                 }
-
-                if !found_break {
-                    // No sentence ending found, force split at current position
-                    chunks.push(current.clone());
-                    current = temp;
-                }
             }
+
+            i += 1;
         }
 
-        // Add remaining content
+        // 添加剩余内容
         if !current.is_empty() {
             chunks.push(current);
         }
@@ -873,5 +910,368 @@ No additional text or explanation."#.to_string();
 
         let response = self.chat_completion(messages).await?;
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 创建测试用的 AiService 实例
+    fn create_test_service() -> AiService {
+        AiService::new(AiConfig {
+            api_key: "test-key".to_string(),
+            base_url: "https://test.example.com/v1".to_string(),
+            model: "test-model".to_string(),
+            max_tokens: Some(1000),
+            temperature: Some(0.7),
+        }).unwrap()
+    }
+
+    /// 生成指定长度的文本，包含句子结尾标点
+    fn generate_text_with_sentences(sentence_count: usize, chars_per_sentence: usize) -> String {
+        let mut result = String::new();
+        for i in 0..sentence_count {
+            // 生成句子内容
+            let content_len = chars_per_sentence.saturating_sub(1); // 留一个字符给句号
+            let content: String = "测试内容".chars().cycle().take(content_len).collect();
+            result.push_str(&content);
+            result.push('。');
+        }
+        result
+    }
+
+    #[test]
+    fn test_split_large_paragraph_basic() {
+        let service = create_test_service();
+
+        // 测试：单个段落切分，应该在句子结尾断开
+        // 生成 5 个句子，每个句子 800 字符，总计 4000 字符（超过 MAX_CHARS_PER_SEGMENT=3000）
+        let text = generate_text_with_sentences(5, 800);
+        assert!(text.len() > MAX_CHARS_PER_SEGMENT);
+
+        let chunks = service.split_large_paragraph(&text);
+
+        // 验证：应该切分成多个块
+        assert!(chunks.len() > 1, "Should split into multiple chunks");
+
+        // 验证：每个块应该以句子结尾标点结束
+        for (i, chunk) in chunks.iter().enumerate() {
+            let trimmed = chunk.trim_end();
+            if !trimmed.is_empty() {
+                let last_char = trimmed.chars().last().unwrap();
+                let valid_endings = ['。', '！', '？', '.', '!', '?', '；', ';'];
+                assert!(
+                    valid_endings.contains(&last_char),
+                    "Chunk {} should end with sentence punctuation, got '{}'. Chunk ends with: {:?}",
+                    i,
+                    last_char,
+                    &chunk[chunk.len().saturating_sub(50)..]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_split_large_paragraph_preserves_content() {
+        let service = create_test_service();
+
+        // 测试：切分后合并应该等于原文
+        let text = generate_text_with_sentences(10, 500);
+        let chunks = service.split_large_paragraph(&text);
+        let merged: String = chunks.join("");
+
+        assert_eq!(text, merged, "Merged chunks should equal original text");
+    }
+
+    #[test]
+    fn test_split_large_paragraph_short_text() {
+        let service = create_test_service();
+
+        // 测试：短文本不应该被切分
+        let text = "这是一个短文本。不需要切分。";
+        let chunks = service.split_large_paragraph(text);
+
+        assert_eq!(chunks.len(), 1, "Short text should not be split");
+        assert_eq!(chunks[0], text);
+    }
+
+    #[test]
+    fn test_split_large_paragraph_exact_boundary() {
+        let service = create_test_service();
+
+        // 测试：刚好在边界上的句子
+        // 构造一个每句约 1000 字符的文本，使得 MAX_CHARS_PER_SEGMENT 正好在句子之间
+        let mut text = String::new();
+        for i in 0..5 {
+            let sentence = format!("句子{}。", i);
+            let padding = "内容".repeat((MAX_CHARS_PER_SEGMENT / 2 - sentence.len()) / 2);
+            text.push_str(&padding);
+            text.push_str(&sentence);
+        }
+
+        let chunks = service.split_large_paragraph(&text);
+
+        // 验证切分是合理的
+        for chunk in &chunks {
+            assert!(!chunk.is_empty(), "Chunks should not be empty");
+        }
+    }
+
+    #[test]
+    fn test_split_large_paragraph_mixed_endings() {
+        let service = create_test_service();
+
+        // 测试：混合句子结尾标点
+        // 使用较短的句子，确保能在句子结尾断开
+        let mut text = String::new();
+        let endings = ['。', '！', '？', '.', '!', '?'];
+
+        for (i, _) in (0..20).enumerate() {
+            let padding = "测试内容".repeat(100); // 约 400 字符，确保在限制内有句子结尾
+            text.push_str(&padding);
+            text.push(endings[i % endings.len()]);
+        }
+
+        let chunks = service.split_large_paragraph(&text);
+
+        // 验证：合并后等于原文
+        let merged: String = chunks.join("");
+        assert_eq!(text, merged, "Merged chunks should equal original text");
+
+        // 验证大多数块以有效标点结束（允许最后一个块不满足）
+        let valid_endings = ['。', '！', '？', '.', '!', '?', '；', ';'];
+        let mut valid_count = 0;
+        for chunk in &chunks {
+            if let Some(last_char) = chunk.trim_end().chars().last() {
+                if valid_endings.contains(&last_char) {
+                    valid_count += 1;
+                }
+            }
+        }
+        // 至少 80% 的块应该以句子结尾结束
+        let ratio = valid_count as f32 / chunks.len() as f32;
+        assert!(ratio >= 0.8, "At least 80% of chunks should end with sentence punctuation, got {}%", ratio * 100.0);
+    }
+
+    #[test]
+    fn test_merge_paragraphs_basic() {
+        let service = create_test_service();
+
+        // 测试：小段落合并
+        let paragraphs: Vec<String> = (0..5)
+            .map(|i| format!("<p>段落{}内容</p>", i))
+            .collect();
+
+        let merged = service.merge_paragraphs(paragraphs.clone());
+
+        // 验证：所有内容都被保留
+        let merged_text = merged.join("\n\n");
+        for para in &paragraphs {
+            assert!(
+                merged_text.contains(para),
+                "Merged text should contain all original paragraphs"
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_paragraphs_respects_limit() {
+        let service = create_test_service();
+
+        // 测试：合并后的每个批次不超过限制
+        // 创建多个小段落，总计超过 MAX_CHARS_PER_SEGMENT
+        let paragraphs: Vec<String> = (0..10)
+            .map(|i| format!("<p>{}</p>", "内容".repeat(400))) // 每个约 800 字符
+            .collect();
+
+        let merged = service.merge_paragraphs(paragraphs);
+
+        // 验证每个合并后的批次不超过限制（考虑分隔符）
+        for (i, batch) in merged.iter().enumerate() {
+            assert!(
+                batch.len() <= MAX_CHARS_PER_SEGMENT + 100, // 允许小误差
+                "Batch {} exceeds limit: {} > {}",
+                i,
+                batch.len(),
+                MAX_CHARS_PER_SEGMENT
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_paragraphs_large_one() {
+        let service = create_test_service();
+
+        // 测试：单个超大段落应该被切分
+        let large_paragraph = format!("<p>{}</p>", "内容".repeat(2000)); // 约 4000 字符
+        let paragraphs = vec![large_paragraph.clone()];
+
+        let merged = service.merge_paragraphs(paragraphs);
+
+        // 单个大段落应该被切分
+        assert!(merged.len() > 1, "Large paragraph should be split");
+    }
+
+    #[test]
+    fn test_extract_paragraphs_from_html() {
+        let service = create_test_service();
+
+        // 测试：从 HTML 提取段落
+        let html = r#"
+            <div>
+                <p class="intro">第一段落内容</p>
+                <p>第二段落内容</p>
+                <p id="last">第三段落内容</p>
+            </div>
+        "#;
+
+        let paragraphs = service.extract_paragraphs(html);
+
+        assert!(!paragraphs.is_empty(), "Should extract paragraphs from HTML");
+
+        // 验证提取的内容包含原始段落
+        let all_text = paragraphs.join(" ");
+        assert!(all_text.contains("第一段落"), "Should contain first paragraph");
+        assert!(all_text.contains("第二段落"), "Should contain second paragraph");
+        assert!(all_text.contains("第三段落"), "Should contain third paragraph");
+    }
+
+    #[test]
+    fn test_extract_paragraphs_plain_text() {
+        let service = create_test_service();
+
+        // 测试：纯文本按双换行分割
+        // 注意：merge_paragraphs 会合并小段落，所以最终段落数可能少于原始段落数
+        let text = "第一段落。\n\n第二段落。\n\n第三段落。";
+
+        let paragraphs = service.extract_paragraphs(text);
+
+        // 验证：至少提取出一个段落，且内容被保留
+        assert!(!paragraphs.is_empty(), "Should extract at least one paragraph");
+
+        // 验证内容被保留（可能被合并，但内容应该完整）
+        let merged_text = paragraphs.join("\n\n");
+        assert!(merged_text.contains("第一段落"), "Should contain first paragraph content");
+        assert!(merged_text.contains("第二段落"), "Should contain second paragraph content");
+        assert!(merged_text.contains("第三段落"), "Should contain third paragraph content");
+    }
+
+    #[test]
+    fn test_is_translation_truncated() {
+        let service = create_test_service();
+
+        // 测试：明显截断的翻译
+        let original = "这是一个很长的原始文本，包含足够多的内容来进行截断检测。".repeat(10);
+        let truncated = "这是一个翻译"; // 太短
+
+        assert!(
+            service.is_translation_truncated(&original, &truncated),
+            "Should detect truncation for very short translation"
+        );
+
+        // 测试：完整的翻译
+        let complete = original.repeat(2); // 翻译通常更长
+        assert!(
+            !service.is_translation_truncated(&original, &complete),
+            "Should not detect truncation for complete translation"
+        );
+    }
+
+    #[test]
+    fn test_is_translation_truncated_by_ending() {
+        let service = create_test_service();
+
+        // 测试：句子结尾检测
+        let original = "这是一个完整的句子。".repeat(50); // 足够长
+        let no_ending = "这是翻译但缺少结尾标点".repeat(40);
+
+        assert!(
+            service.is_translation_truncated(&original, &no_ending),
+            "Should detect truncation by missing ending punctuation"
+        );
+    }
+
+    #[test]
+    fn test_is_translation_truncated_unbalanced_markdown() {
+        let service = create_test_service();
+
+        // 测试：不平衡的 Markdown 标记
+        let original = "这是一段**加粗**和`代码`的文本。".repeat(20);
+        let unbalanced = "这是翻译**只有开头".repeat(20); // 缺少结尾的 **
+
+        assert!(
+            service.is_translation_truncated(&original, &unbalanced),
+            "Should detect truncation by unbalanced Markdown"
+        );
+    }
+
+    /// 模拟翻译测试：验证切分与合并逻辑的完整性
+    #[test]
+    fn test_split_and_merge_integrity() {
+        let service = create_test_service();
+
+        // 创建一个模拟的长文章
+        let article = generate_text_with_sentences(20, 300); // 20 个句子，每句约 300 字符
+
+        // 第一步：切分
+        let chunks = service.split_large_paragraph(&article);
+
+        // 验证切分完整性
+        let reconstructed: String = chunks.join("");
+        assert_eq!(article, reconstructed, "Split should preserve all content");
+
+        // 验证每个切分点都是句子结尾
+        for (i, chunk) in chunks.iter().enumerate() {
+            if i < chunks.len() - 1 {
+                // 非最后一块
+                let last_char = chunk.trim_end().chars().last().unwrap();
+                let valid_endings = ['。', '！', '？', '.', '!', '?', '；', ';'];
+                assert!(
+                    valid_endings.contains(&last_char),
+                    "Non-final chunk {} should end at sentence boundary, got '{}'",
+                    i,
+                    last_char
+                );
+            }
+        }
+    }
+
+    /// 测试边界情况：刚好在 MAX_CHARS_PER_SEGMENT 边界
+    #[test]
+    fn test_boundary_case() {
+        let service = create_test_service();
+
+        // 构造一个刚好超过边界的文本
+        let mut text = String::new();
+        while text.len() < MAX_CHARS_PER_SEGMENT {
+            text.push_str("测试句子内容。");
+        }
+        // 再添加一些内容确保超过边界
+        text.push_str("额外的句子。更多内容。");
+
+        let chunks = service.split_large_paragraph(&text);
+
+        // 验证切分正确
+        assert!(chunks.len() > 1, "Should split text that exceeds limit");
+
+        // 验证合并后等于原文
+        let merged: String = chunks.join("");
+        assert_eq!(text, merged);
+    }
+
+    /// 测试嵌套 HTML 标签的处理
+    #[test]
+    fn test_nested_html_tags() {
+        let service = create_test_service();
+
+        let html = r#"<p>外层段落<strong>加粗内容<em>斜体</em></strong>继续文本。</p>"#;
+        let paragraphs = service.extract_paragraphs(html);
+
+        assert!(!paragraphs.is_empty(), "Should extract nested HTML");
+        assert!(
+            paragraphs[0].contains("<strong>") || paragraphs[0].contains("加粗"),
+            "Should preserve nested tags or content"
+        );
     }
 }
