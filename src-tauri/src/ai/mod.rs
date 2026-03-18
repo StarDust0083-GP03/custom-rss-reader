@@ -391,9 +391,15 @@ impl AiService {
         }
 
         let system_prompt = format!(
-            "You are a professional translator. Translate the following HTML content from {} to {}. \
-            Preserve ALL HTML structure, tags, and formatting exactly. Only translate the text content, \
-            not the HTML tags. Return ONLY the translated HTML, no explanations.",
+            "You are a professional translator. Translate the following content from {} to {}. \
+            \n\n\
+            IMPORTANT FORMATTING RULES: \
+            1. Preserve ALL HTML structure, tags, and formatting exactly. \
+            2. Preserve ALL Markdown formatting: bold (**text**), italic (*text*), code (`text`), links ([text](url)), lists, headers, etc. \
+            3. Only translate the text content, not HTML tags or Markdown syntax. \
+            4. Keep the exact same structure - same number of paragraphs, same formatting. \
+            5. Return ONLY the translated content, no explanations or notes. \
+            6. Translate the COMPLETE content, do not skip or truncate any part.",
             source_lang, target_lang
         );
 
@@ -422,10 +428,8 @@ impl AiService {
             match self.chat_completion_with_tokens(messages, max_tokens).await {
                 Ok(translated) => {
                     // Check if translation appears to be truncated
-                    // A truncated translation is typically much shorter than expected
-                    let min_expected_length = (paragraph.len() as f32 * 0.5) as usize;
-                    if translated.len() < min_expected_length && paragraph.len() > 500 {
-                        eprintln!("Warning: Translation may be truncated (input: {}, output: {}). Retrying with split.",
+                    if self.is_translation_truncated(paragraph, &translated) {
+                        eprintln!("Warning: Translation appears truncated (input: {}, output: {}). Retrying with split.",
                             paragraph.len(), translated.len());
                         // Try splitting the paragraph and translating in parts
                         return self.translate_long_paragraph_bilingual(paragraph, source_lang, target_lang).await;
@@ -453,6 +457,60 @@ impl AiService {
         }
     }
 
+    /// Check if translation appears to be truncated
+    fn is_translation_truncated(&self, original: &str, translated: &str) -> bool {
+        // Skip check for short content
+        if original.len() < 200 {
+            return false;
+        }
+
+        // Check 1: Translation is much shorter than expected (less than 40%)
+        // This catches obvious truncation from max_tokens limit
+        let min_ratio = 0.4;
+        if translated.len() < (original.len() as f32 * min_ratio) as usize {
+            return true;
+        }
+
+        // Check 2: Translation ends mid-sentence (no proper ending punctuation)
+        // Common sentence endings: 。！？. ! ?
+        let trimmed = translated.trim_end();
+        if !trimmed.is_empty() {
+            let last_char = trimmed.chars().last().unwrap();
+            let proper_endings = ['。', '！', '？', '.', '!', '?', '」', '」', '》', '】', ')', '）', '`', '"', '\''];
+            if !proper_endings.contains(&last_char) {
+                // Might be truncated mid-sentence
+                // But also check if original ends similarly (could be intentional)
+                let orig_trimmed = original.trim_end();
+                if let Some(orig_last) = orig_trimmed.chars().last() {
+                    if proper_endings.contains(&orig_last) && !proper_endings.contains(&last_char) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Check 3: Unbalanced Markdown/HTML tags (incomplete translation)
+        // Count opening vs closing tags/markers
+        let open_bold = translated.matches("**").count();
+        if open_bold % 2 != 0 {
+            return true;
+        }
+
+        let open_code = translated.matches('`').count();
+        if open_code % 2 != 0 {
+            return true;
+        }
+
+        // Check for unclosed HTML tags (simple check)
+        let open_tags = translated.matches('<').count();
+        let close_tags = translated.matches('>').count();
+        if open_tags != close_tags {
+            return true;
+        }
+
+        false
+    }
+
     /// Translate a single chunk without recursion (helper for long paragraphs)
     async fn translate_single_chunk(
         &self,
@@ -461,9 +519,15 @@ impl AiService {
         target_lang: &str,
     ) -> Result<String, AiError> {
         let system_prompt = format!(
-            "You are a professional translator. Translate the following HTML content from {} to {}. \
-            Preserve ALL HTML structure, tags, and formatting exactly. Only translate the text content, \
-            not the HTML tags. Return ONLY the translated HTML, no explanations.",
+            "You are a professional translator. Translate the following content from {} to {}. \
+            \n\n\
+            IMPORTANT FORMATTING RULES: \
+            1. Preserve ALL HTML structure, tags, and formatting exactly. \
+            2. Preserve ALL Markdown formatting: bold (**text**), italic (*text*), code (`text`), links ([text](url)), lists, headers, etc. \
+            3. Only translate the text content, not HTML tags or Markdown syntax. \
+            4. Keep the exact same structure - same number of paragraphs, same formatting. \
+            5. Return ONLY the translated content, no explanations or notes. \
+            6. Translate the COMPLETE content, do not skip or truncate any part.",
             source_lang, target_lang
         );
 
@@ -486,6 +550,14 @@ impl AiService {
 
             match self.chat_completion_with_tokens(messages, max_tokens).await {
                 Ok(translated) => {
+                    // Check for truncation
+                    if self.is_translation_truncated(chunk, &translated) {
+                        eprintln!("Warning: Chunk translation truncated (input: {}, output: {}).",
+                            chunk.len(), translated.len());
+                        // For chunks, we can't split further, so just use what we got
+                        // But log a warning
+                    }
+
                     return Ok(format!(
                         r#"<div class="translation-paragraph">
 <div class="paragraph-original">{}</div>
@@ -568,15 +640,16 @@ impl AiService {
 
         // 构造系统提示：要求 LLM 保持段落结构
         let system_prompt = format!(
-            "You are a professional translator. Translate the following HTML content from {} to {}. \
+            "You are a professional translator. Translate the following content from {} to {}. \
             The content contains multiple paragraphs separated by double newlines (\\n\\n). \
             \n\n\
-            IMPORTANT: \
+            IMPORTANT FORMATTING RULES: \
             1. Preserve ALL HTML structure, tags, and formatting exactly. \
-            2. Only translate the text content, not the HTML tags. \
-            3. Keep the exact same paragraph structure - use \\n\\n between translated paragraphs. \
-            4. You MUST translate ALL paragraphs, not just some of them. \
-            5. Return ONLY the translated HTML with \\n\\n separators, no explanations.",
+            2. Preserve ALL Markdown formatting: bold (**text**), italic (*text*), code (`text`), links ([text](url)), lists, headers, etc. \
+            3. Only translate the text content, not HTML tags or Markdown syntax. \
+            4. Keep the exact same paragraph structure - use \\n\\n between translated paragraphs. \
+            5. You MUST translate ALL paragraphs, do not skip or truncate any part. \
+            6. Return ONLY the translated content with \\n\\n separators, no explanations.",
             source_lang, target_lang
         );
 
