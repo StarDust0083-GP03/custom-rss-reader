@@ -2,6 +2,13 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
+use scraper;
+use tokio::sync::Semaphore;
+
+lazy_static::lazy_static! {
+    // 全局 LLM 并发限制，最多同时 3 个请求
+    static ref LLM_SEMAPHORE: Semaphore = Semaphore::new(3);
+}
 
 // 翻译分段配置
 // 每段最大字符数 - 设置较小值以提高成功率
@@ -9,6 +16,15 @@ use thiserror::Error;
 const MAX_CHARS_PER_SEGMENT: usize = 3000; // 约 2000-2500 tokens
 // 最大重试次数
 const MAX_RETRIES: usize = 2;
+
+// Escape HTML special characters for safe display
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
 
 #[derive(Error, Debug)]
 pub enum AiError {
@@ -118,6 +134,11 @@ impl AiService {
     }
 
     async fn send_request(&self, request: ChatRequest) -> Result<String, AiError> {
+        // Acquire permit before making LLM API call (limit concurrent requests to 3)
+        let _permit = LLM_SEMAPHORE.acquire().await.map_err(|e| {
+            AiError::ApiError(format!("Failed to acquire semaphore: {}", e))
+        })?;
+
         let response = self
             .client
             .post(format!("{}/chat/completions", self.config.base_url))
@@ -145,180 +166,215 @@ impl AiService {
             .ok_or_else(|| AiError::ApiError("No response from API".to_string()))
     }
 
-    /// Translate content with paragraph-by-paragraph bilingual format
-    /// Extracts paragraphs and translates each one separately
+    /// Translate HTML content with paragraph-by-paragraph bilingual format
+    /// Preserves HTML structure: each block element is translated separately
+    /// For HTML content: returns bilingual blocks without extra wrapper divs
+    /// For plain text: wraps each paragraph in translation-paragraph div
     pub async fn translate_bilingual_segmented(
         &self,
         content: &str,
         source_lang: &str,
         target_lang: &str,
     ) -> Result<String, AiError> {
-        // Extract paragraphs from HTML content
-        let paragraphs = self.extract_paragraphs(content);
-        let mut results = Vec::new();
+        // Check if content is HTML
+        let is_html = content.contains('<') && (content.contains("</p>") || content.contains("</h") || content.contains("</div"));
 
-        // Translate each paragraph separately
-        for (index, para) in paragraphs.iter().enumerate() {
-            if para.trim().is_empty() {
-                continue;
+        if is_html {
+            // HTML path: extract blocks, translate preserving tags
+            let blocks = self.extract_blocks(content);
+            let mut results = Vec::new();
+
+            for (index, block) in blocks.iter().enumerate() {
+                if block.trim().is_empty() {
+                    continue;
+                }
+
+                match self.translate_html_block_bilingual(block, source_lang, target_lang).await {
+                    Ok(result) => {
+                        results.push(result);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to translate block {}: {}", index + 1, e);
+                        // Keep original block as fallback (no wrapper div for HTML)
+                        results.push(block.clone());
+                    }
+                }
             }
 
-            match self.translate_single_paragraph_bilingual(para, source_lang, target_lang).await {
-                Ok(result) => {
-                    results.push(result);
+            Ok(results.join("\n"))
+        } else {
+            // Plain text path: extract by paragraphs
+            let paragraphs = self.extract_paragraphs_plain(content);
+            let mut results = Vec::new();
+
+            for (index, para) in paragraphs.iter().enumerate() {
+                if para.trim().is_empty() {
+                    continue;
                 }
-                Err(e) => {
-                    // Log error but continue with other paragraphs
-                    eprintln!("Failed to translate paragraph {}: {}", index + 1, e);
-                    // Keep original paragraph as fallback
-                    results.push(format!(r#"<div class="translation-paragraph">{}</div>"#, para));
+
+                match self.translate_plain_paragraph_bilingual(para, source_lang, target_lang).await {
+                    Ok(result) => {
+                        results.push(result);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to translate paragraph {}: {}", index + 1, e);
+                        results.push(format!(r#"<div class="translation-paragraph">{}</div>"#, para));
+                    }
                 }
             }
+
+            Ok(results.join("\n"))
         }
-
-        Ok(results.join("\n"))
     }
 
     /// Extract paragraphs from HTML content by <p> tags or double line breaks
     /// Then merge small paragraphs into batches up to MAX_CHARS_PER_SEGMENT
+    /// DEPRECATED: Use extract_blocks instead for better HTML preservation
     pub fn extract_paragraphs(&self, content: &str) -> Vec<String> {
-        let mut raw_paragraphs = Vec::new();
-
-        // First: extract raw paragraphs by <p> tags
-        if content.contains("<p") {
-            let mut current = String::new();
-            let mut in_p_tag = false;
-            let mut p_depth: i32 = 0;
-            let chars = content.chars().collect::<Vec<_>>();
-            let mut i = 0;
-
-            while i < chars.len() {
-                // Check for opening <p> tag
-                if i + 2 < chars.len() && chars[i] == '<' && chars[i + 1] == 'p' {
-                    let next_char = if i + 3 < chars.len() { chars[i + 2] } else { ' ' };
-                    if next_char == '>' || next_char == ' ' || next_char == '\t' || next_char == '/' {
-                        // Save any content before this <p> tag
-                        if !in_p_tag && !current.trim().is_empty() {
-                            raw_paragraphs.push(current.trim().to_string());
-                            current.clear();
-                        }
-                        in_p_tag = true;
-                        if next_char != '/' {
-                            p_depth += 1;
-                        }
-                        // Extract the complete tag
-                        while i < chars.len() && chars[i] != '>' {
-                            current.push(chars[i]);
-                            i += 1;
-                        }
-                        if i < chars.len() {
-                            current.push(chars[i]); // push '>'
-                            i += 1;
-                        }
-                        continue;
-                    }
-                }
-                // Check for closing </p> tag
-                else if i + 3 < chars.len() && chars[i] == '<' && chars[i + 1] == '/' && chars[i + 2] == 'p' && chars[i + 3] == '>' {
-                    current.push_str("</p>");
-                    i += 4;
-                    p_depth = p_depth.saturating_sub(1);
-                    if p_depth == 0 {
-                        in_p_tag = false;
-                        if !current.trim().is_empty() {
-                            raw_paragraphs.push(current.trim().to_string());
-                        }
-                        current.clear();
-                    }
-                    continue;
-                }
-
-                if in_p_tag {
-                    current.push(chars[i]);
-                }
-                i += 1;
-            }
-
-            // Add any remaining content
-            if !current.trim().is_empty() {
-                raw_paragraphs.push(current.trim().to_string());
-            }
-        }
-
-        // Second fallback: split by double newlines (plain text paragraphs)
-        if raw_paragraphs.is_empty() {
-            for para in content.split("\n\n") {
-                let trimmed = para.trim();
-                if !trimmed.is_empty() {
-                    raw_paragraphs.push(trimmed.to_string());
-                }
-            }
-        }
-
-        // Final fallback: treat entire content as one paragraph
-        if raw_paragraphs.is_empty() && !content.trim().is_empty() {
-            raw_paragraphs.push(content.trim().to_string());
-        }
-
-        // Now merge small paragraphs into batches up to MAX_CHARS_PER_SEGMENT
-        self.merge_paragraphs(raw_paragraphs)
+        self.extract_blocks(content)
     }
 
-    /// Merge small paragraphs into batches up to MAX_CHARS_PER_SEGMENT
-    /// Only merges paragraphs smaller than MIN_MERGE_SIZE
-    fn merge_paragraphs(&self, paragraphs: Vec<String>) -> Vec<String> {
-        let mut merged = Vec::new();
-        let mut current_batch = String::new();
-        let mut current_length = 0;
-        let mut para_count = 0;
+    /// Extract HTML block elements (p, h1-h6, ul, ol, li, blockquote, pre, etc.)
+    /// Each block element becomes a separate translation unit
+    /// Plain text fallback: split by double newlines
+    pub fn extract_blocks(&self, content: &str) -> Vec<String> {
+        let mut blocks = Vec::new();
 
-        for para in paragraphs {
-            let para_length = para.len();
+        // Check if content has HTML tags
+        if content.contains('<') {
+            let document = scraper::Html::parse_fragment(content);
 
-            // If this single paragraph exceeds the limit, split it
-            if para_length > MAX_CHARS_PER_SEGMENT {
-                // Flush current batch first
-                if !current_batch.is_empty() {
-                    merged.push(current_batch.clone());
-                    current_batch.clear();
-                    current_length = 0;
-                    para_count = 0;
+            // Block-level HTML elements that should be translated separately
+            let block_selectors = [
+                "p", "h1", "h2", "h3", "h4", "h5", "h6",
+                "ul", "ol", "li",
+                "blockquote", "pre",
+                "table", "thead", "tbody", "tr", "th", "td",
+                "div", "section", "article",
+                "figure", "figcaption",
+                "hr",
+            ];
+
+            for selector in &block_selectors {
+                let selector_res = scraper::Selector::parse(selector);
+                if let Ok(s) = selector_res {
+                    for element in document.select(&s) {
+                        // Skip elements that are descendants of other block elements
+                        // to avoid nested/duplicate content
+                        if self.has_block_ancestor(&element) {
+                            continue;
+                        }
+                        // Get outer HTML directly from element
+                        let outer_html = element.html();
+                        let trimmed = outer_html.trim();
+                        if !trimmed.is_empty() {
+                            blocks.push(trimmed.to_string());
+                        }
+                    }
                 }
-                // Split the large paragraph
-                let chunks = self.split_large_paragraph(&para);
+            }
+
+            // If no block elements found, try any element with content
+            if blocks.is_empty() {
+                let any_selector = scraper::Selector::parse("*").unwrap();
+                for element in document.select(&any_selector) {
+                    let outer_html = element.html();
+                    let trimmed = outer_html.trim();
+                    if !trimmed.is_empty() && trimmed.len() > 5 {
+                        blocks.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+
+        // Fallback: plain text paragraphs split by double newlines
+        if blocks.is_empty() {
+            for para in content.split("\n\n") {
+                let trimmed = para.trim();
+                if !trimmed.is_empty() && trimmed.len() > 5 {
+                    blocks.push(trimmed.to_string());
+                }
+            }
+        }
+
+        // Final fallback: treat entire content as one block
+        if blocks.is_empty() && !content.trim().is_empty() {
+            blocks.push(content.trim().to_string());
+        }
+
+        // Merge small blocks together (under 500 chars) to reduce API calls
+        self.merge_small_blocks(blocks)
+    }
+
+    /// Check if an element has any ancestor that is a block-level element
+    /// (to avoid extracting nested/duplicate blocks)
+    fn has_block_ancestor(&self, element: &scraper::ElementRef) -> bool {
+        const BLOCK_TAGS: [&str; 24] = [
+            "p", "h1", "h2", "h3", "h4", "h5", "h6",
+            "ul", "ol", "li",
+            "blockquote", "pre",
+            "table", "thead", "tbody", "tr", "th", "td",
+            "div", "section", "article",
+            "figure", "figcaption",
+            "hr",
+        ];
+        let mut ancestor = element.parent(); // Option<NodeRef>
+        while let Some(ref a_node) = ancestor {
+            if let Some(elem) = a_node.value().as_element() {
+                let tag = elem.name();
+                if BLOCK_TAGS.contains(&&tag) {
+                    return true;
+                }
+            }
+            ancestor = a_node.parent();
+        }
+        false
+    }
+
+    /// Merge small blocks together to reduce translation calls
+    fn merge_small_blocks(&self, blocks: Vec<String>) -> Vec<String> {
+        let mut merged = Vec::new();
+        let mut current = String::new();
+        let mut current_len = 0;
+
+        for block in &blocks {
+            let block_len = block.len();
+
+            // If single block is too large, split it
+            if block_len > MAX_CHARS_PER_SEGMENT {
+                if !current.is_empty() {
+                    merged.push(current.clone());
+                    current.clear();
+                    current_len = 0;
+                }
+                let chunks = self.split_large_paragraph(&block);
                 merged.extend(chunks);
                 continue;
             }
 
-            // 更激进的合并策略：只有超过字符限制时才刷新
-            // 不限制段落数量，让更多段落合并在一起
-            let should_flush = if current_length + para_length > MAX_CHARS_PER_SEGMENT {
-                // Would exceed limit, must flush
-                true
-            } else {
-                false
-            };
-
-            if should_flush && !current_batch.is_empty() {
-                merged.push(current_batch.clone());
-                current_batch.clear();
-                current_length = 0;
-                para_count = 0;
+            // Check if adding this block would exceed limit
+            let separator_len = if current.is_empty() { 0 } else { 2 }; // "\n\n"
+            if current_len + separator_len + block_len > MAX_CHARS_PER_SEGMENT && !current.is_empty() {
+                merged.push(current.clone());
+                current.clear();
+                current_len = 0;
             }
 
-            // Add paragraph to current batch
-            if !current_batch.is_empty() {
-                current_batch.push_str("\n\n");
-                current_length += 2;
+            if !current.is_empty() {
+                current.push_str("\n\n");
+                current_len += 2;
             }
-            current_batch.push_str(&para);
-            current_length += para_length;
-            para_count += 1;
+            current.push_str(&block);
+            current_len += block_len;
         }
 
-        // Add remaining batch
-        if !current_batch.is_empty() {
-            merged.push(current_batch);
+        if !current.is_empty() {
+            merged.push(current);
+        }
+
+        // If nothing was merged (all blocks were large), return original
+        if merged.is_empty() && !blocks.is_empty() {
+            return blocks;
         }
 
         merged
@@ -407,21 +463,34 @@ impl AiService {
         chunks
     }
 
-    /// Translate a single paragraph and return bilingual format
-    /// If the paragraph contains multiple sub-paragraphs (separated by \n\n), split them for bilingual display
-    /// Handles long paragraphs by splitting if translation is truncated
-    pub async fn translate_single_paragraph_bilingual(
+    /// Extract paragraphs from plain text (double newline separation)
+    /// Does not handle HTML - use extract_blocks for HTML content
+    fn extract_paragraphs_plain(&self, content: &str) -> Vec<String> {
+        let mut paragraphs = Vec::new();
+
+        for para in content.split("\n\n") {
+            let trimmed = para.trim();
+            if !trimmed.is_empty() {
+                paragraphs.push(trimmed.to_string());
+            }
+        }
+
+        // Fallback: treat as single paragraph
+        if paragraphs.is_empty() && !content.trim().is_empty() {
+            paragraphs.push(content.trim().to_string());
+        }
+
+        paragraphs
+    }
+
+    /// Translate a plain text paragraph with bilingual format
+    /// Uses wrapper divs since there's no HTML structure
+    async fn translate_plain_paragraph_bilingual(
         &self,
         paragraph: &str,
         source_lang: &str,
         target_lang: &str,
     ) -> Result<String, AiError> {
-        // Check if this is a merged paragraph (contains \n\n)
-        if paragraph.contains("\n\n") {
-            // Use Box::pin for recursive async call
-            return Box::pin(self.translate_merged_paragraph_bilingual(paragraph, source_lang, target_lang)).await;
-        }
-
         // Check if paragraph is too long and should be split proactively
         if paragraph.len() > MAX_CHARS_PER_SEGMENT {
             return self.translate_long_paragraph_bilingual(paragraph, source_lang, target_lang).await;
@@ -431,24 +500,17 @@ impl AiService {
             "You are a professional translator. Translate the following content from {} to {}. \
             \n\n\
             IMPORTANT FORMATTING RULES: \
-            1. Preserve ALL HTML structure, tags, and formatting exactly. \
-            2. Preserve ALL Markdown formatting: bold (**text**), italic (*text*), code (`text`), links ([text](url)), lists, headers, etc. \
-            3. Only translate the text content, not HTML tags or Markdown syntax. \
-            4. Keep the exact same structure - same number of paragraphs, same formatting. \
-            5. Return ONLY the translated content, no explanations or notes. \
-            6. Translate the COMPLETE content, do not skip or truncate any part.",
+            1. Preserve ALL Markdown formatting: bold (**text**), italic (*text*), code (`text`), links ([text](url)), lists, headers, etc. \
+            2. Only translate the text content, keep Markdown syntax as-is. \
+            3. Return ONLY the translated content, no explanations or notes. \
+            4. Translate the COMPLETE content, do not skip or truncate any part.",
             source_lang, target_lang
         );
 
-        // Calculate max_tokens based on paragraph length
-        // Translation typically needs 1.5-2x the input tokens
-        // Approximate: 1 token ≈ 2 chars for Chinese, 0.75 chars for English
-        // Use 1.5x multiplier for safety
         let paragraph_chars = paragraph.len() as u32;
         let estimated_tokens = (paragraph_chars as f32 / 1.5).ceil() as u32;
-        let max_tokens = std::cmp::max(estimated_tokens * 2, 1000); // At least 1000 tokens, 2x for translation
+        let max_tokens = std::cmp::max(estimated_tokens * 2, 1000);
 
-        // Retry logic for transient failures
         let mut attempt = 0;
         loop {
             let messages = vec![
@@ -464,15 +526,11 @@ impl AiService {
 
             match self.chat_completion_with_tokens(messages, max_tokens).await {
                 Ok(translated) => {
-                    // Check if translation appears to be truncated
                     if self.is_translation_truncated(paragraph, &translated) {
-                        eprintln!("Warning: Translation appears truncated (input: {}, output: {}). Retrying with split.",
-                            paragraph.len(), translated.len());
-                        // Try splitting the paragraph and translating in parts
+                        eprintln!("Warning: Translation appears truncated. Retrying with split.");
                         return self.translate_long_paragraph_bilingual(paragraph, source_lang, target_lang).await;
                     }
 
-                    // Return paragraph with bilingual format
                     return Ok(format!(
                         r#"<div class="translation-paragraph">
 <div class="paragraph-original">{}</div>
@@ -485,13 +543,272 @@ impl AiService {
                     if attempt >= MAX_RETRIES {
                         return Err(e);
                     }
-                    // Wait before retry (exponential backoff)
                     tokio::time::sleep(Duration::from_millis(500 * (attempt + 1) as u64)).await;
-                    eprintln!("Translation attempt {} failed, retrying... Error: {}", attempt + 1, e);
                     attempt += 1;
                 }
             }
         }
+    }
+
+    /// Translate a block (HTML or plain text) with bilingual format
+    /// Auto-detects content type and uses appropriate translation
+    pub async fn translate_block_bilingual(
+        &self,
+        block: &str,
+        source_lang: &str,
+        target_lang: &str,
+    ) -> Result<String, AiError> {
+        // Check if block contains HTML tags
+        let is_html = block.contains('<') && (block.contains("</") || block.contains("/>"));
+
+        if is_html {
+            self.translate_html_block_bilingual(block, source_lang, target_lang).await
+        } else {
+            self.translate_plain_paragraph_bilingual(block, source_lang, target_lang).await
+        }
+    }
+
+    /// Translate an HTML block element (p, h1-h6, li, blockquote, etc.) with bilingual format
+    /// Preserves HTML tags and structure - returns bilingual content with original + translated side by side
+    async fn translate_html_block_bilingual(
+        &self,
+        block: &str,
+        source_lang: &str,
+        target_lang: &str,
+    ) -> Result<String, AiError> {
+        // Check if block is too long
+        if block.len() > MAX_CHARS_PER_SEGMENT {
+            return self.translate_long_html_block_bilingual(block, source_lang, target_lang).await;
+        }
+
+        let system_prompt = format!(
+            "You are a professional translator. Translate the following HTML content from {} to {}. \
+            \n\n\
+            IMPORTANT INSTRUCTIONS: \
+            1. Preserve ALL HTML tags, attributes, and structure EXACTLY as written. \
+            2. Only translate the TEXT CONTENT inside HTML elements. \
+            3. Keep all HTML tags, attributes, and markup in their original positions. \
+            4. Do NOT wrap the output in any additional HTML elements. \
+            5. Do NOT add classes, divs, or any extra markup. \
+            6. Return ONLY the translated HTML content with the exact same tag structure.",
+            source_lang, target_lang
+        );
+
+        let block_chars = block.len() as u32;
+        let estimated_tokens = (block_chars as f32 / 1.5).ceil() as u32;
+        let max_tokens = std::cmp::max(estimated_tokens * 2, 1000);
+
+        let mut attempt = 0;
+        loop {
+            let messages = vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt.clone(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: block.to_string(),
+                },
+            ];
+
+            match self.chat_completion_with_tokens(messages, max_tokens).await {
+                Ok(translated) => {
+                    // Return bilingual format: original followed by translated
+                    // Original HTML is preserved as-is (not escaped), translated text is escaped for safe display
+                    return Ok(format!(
+                        "<div class=\"translation-paragraph\"><div class=\"paragraph-original\">{}</div>\n<div class=\"paragraph-translated\">{}</div></div>",
+                        block,
+                        escape_html(&translated)
+                    ));
+                }
+                Err(e) => {
+                    if attempt >= MAX_RETRIES {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(Duration::from_millis(500 * (attempt + 1) as u64)).await;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// Translate a long HTML block by splitting into text segments
+    async fn translate_long_html_block_bilingual(
+        &self,
+        block: &str,
+        source_lang: &str,
+        target_lang: &str,
+    ) -> Result<String, AiError> {
+        // For HTML blocks, split at text boundaries while preserving tags
+        let chunks = self.split_html_block(block);
+        let mut results = Vec::new();
+
+        for chunk in chunks {
+            if chunk.trim().is_empty() {
+                continue;
+            }
+            // Use translate_single_chunk which doesn't have recursion check
+            match self.translate_html_single_chunk(&chunk, source_lang, target_lang).await {
+                Ok(translated) => results.push(translated),
+                Err(e) => {
+                    eprintln!("Failed to translate HTML chunk: {}", e);
+                    // Show original HTML as-is, translated shows same content as escaped text (fallback)
+                    results.push(format!(
+                        r#"<div class="translation-paragraph"><div class="paragraph-original">{}</div><div class="paragraph-translated">{}</div></div>"#,
+                        chunk, escape_html(&chunk)
+                    ));
+                }
+            }
+        }
+
+        Ok(results.join("\n"))
+    }
+
+    /// Translate a single HTML chunk (assumed to be within size limit)
+    async fn translate_html_single_chunk(
+        &self,
+        chunk: &str,
+        source_lang: &str,
+        target_lang: &str,
+    ) -> Result<String, AiError> {
+        let system_prompt = format!(
+            "You are a professional translator. Translate the following HTML content from {} to {}. \
+            \n\n\
+            IMPORTANT INSTRUCTIONS: \
+            1. Preserve ALL HTML tags, attributes, and structure EXACTLY as written. \
+            2. Only translate the TEXT CONTENT inside HTML elements. \
+            3. Keep all HTML tags, attributes, and markup in their original positions. \
+            4. Do NOT wrap the output in any additional HTML elements. \
+            5. Do NOT add classes, divs, or any extra markup. \
+            6. Return ONLY the translated HTML content with the exact same tag structure.",
+            source_lang, target_lang
+        );
+
+        let chunk_chars = chunk.len() as u32;
+        let estimated_tokens = (chunk_chars as f32 / 1.5).ceil() as u32;
+        let max_tokens = std::cmp::max(estimated_tokens * 2, 1000);
+
+        let mut attempt = 0;
+        loop {
+            let messages = vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt.clone(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: chunk.to_string(),
+                },
+            ];
+
+            match self.chat_completion_with_tokens(messages, max_tokens).await {
+                Ok(translated) => {
+                    // Original HTML is preserved as-is (not escaped), translated text is escaped
+                    return Ok(format!(
+                        r#"<div class="translation-paragraph">
+<div class="paragraph-original">{}</div>
+<div class="paragraph-translated">{}</div>
+</div>"#,
+                        chunk,
+                        escape_html(&translated)
+                    ));
+                }
+                Err(e) => {
+                    if attempt >= MAX_RETRIES {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(Duration::from_millis(500 * (attempt + 1) as u64)).await;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// Split an HTML block at text boundaries for long content
+    fn split_html_block(&self, block: &str) -> Vec<String> {
+        let mut chunks = Vec::new();
+        let mut current = String::new();
+        let mut current_len = 0;
+
+        // Simple approach: split by text content, keeping tags intact
+        // Find text segments and group them
+        let mut in_tag = false;
+        let mut tag_buffer = String::new();
+        let mut text_buffer = String::new();
+
+        for c in block.chars() {
+            match c {
+                '<' => {
+                    if !in_tag {
+                        // Save pending text
+                        if !text_buffer.is_empty() {
+                            let test_len = current_len + text_buffer.len();
+                            if test_len > MAX_CHARS_PER_SEGMENT && !current.is_empty() {
+                                chunks.push(current.clone());
+                                current.clear();
+                                current_len = 0;
+                            }
+                            if !current.is_empty() {
+                                current.push_str(&text_buffer);
+                                current_len += text_buffer.len();
+                            } else {
+                                current = text_buffer.clone();
+                                current_len = text_buffer.len();
+                            }
+                            text_buffer.clear();
+                        }
+                    }
+                    in_tag = true;
+                    tag_buffer.push(c);
+                }
+                '>' => {
+                    tag_buffer.push(c);
+                    if in_tag {
+                        // Save the tag
+                        if current_len + tag_buffer.len() > MAX_CHARS_PER_SEGMENT && !current.is_empty() {
+                            chunks.push(current.clone());
+                            current.clear();
+                            current_len = 0;
+                        }
+                        if !current.is_empty() {
+                            current.push_str(&tag_buffer);
+                            current_len += tag_buffer.len();
+                        } else {
+                            current = tag_buffer.clone();
+                            current_len = tag_buffer.len();
+                        }
+                        tag_buffer.clear();
+                        in_tag = false;
+                    }
+                }
+                _ => {
+                    if in_tag {
+                        tag_buffer.push(c);
+                    } else {
+                        text_buffer.push(c);
+                    }
+                }
+            }
+        }
+
+        // Flush buffers
+        if !text_buffer.is_empty() {
+            if current_len + text_buffer.len() > MAX_CHARS_PER_SEGMENT && !current.is_empty() {
+                chunks.push(current.clone());
+                current = text_buffer;
+            } else {
+                current.push_str(&text_buffer);
+            }
+        }
+        if !current.is_empty() {
+            chunks.push(current);
+        }
+
+        if chunks.is_empty() && !block.is_empty() {
+            chunks.push(block.to_string());
+        }
+
+        chunks
     }
 
     /// Check if translation appears to be truncated
@@ -669,10 +986,9 @@ impl AiService {
             return Ok(String::new());
         }
 
-        // If only one paragraph, use single paragraph translation
+        // If only one paragraph, use block translation
         if sub_paragraphs.len() == 1 {
-            // Use Box::pin for recursive async call
-            return Box::pin(self.translate_single_paragraph_bilingual(sub_paragraphs[0], source_lang, target_lang)).await;
+            return self.translate_block_bilingual(sub_paragraphs[0], source_lang, target_lang).await;
         }
 
         // 构造系统提示：要求 LLM 保持段落结构
@@ -750,7 +1066,7 @@ impl AiService {
                     ));
                 } else {
                     // 单独翻译这个段落
-                    match self.translate_single_paragraph_bilingual(original, source_lang, target_lang).await {
+                    match self.translate_block_bilingual(original, source_lang, target_lang).await {
                         Ok(translated_single) => results.push(translated_single),
                         Err(e) => {
                             // 翻译失败，使用原文
@@ -931,7 +1247,7 @@ mod tests {
     /// 生成指定长度的文本，包含句子结尾标点
     fn generate_text_with_sentences(sentence_count: usize, chars_per_sentence: usize) -> String {
         let mut result = String::new();
-        for i in 0..sentence_count {
+        for _ in 0..sentence_count {
             // 生成句子内容
             let content_len = chars_per_sentence.saturating_sub(1); // 留一个字符给句号
             let content: String = "测试内容".chars().cycle().take(content_len).collect();
@@ -1063,7 +1379,7 @@ mod tests {
             .map(|i| format!("<p>段落{}内容</p>", i))
             .collect();
 
-        let merged = service.merge_paragraphs(paragraphs.clone());
+        let merged = service.merge_small_blocks(paragraphs.clone());
 
         // 验证：所有内容都被保留
         let merged_text = merged.join("\n\n");
@@ -1085,7 +1401,7 @@ mod tests {
             .map(|i| format!("<p>{}</p>", "内容".repeat(400))) // 每个约 800 字符
             .collect();
 
-        let merged = service.merge_paragraphs(paragraphs);
+        let merged = service.merge_small_blocks(paragraphs);
 
         // 验证每个合并后的批次不超过限制（考虑分隔符）
         for (i, batch) in merged.iter().enumerate() {
@@ -1107,7 +1423,7 @@ mod tests {
         let large_paragraph = format!("<p>{}</p>", "内容".repeat(2000)); // 约 4000 字符
         let paragraphs = vec![large_paragraph.clone()];
 
-        let merged = service.merge_paragraphs(paragraphs);
+        let merged = service.merge_small_blocks(paragraphs);
 
         // 单个大段落应该被切分
         assert!(merged.len() > 1, "Large paragraph should be split");
@@ -1138,23 +1454,116 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_paragraphs_plain_text() {
+    fn test_extract_blocks_preserves_html_structure() {
         let service = create_test_service();
 
-        // 测试：纯文本按双换行分割
-        // 注意：merge_paragraphs 会合并小段落，所以最终段落数可能少于原始段落数
-        let text = "第一段落。\n\n第二段落。\n\n第三段落。";
+        // Test: HTML with various block elements should be extracted as separate blocks
+        let html = r#"
+<h1>标题</h1>
+<p>第一段落内容，<strong>加粗文本</strong>和<em>斜体</em>。</p>
+<ul>
+<li>列表项1</li>
+<li>列表项2</li>
+</ul>
+<blockquote>引用内容</blockquote>
+"#;
 
-        let paragraphs = service.extract_paragraphs(text);
+        let blocks = service.extract_blocks(html);
 
-        // 验证：至少提取出一个段落，且内容被保留
-        assert!(!paragraphs.is_empty(), "Should extract at least one paragraph");
+        assert!(!blocks.is_empty(), "Should extract blocks from HTML");
 
-        // 验证内容被保留（可能被合并，但内容应该完整）
-        let merged_text = paragraphs.join("\n\n");
-        assert!(merged_text.contains("第一段落"), "Should contain first paragraph content");
-        assert!(merged_text.contains("第二段落"), "Should contain second paragraph content");
-        assert!(merged_text.contains("第三段落"), "Should contain third paragraph content");
+        // Verify different block types are captured
+        let all_text = blocks.join(" ");
+        assert!(all_text.contains("标题"), "Should contain h1 content");
+        assert!(all_text.contains("第一段落"), "Should contain paragraph");
+        assert!(all_text.contains("加粗文本"), "Should preserve inline formatting within block");
+        assert!(all_text.contains("列表项1"), "Should contain list item");
+        assert!(all_text.contains("引用内容"), "Should contain blockquote");
+    }
+
+    #[test]
+    fn test_extract_blocks_from_simple_article() {
+        let service = create_test_service();
+
+        // Simulate a simple article with proper HTML structure
+        let html = r#"<article>
+<h2>文章标题</h2>
+<p>这是第一段，包含一些<code>代码</code>和<a href="https://example.com">链接</a>。</p>
+<p>第二段内容。</p>
+</article>"#;
+
+        let blocks = service.extract_blocks(html);
+
+        // Debug output
+        println!("DEBUG: extracted {} blocks:", blocks.len());
+        for (i, b) in blocks.iter().enumerate() {
+            println!("  block {}: {:?}", i, b);
+        }
+
+        // After merging small blocks, we may have fewer blocks; verify content is preserved
+        assert!(!blocks.is_empty(), "Should extract some blocks, got {}", blocks.len());
+
+        // Verify HTML structure and content are preserved
+        let joined = blocks.join("\n");
+        assert!(joined.contains("<h2"), "Should preserve h2 tag. Got: {}", joined);
+        assert!(joined.contains("文章标题"), "Should contain article title. Got: {}", joined);
+        assert!(joined.contains("<p"), "Should preserve p tags. Got: {}", joined);
+        assert!(joined.contains("这是第一段"), "Should contain first paragraph. Got: {}", joined);
+        assert!(joined.contains("第二段内容"), "Should contain second paragraph. Got: {}", joined);
+        assert!(joined.contains("<code>代码</code>"), "Should preserve inline code. Got: {}", joined);
+        assert!(joined.contains("<a href="), "Should preserve links. Got: {}", joined);
+    }
+
+    #[test]
+    fn test_extract_blocks_plain_text_fallback() {
+        let service = create_test_service();
+
+        // Plain text without HTML
+        let text = "第一段。\n\n第二段。\n\n第三段。";
+
+        let blocks = service.extract_blocks(text);
+
+        assert!(!blocks.is_empty(), "Should extract plain text paragraphs");
+        assert!(blocks.len() >= 1, "Should have at least one block");
+
+        let joined = blocks.join("\n\n");
+        assert!(joined.contains("第一段"), "Should contain first paragraph");
+        assert!(joined.contains("第二段"), "Should contain second paragraph");
+        assert!(joined.contains("第三段"), "Should contain third paragraph");
+    }
+
+    #[test]
+    fn test_extract_blocks_empty_content() {
+        let service = create_test_service();
+
+        // Empty content should return empty
+        let blocks = service.extract_blocks("");
+        assert!(blocks.is_empty(), "Empty content should yield no blocks");
+
+        // Whitespace only
+        let blocks = service.extract_blocks("   \n\n   ");
+        assert!(blocks.is_empty(), "Whitespace-only content should yield no blocks");
+    }
+
+    #[test]
+    fn test_escape_html() {
+        // Test the escape_html helper
+        let escaped = escape_html("<p>Test & \"quotes\"</p>");
+        assert_eq!(escaped, "&lt;p&gt;Test &amp; &quot;quotes&quot;&lt;/p&gt;");
+    }
+
+    #[test]
+    fn test_split_html_block_basic() {
+        let service = create_test_service();
+
+        // Simple HTML with text
+        let html = r#"<p>这是第一句话。这是第二句话。这是第三句话。</p>"#;
+        let chunks = service.split_html_block(html);
+
+        assert!(!chunks.is_empty(), "Should split HTML block");
+        // All chunks combined should equal original
+        let joined: String = chunks.join("");
+        assert_eq!(joined, html);
     }
 
     #[test]

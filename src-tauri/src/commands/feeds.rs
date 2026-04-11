@@ -82,7 +82,7 @@ fn load_ai_config(app_handle: &tauri::AppHandle) -> Option<AiConfig> {
         return Some(state.inner().clone());
     }
 
-    // Try to load from persistent storage
+    // Try to load from persistent storage using app_config_dir (macOS: ~/Library/Application Support/)
     let resource_path = app_handle.path().app_config_dir().ok()?;
     std::fs::create_dir_all(&resource_path).ok()?;
 

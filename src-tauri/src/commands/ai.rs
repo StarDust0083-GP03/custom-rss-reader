@@ -198,40 +198,36 @@ pub async fn translate_html_content_streaming(
         e
     })?;
 
-    // Extract paragraphs from the provided content
-    let paragraphs = ai_service.extract_paragraphs(&content);
-    let total = paragraphs.len();
+    // Extract HTML blocks for translation
+    let blocks = ai_service.extract_blocks(&content);
+    let total = blocks.len();
     let mut completed = 0;
-    let mut all_chunks = Vec::new();
+    let mut all_chunks: Vec<String> = Vec::new();
     let mut first_error: Option<String> = None;
 
-    // Translate each paragraph and emit progress
-    for paragraph in &paragraphs {
-        if paragraph.trim().is_empty() {
+    // Translate each block and emit progress
+    for block in &blocks {
+        if block.trim().is_empty() {
             continue;
         }
 
-        match ai_service.translate_single_paragraph_bilingual(
-            paragraph,
-            "auto",
-            "zh-CN"
-        ).await {
-            Ok(translated_para) => {
+        match ai_service.translate_block_bilingual(block, "auto", "zh-CN").await {
+            Ok(translated_block) => {
                 completed += 1;
-                all_chunks.push(translated_para.clone());
+                all_chunks.push(translated_block.clone());
 
                 // Emit progress event
                 let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
                     "item_id": item_id,
                     "total": total,
                     "completed": completed,
-                    "html_chunk": translated_para,
+                    "html_chunk": translated_block,
                     "is_complete": false,
                     "cached": false
                 }));
             }
             Err(e) => {
-                let error_msg = format!("Translation failed at paragraph {}: {}", completed + 1, e);
+                let error_msg = format!("Translation failed at block {}: {}", completed + 1, e);
                 log_to_file(&error_msg);
                 eprintln!("{}", error_msg);
                 first_error = Some(error_msg.clone());
@@ -355,11 +351,9 @@ pub async fn set_ai_config(
         })?;
     }
 
-    // Save to persistent storage using home directory for better compatibility
-    let home_dir = dirs::home_dir()
-        .ok_or_else(|| "Failed to get home directory".to_string())?;
-
-    let app_dir = home_dir.join(".rss-reader");
+    // Save to persistent storage using app_config_dir (macOS: ~/Library/Application Support/)
+    let app_dir = app_handle.path().app_config_dir()
+        .map_err(|e| format!("Failed to get config dir: {}", e))?;
 
     std::fs::create_dir_all(&app_dir)
         .map_err(|e| format!("Failed to create config dir: {}", e))?;
@@ -371,9 +365,9 @@ pub async fn set_ai_config(
     std::fs::write(&config_file, config_json)
         .map_err(|e| format!("Failed to write config file: {}", e))?;
 
-    // Save to app state
-    app_handle.manage(config);
-
+    // Note: We don't call manage() here because:
+    // 1. If state already exists, manage() won't replace it
+    // 2. get_ai_config_internal always loads from file to ensure freshness
     Ok(())
 }
 
@@ -454,41 +448,41 @@ pub async fn translate_item_bilingual_streaming(
         e
     })?;
 
-    // Extract paragraphs
-    let paragraphs = ai_service.extract_paragraphs(content);
-    let total = paragraphs.len();
+    // Extract blocks (HTML elements or plain text paragraphs)
+    let blocks = ai_service.extract_blocks(content);
+    let total = blocks.len();
     let mut completed = 0;
-    let mut all_chunks = Vec::new();
+    let mut all_chunks: Vec<String> = Vec::new();
     let mut first_error: Option<String> = None;
 
-    // Translate each paragraph and emit progress
-    for paragraph in &paragraphs {
-        if paragraph.trim().is_empty() {
+    // Translate each block and emit progress
+    for block in &blocks {
+        if block.trim().is_empty() {
             continue;
         }
 
-        match ai_service.translate_single_paragraph_bilingual(
-            paragraph,
+        match ai_service.translate_block_bilingual(
+            block,
             "auto",
             "zh-CN"
         ).await {
-            Ok(translated_para) => {
+            Ok(translated_block) => {
                 completed += 1;
-                all_chunks.push(translated_para.clone());
+                all_chunks.push(translated_block.clone());
 
-                // Emit progress event for this paragraph
+                // Emit progress event for this block
                 let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
                     "item_id": item_id,
                     "total": total,
                     "completed": completed,
-                    "html_chunk": translated_para,
+                    "html_chunk": translated_block,
                     "is_complete": false,
                     "cached": false
                 }));
             }
             Err(e) => {
                 // On first error, stop immediately and report failure
-                let error_msg = format!("Translation failed at paragraph {}: {}", completed + 1, e);
+                let error_msg = format!("Translation failed at block {}: {}", completed + 1, e);
                 log_to_file(&error_msg);
                 eprintln!("{}", error_msg);
                 first_error = Some(error_msg.clone());
@@ -568,21 +562,14 @@ pub async fn translate_item_bilingual_streaming(
 pub async fn get_ai_config(
     app_handle: AppHandle,
 ) -> Result<AiConfigResponse, String> {
-    // Try to get from app state
-    if let Some(config) = app_handle.try_state::<AiConfig>() {
-        let cfg = config.inner();
-        return Ok(AiConfigResponse {
-            api_key: cfg.api_key.clone(),
-            base_url: cfg.base_url.clone(),
-            model: cfg.model.clone(),
-        });
-    }
+    // Always load from file to ensure freshness
+    // (avoid stale cached state from app_handle.try_state())
 
-    // Try to load from persistent storage using home directory for better compatibility
-    let home_dir = dirs::home_dir()
-        .ok_or_else(|| "Failed to get home directory".to_string())?;
+    let app_dir = app_handle.path().app_config_dir()
+        .map_err(|e| format!("Failed to get config dir: {}", e))?;
 
-    let app_dir = home_dir.join(".rss-reader");
+    std::fs::create_dir_all(&app_dir)
+        .map_err(|e| format!("Failed to create config dir: {}", e))?;
 
     let config_file = app_dir.join("ai_config.json");
 
@@ -619,16 +606,11 @@ pub struct AiConfigResponse {
 }
 
 async fn get_ai_config_internal(app_handle: &AppHandle) -> Result<AiConfig, String> {
-    // Try to get from app state
-    if let Some(config) = app_handle.try_state::<AiConfig>() {
-        return Ok(config.inner().clone());
-    }
+    // Always load from file to ensure we have the latest config
+    // (avoid relying on cached state which may be stale after set_ai_config)
 
-    // Try to load from persistent storage using home directory for better compatibility
-    let home_dir = dirs::home_dir()
-        .ok_or_else(|| "Failed to get home directory".to_string())?;
-
-    let app_dir = home_dir.join(".rss-reader");
+    let app_dir = app_handle.path().app_config_dir()
+        .map_err(|e| format!("Failed to get config dir: {}", e))?;
 
     std::fs::create_dir_all(&app_dir)
         .map_err(|e| format!("Failed to create config dir: {}", e))?;
@@ -642,7 +624,7 @@ async fn get_ai_config_internal(app_handle: &AppHandle) -> Result<AiConfig, Stri
         let config: AiConfig = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse config file: {}", e))?;
 
-        // Store in app state
+        // Store in app state for future use (in case file hasn't changed)
         app_handle.manage(config.clone());
 
         Ok(config)

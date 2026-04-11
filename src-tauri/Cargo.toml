@@ -37,4 +37,5 @@ flate2 = "1.0"
 brotli = "6.0"
 uuid = { version = "1.0", features = ["v4"] }
 dirs = "5.0"
+lazy_static = "1.4"
 
