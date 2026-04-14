@@ -26,6 +26,23 @@ fn escape_html(s: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
+/// Sanitize HTML by allowing safe formatting tags while removing dangerous ones
+/// Used for LLM output to allow HTML rendering while preventing XSS
+fn sanitize_html(s: &str) -> String {
+    // Use ammonia crate for safe HTML sanitization
+    ammonia::Builder::new()
+        .add_tags(["p", "br", "strong", "b", "em", "i", "u", "s", "strike",
+            "span", "div", "pre", "code",
+            "h1", "h2", "h3", "h4", "h5", "h6",
+            "ul", "ol", "li",
+            "blockquote",
+            "a", "img",
+            "table", "thead", "tbody", "tr", "th", "td",
+            "hr", "sup", "sub"])
+        .clean(s)
+        .to_string()
+}
+
 #[derive(Error, Debug)]
 pub enum AiError {
     #[error("HTTP error: {0}")]
@@ -614,11 +631,11 @@ impl AiService {
             match self.chat_completion_with_tokens(messages, max_tokens).await {
                 Ok(translated) => {
                     // Return bilingual format: original followed by translated
-                    // Original HTML is preserved as-is (not escaped), translated text is escaped for safe display
+                    // Original HTML is preserved as-is (not escaped), translated text is sanitized for safe HTML rendering
                     return Ok(format!(
                         "<div class=\"translation-paragraph\"><div class=\"paragraph-original\">{}</div>\n<div class=\"paragraph-translated\">{}</div></div>",
                         block,
-                        escape_html(&translated)
+                        sanitize_html(&translated)
                     ));
                 }
                 Err(e) => {
@@ -710,7 +727,7 @@ impl AiService {
 <div class="paragraph-translated">{}</div>
 </div>"#,
                         chunk,
-                        escape_html(&translated)
+                        sanitize_html(&translated)
                     ));
                 }
                 Err(e) => {
