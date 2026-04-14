@@ -1228,6 +1228,7 @@ async function exportOpml() {
     const selected = await open({
       multiple: false,
       save: true,
+      defaultPath: "subscriptions.opml",
       filters: [{ name: "OPML", extensions: ["opml"] }],
     });
 
