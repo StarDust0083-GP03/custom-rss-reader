@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open, ask } from "@tauri-apps/plugin-dialog";
+import { open, save, ask } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 
 interface Subscription {
@@ -1225,16 +1225,13 @@ async function importOpml() {
 // 导出 OPML
 async function exportOpml() {
   try {
-    const selected = await open({
-      multiple: false,
-      save: true,
+    const filePath = await save({
       defaultPath: "subscriptions.opml",
       filters: [{ name: "OPML", extensions: ["opml"] }],
     });
 
-    if (!selected) return;
+    if (!filePath) return;
 
-    const filePath = typeof selected === "string" ? selected : (selected as any).path;
     setLoadingWithStatus(filePath, "Exporting OPML...");
     await invoke("export_opml", { filePath });
     clearLoadingStatus(true, "Export complete");
