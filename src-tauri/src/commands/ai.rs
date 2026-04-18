@@ -351,9 +351,10 @@ pub async fn set_ai_config(
         })?;
     }
 
-    // Save to persistent storage using app_config_dir (macOS: ~/Library/Application Support/)
-    let app_dir = app_handle.path().app_config_dir()
-        .map_err(|e| format!("Failed to get config dir: {}", e))?;
+    // Save to persistent storage using home directory
+    let home_dir = dirs::home_dir()
+        .ok_or_else(|| "Failed to get home directory".to_string())?;
+    let app_dir = home_dir.join(".rss-reader");
 
     std::fs::create_dir_all(&app_dir)
         .map_err(|e| format!("Failed to create config dir: {}", e))?;
@@ -565,8 +566,9 @@ pub async fn get_ai_config(
     // Always load from file to ensure freshness
     // (avoid stale cached state from app_handle.try_state())
 
-    let app_dir = app_handle.path().app_config_dir()
-        .map_err(|e| format!("Failed to get config dir: {}", e))?;
+    let home_dir = dirs::home_dir()
+        .ok_or_else(|| "Failed to get home directory".to_string())?;
+    let app_dir = home_dir.join(".rss-reader");
 
     std::fs::create_dir_all(&app_dir)
         .map_err(|e| format!("Failed to create config dir: {}", e))?;
@@ -609,8 +611,9 @@ async fn get_ai_config_internal(app_handle: &AppHandle) -> Result<AiConfig, Stri
     // Always load from file to ensure we have the latest config
     // (avoid relying on cached state which may be stale after set_ai_config)
 
-    let app_dir = app_handle.path().app_config_dir()
-        .map_err(|e| format!("Failed to get config dir: {}", e))?;
+    let home_dir = dirs::home_dir()
+        .ok_or_else(|| "Failed to get home directory".to_string())?;
+    let app_dir = home_dir.join(".rss-reader");
 
     std::fs::create_dir_all(&app_dir)
         .map_err(|e| format!("Failed to create config dir: {}", e))?;

@@ -82,11 +82,12 @@ fn load_ai_config(app_handle: &tauri::AppHandle) -> Option<AiConfig> {
         return Some(state.inner().clone());
     }
 
-    // Try to load from persistent storage using app_config_dir (macOS: ~/Library/Application Support/)
-    let resource_path = app_handle.path().app_config_dir().ok()?;
-    std::fs::create_dir_all(&resource_path).ok()?;
+    // Try to load from persistent storage using home directory
+    let home_dir = dirs::home_dir()?;
+    let app_dir = home_dir.join(".rss-reader");
+    std::fs::create_dir_all(&app_dir).ok()?;
 
-    let config_file = resource_path.join("ai_config.json");
+    let config_file = app_dir.join("ai_config.json");
     if config_file.exists() {
         let content = std::fs::read_to_string(&config_file).ok()?;
         let config: AiConfig = serde_json::from_str(&content).ok()?;

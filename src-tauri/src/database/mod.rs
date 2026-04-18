@@ -17,9 +17,10 @@ pub enum DbError {
 pub type Result<T> = std::result::Result<T, DbError>;
 
 pub async fn init_database(app_handle: &AppHandle) -> Result<SqlitePool> {
-    // Use app_config_dir for proper macOS support (~/Library/Application Support/com.hsf.rss-reader/)
-    let app_dir = app_handle.path().app_config_dir()
-        .map_err(|e| DbError::Migration(format!("Failed to get config dir: {}", e)))?;
+    // Use home directory for cross-platform compatibility
+    let home_dir = dirs::home_dir()
+        .ok_or_else(|| DbError::Migration("Failed to get home directory".to_string()))?;
+    let app_dir = home_dir.join(".rss-reader");
 
     // Create directory
     std::fs::create_dir_all(&app_dir)
