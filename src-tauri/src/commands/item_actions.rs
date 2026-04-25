@@ -98,6 +98,33 @@ pub async fn toggle_read_later(
 }
 
 #[tauri::command]
+pub async fn toggle_ignored(
+    pool: State<'_, SqlitePool>,
+    item_id: i64,
+) -> Result<bool, String> {
+    let item: (bool,) = sqlx::query_as(
+        "SELECT is_ignored FROM feed_items WHERE id = $1"
+    )
+    .bind(item_id)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| format!("Failed to get item: {}", e))?;
+
+    let new_value = !item.0;
+
+    sqlx::query(
+        "UPDATE feed_items SET is_ignored = $1 WHERE id = $2"
+    )
+    .bind(new_value)
+    .bind(item_id)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| format!("Failed to toggle ignored: {}", e))?;
+
+    Ok(new_value)
+}
+
+#[tauri::command]
 pub async fn get_favorites(
     pool: State<'_, SqlitePool>,
     limit: Option<i32>,

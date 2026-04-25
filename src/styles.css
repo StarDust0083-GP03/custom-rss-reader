@@ -254,6 +254,11 @@ body {
     color: white;
 }
 
+.badge.ignored-badge {
+    background: var(--muted-color);
+    color: var(--text-secondary);
+}
+
 .icon-btn {
     width: 22px;
     height: 22px;

@@ -13,10 +13,10 @@ async fn insert_feed_item(pool: &SqlitePool, item: &FeedItem) -> Result<i64, Str
         INSERT INTO feed_items (
             subscription_id, guid, title, link, content,
             description, author, published_at, is_website_content,
-            is_read, is_favorite, is_read_later, tags, category,
+            is_read, is_favorite, is_read_later, is_ignored, tags, category,
             translated_title, translated_content, translated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, 0, $10, $11, $12, $13, $14)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, 0, 0, $10, $11, $12, $13, $14)
         "#,
     )
     .bind(item.subscription_id)
@@ -314,6 +314,7 @@ pub async fn fetch_feed(
             is_read: false,
             is_favorite: false,
             is_read_later: false,
+            is_ignored: false,
             tags: None,
             category: None,
             translated_title: None,

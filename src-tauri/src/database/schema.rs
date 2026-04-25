@@ -43,6 +43,7 @@ pub struct FeedItem {
     pub is_read: bool,
     pub is_favorite: bool,
     pub is_read_later: bool,
+    pub is_ignored: bool, // Flag for ignored/skipped articles
     // AI-generated fields
     pub tags: Option<String>, // JSON array string: ["tag1", "tag2"]
     pub category: Option<String>,
@@ -65,6 +66,7 @@ pub struct NewFeedItem {
     pub is_read: bool,
     pub is_favorite: bool,
     pub is_read_later: bool,
+    pub is_ignored: bool, // Flag for ignored/skipped articles
     // AI-generated fields
     pub tags: Option<String>,
     pub category: Option<String>,

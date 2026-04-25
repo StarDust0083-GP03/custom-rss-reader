@@ -349,10 +349,22 @@ impl AiService {
     }
 
     /// Merge small blocks together to reduce translation calls
+    /// Avoids creating orphaned HTML by not separating container tags from their children
     fn merge_small_blocks(&self, blocks: Vec<String>) -> Vec<String> {
         let mut merged = Vec::new();
         let mut current = String::new();
         let mut current_len = 0;
+
+        // Tags that create hierarchical structure and should not be separated
+        // from their children or closing tags
+        let container_closing_tags = [
+            "</ul>", "</ol>", "</table>", "</thead>", "</tbody>", "</tfoot>",
+            "</div>", "</section>", "</article>", "</figure>", "</blockquote>", "</pre>",
+        ];
+        // Tags that should not be separated from their container's closing tag
+        let child_opening_tags = [
+            "<li", "<tr", "<th", "<td>",
+        ];
 
         for block in &blocks {
             let block_len = block.len();
@@ -369,15 +381,27 @@ impl AiService {
                 continue;
             }
 
+            // Determine if we need a separator before this block
+            // Don't separate closing container tags from child opening tags
+            let needs_separator = if current.is_empty() {
+                true
+            } else {
+                let current_ends_with_container = container_closing_tags.iter()
+                    .any(|tag| current.to_lowercase().ends_with(tag));
+                let block_starts_with_child = child_opening_tags.iter()
+                    .any(|tag| block.to_lowercase().starts_with(tag));
+                !(current_ends_with_container && block_starts_with_child)
+            };
+
             // Check if adding this block would exceed limit
-            let separator_len = if current.is_empty() { 0 } else { 2 }; // "\n\n"
+            let separator_len = if !needs_separator || current.is_empty() { 0 } else { 2 }; // "\n\n"
             if current_len + separator_len + block_len > MAX_CHARS_PER_SEGMENT && !current.is_empty() {
                 merged.push(current.clone());
                 current.clear();
                 current_len = 0;
             }
 
-            if !current.is_empty() {
+            if !current.is_empty() && needs_separator {
                 current.push_str("\n\n");
                 current_len += 2;
             }

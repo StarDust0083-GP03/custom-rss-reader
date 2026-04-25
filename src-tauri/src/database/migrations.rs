@@ -154,6 +154,19 @@ async fn add_missing_columns(pool: &SqlitePool) -> super::Result<()> {
             .ok();
     }
 
+    // Check and add is_ignored column to feed_items
+    let has_is_ignored = sqlx::query("SELECT is_ignored FROM feed_items LIMIT 1")
+        .fetch_optional(pool)
+        .await
+        .is_ok();
+
+    if !has_is_ignored {
+        sqlx::query("ALTER TABLE feed_items ADD COLUMN is_ignored BOOLEAN DEFAULT 0")
+            .execute(pool)
+            .await
+            .ok();
+    }
+
     Ok(())
 }
 

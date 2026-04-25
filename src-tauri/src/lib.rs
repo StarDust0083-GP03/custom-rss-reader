@@ -15,7 +15,7 @@ use tauri::Manager;
 use commands::{
     feeds::{fetch_all_feeds, fetch_feed, refresh_subscriptions, fetch_website_content, translate_website_content},
     items::{get_item, get_items, get_items_by_subscription, search_items, get_items_by_tag, get_all_tags},
-    item_actions::{mark_item_read, mark_all_read, toggle_favorite, toggle_read_later, get_favorites, get_read_later, get_unread, get_today_items, save_item_tags},
+    item_actions::{mark_item_read, mark_all_read, toggle_favorite, toggle_read_later, toggle_ignored, get_favorites, get_read_later, get_unread, get_today_items, save_item_tags},
     opml::import_opml,
     subs::{
         add_subscription, get_subscription, list_subscriptions, remove_subscription,
@@ -69,6 +69,7 @@ pub fn run() {
             mark_all_read,
             toggle_favorite,
             toggle_read_later,
+            toggle_ignored,
             get_favorites,
             get_read_later,
             get_unread,

@@ -245,19 +245,46 @@ pub async fn translate_html_content_streaming(
 
     // Check if we had an error
     if let Some(error) = first_error {
+        // Even on error, save partial translation so user can see what was translated
+        let partial_bilingual = all_chunks.join("\n");
+        let partial_result = if partial_bilingual.is_empty() {
+            String::new()
+        } else {
+            format!(
+                r#"<div class="bilingual-content" data-cached="false" data-partial="true">{}</div>"#,
+                partial_bilingual
+            )
+        };
+
+        // Save partial translation to database
+        if !partial_result.is_empty() {
+            let now = chrono::Utc::now();
+            let _ = sqlx::query(
+                "UPDATE feed_items SET translated_content = $1, translated_at = $2 WHERE id = $3"
+            )
+            .bind(&partial_result)
+            .bind(&now)
+            .bind(item_id)
+            .execute(pool.inner())
+            .await;
+        }
+
+        // Emit final failure event with partial content
         let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
             "item_id": item_id,
             "total": total,
             "completed": completed,
-            "html_chunk": "",
+            "html_chunk": partial_result,
             "is_complete": true,
             "cached": false,
             "has_error": true,
             "error_messages": [error],
-            "partial_content": all_chunks.join("\n")
+            "partial_content": partial_bilingual
         }));
 
-        return Err(format!("Translation failed. Check ~/.rss-reader/ai_errors.log for details."));
+        log_to_file(&format!("Translation stopped due to error (item {}), partial saved", item_id));
+        // Return Ok with partial content so frontend can display it
+        return Ok(partial_result);
     }
 
     // Success - combine all chunks
@@ -503,22 +530,46 @@ pub async fn translate_item_bilingual_streaming(
 
     // Check if we had an error
     if let Some(error) = first_error {
-        // Emit final failure event
+        // Even on error, save partial translation so user can see what was translated
+        let partial_bilingual = all_chunks.join("\n");
+        let partial_result = if partial_bilingual.is_empty() {
+            String::new()
+        } else {
+            format!(
+                r#"<div class="bilingual-content" data-cached="false" data-partial="true">{}</div>"#,
+                partial_bilingual
+            )
+        };
+
+        // Save partial translation to database
+        if !partial_result.is_empty() {
+            let now = chrono::Utc::now();
+            let _ = sqlx::query(
+                "UPDATE feed_items SET translated_content = $1, translated_at = $2 WHERE id = $3"
+            )
+            .bind(&partial_result)
+            .bind(&now)
+            .bind(item_id)
+            .execute(pool.inner())
+            .await;
+        }
+
+        // Emit final failure event with partial content
         let _ = app_handle.emit_to("main", "translation-progress", serde_json::json!({
             "item_id": item_id,
             "total": total,
             "completed": completed,
-            "html_chunk": "",
+            "html_chunk": partial_result,
             "is_complete": true,
             "cached": false,
             "has_error": true,
             "error_messages": [error],
-            "partial_content": all_chunks.join("\n")
+            "partial_content": partial_bilingual
         }));
 
-        log_to_file(&format!("Translation stopped due to error (item {})", item_id));
-        // Return error so frontend knows it failed
-        return Err(format!("Translation failed. Check ~/.rss-reader/ai_errors.log for details."));
+        log_to_file(&format!("Translation stopped due to error (item {}), partial saved", item_id));
+        // Return Ok with partial content so frontend can display it
+        return Ok(partial_result);
     }
 
     // Success - combine all chunks

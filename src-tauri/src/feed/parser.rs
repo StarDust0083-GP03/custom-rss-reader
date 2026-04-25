@@ -152,6 +152,7 @@ pub fn parse_with_logger(
                 is_read: false,
                 is_favorite: false,
                 is_read_later: false,
+                is_ignored: false,
                 tags: None,
                 category: None,
                 translated_title: None,

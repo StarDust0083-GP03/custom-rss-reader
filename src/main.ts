@@ -30,6 +30,7 @@ interface FeedItem {
   is_read: boolean;
   is_favorite: boolean;
   is_read_later: boolean;
+  is_ignored: boolean; // Flag for ignored/skipped articles
   tags: string | null; // JSON array string
   category: string | null;
   translated_title: string | null;
@@ -52,6 +53,9 @@ let unreadFilterEnabled: boolean = false; // Whether unread filter is additional
 let useWebView = false;
 // 按订阅源 ID 记住 webview 状态
 let webviewPerSubscription: Map<number, boolean> = new Map();
+// Track item selection time for ignored detection
+let lastSelectedTime: number = 0;
+let ignoreTimer: ReturnType<typeof setTimeout> | null = null;
 // AI 设置 - 翻译状态按文章ID管理
 let translationStateByItemId: Map<number, {
   useTranslation: boolean;
@@ -540,6 +544,7 @@ function renderItems(preserveScroll = false) {
       ${item.description ? `<div class="item-description">${item.description}</div>` : ""}
       ${tagsHtml}
       <div class="item-meta">
+        ${item.is_ignored ? '<span class="badge ignored-badge">Ignored</span>' : ""}
         ${item.is_favorite ? '<span class="badge">★ Favorite</span>' : ""}
         ${item.is_read_later ? '<span class="badge">Later</span>' : ""}
         ${translationBadge}
@@ -600,10 +605,62 @@ function selectItem(item: FeedItem) {
   if (!item.is_read) {
     markAsRead(item.id, true);
   }
+
+  // Set up ignore timer - if user reads for less than 1 second and takes no action, mark as ignored
+  setupIgnoreTimer(item);
+}
+
+// Set up timer to detect if user quickly abandons the article
+function setupIgnoreTimer(item: FeedItem) {
+  // Clear any existing timer
+  if (ignoreTimer !== null) {
+    clearTimeout(ignoreTimer);
+    ignoreTimer = null;
+  }
+
+  // Don't set up timer for already ignored items
+  if (item.is_ignored) {
+    return;
+  }
+
+  lastSelectedTime = Date.now();
+
+  ignoreTimer = setTimeout(async () => {
+    // Only mark as ignored if:
+    // 1. The same item is still selected
+    // 2. The item has not been marked as read (is_read should be true by now if user actually read it)
+    // 3. Less than 1 second elapsed between selection and timer fire
+    if (selectedItem?.id === item.id && !item.is_ignored) {
+      const elapsed = Date.now() - lastSelectedTime;
+      if (elapsed < 1000) {
+        try {
+          await invoke<boolean>("toggle_ignored", { itemId: item.id });
+          item.is_ignored = true;
+          renderItems(true);
+          console.log(`[Ignore] Article "${item.title}" marked as ignored (read for ${elapsed}ms)`);
+        } catch (error) {
+          console.error('[Ignore] Failed to toggle ignored:', error);
+        }
+      }
+    }
+    ignoreTimer = null;
+  }, 1000);
+}
+
+// Cancel ignore timer when user takes an action (scroll, translate, etc.)
+function cancelIgnoreTimer() {
+  if (ignoreTimer !== null) {
+    clearTimeout(ignoreTimer);
+    ignoreTimer = null;
+    console.log('[Ignore] Timer cancelled due to user action');
+  }
 }
 
 // 显示内容详情
 function renderItemDetail(item: FeedItem) {
+  // Cancel ignore timer since user is now viewing the article (engagement detected)
+  cancelIgnoreTimer();
+
   const detail = document.getElementById("detail-content");
   if (!detail) return;
 
@@ -1402,7 +1459,13 @@ async function translateItem(item: FeedItem, htmlContent?: string) {
           if (has_error) {
             currentState.hasError = true;
             currentState.errorMessage = error_messages?.[0] || "Translation failed";
-            currentState.inProgressContent = null;
+            // Use the partial content from html_chunk if available
+            if (html_chunk) {
+              currentState.inProgressContent = html_chunk;
+              item.translated_content = html_chunk;
+            } else {
+              currentState.inProgressContent = null;
+            }
             currentState.useTranslation = false;
 
             // 更新列表徽章
@@ -1411,7 +1474,11 @@ async function translateItem(item: FeedItem, htmlContent?: string) {
             // 只有当前选中的文章才渲染
             if (selectedItem?.id === item.id) {
               renderItemDetail(item);
-              showError(`Translation failed: ${currentState.errorMessage}. Check ~/.rss-reader/ai_errors.log for details.`);
+              if (html_chunk) {
+                showError(`Translation partially complete: ${currentState.errorMessage}`);
+              } else {
+                showError(`Translation failed: ${currentState.errorMessage}. Check ~/.rss-reader/ai_errors.log for details.`);
+              }
             }
             return;
           }
@@ -1437,10 +1504,19 @@ async function translateItem(item: FeedItem, htmlContent?: string) {
           }
         } else if (html_chunk) {
           // Append this paragraph chunk to state storage
+          // Normalize the chunk - ensure it's properly wrapped and closed
+          let normalizedChunk = html_chunk;
+          if (!normalizedChunk.endsWith("</div>")) {
+            normalizedChunk += "</div>";
+          }
           if (!currentState.inProgressContent) {
-            currentState.inProgressContent = `<div class="bilingual-content">\n${html_chunk}`;
+            currentState.inProgressContent = `<div class="bilingual-content">\n${normalizedChunk}`;
           } else {
-            currentState.inProgressContent += `\n${html_chunk}`;
+            // Ensure previous content is properly closed before adding new chunk
+            if (!currentState.inProgressContent.endsWith("</div>")) {
+              currentState.inProgressContent += "</div>";
+            }
+            currentState.inProgressContent += `\n${normalizedChunk}`;
           }
           // 只有当前选中的文章才渲染
           if (selectedItem?.id === item.id) {
@@ -1473,6 +1549,10 @@ async function translateItem(item: FeedItem, htmlContent?: string) {
       if (currentState) {
         currentState.abortController = null;
         currentState.hasError = false;
+        // Clean up any open divs from partial content
+        if (currentState.inProgressContent && !currentState.inProgressContent.endsWith("</div>")) {
+          currentState.inProgressContent += "</div>";
+        }
       }
       showSuccess("Translation cancelled");
     } else {
@@ -1481,6 +1561,10 @@ async function translateItem(item: FeedItem, htmlContent?: string) {
         currentState.hasError = true;
         currentState.errorMessage = String(error);
         currentState.abortController = null;
+        // Clean up any open divs from partial content
+        if (currentState.inProgressContent && !currentState.inProgressContent.endsWith("</div>")) {
+          currentState.inProgressContent += "</div>";
+        }
       }
       showError(`Translation failed: ${error}`);
       renderItems(true); // Update badge to show error
@@ -1860,6 +1944,12 @@ async function init() {
           htmlContent = undefined;
         }
       }
+
+      // 应用与显示相同的修复逻辑，确保翻译结果与显示一致
+      if (htmlContent) {
+        htmlContent = fixHtmlContent(htmlContent, selectedItem.link || '');
+        console.log('[Translate] Fixed HTML for translation, length:', htmlContent.length);
+      }
     }
 
     // 开始翻译
@@ -1936,6 +2026,9 @@ async function init() {
     }
   });
 
+  // Cancel ignore timer for any user interaction (indicates engagement)
+  cancelIgnoreTimer();
+
   // 初始化图片缩放功能
   initImageZoom();
   addZoomHintToImages();
@@ -1949,6 +2042,8 @@ async function init() {
 function initImageZoom(): void {
   // 使用事件委托处理图片点击
   document.getElementById('detail-content')?.addEventListener('click', (e) => {
+    // Cancel ignore timer on user interaction
+    cancelIgnoreTimer();
     const target = e.target as HTMLElement;
 
     // 检查是否点击了图片
