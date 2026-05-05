@@ -55,16 +55,6 @@ pub struct NewFeedItem {
     pub translated_at: Option<DateTime<Utc>>,
 }
 
-impl FeedItem {
-    /// Update the Markdown-cached content and return a new `FeedItem`.
-    #[allow(dead_code)]
-    pub fn with_content_md(&self, content_md: String) -> FeedItem {
-        let mut item = self.clone();
-        item.content_md = Some(content_md);
-        item
-    }
-}
-
 impl Default for NewFeedItem {
     fn default() -> Self {
         Self {

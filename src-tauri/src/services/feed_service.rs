@@ -4,11 +4,15 @@ use tokio::sync::Semaphore;
 
 use serde::Serialize;
 
-use crate::content_processor::html_to_markdown_pipeline;
 use crate::error::{AppError, Result};
 use crate::feed::parser::parse_feed;
 use crate::feed::FeedFetcher;
-use crate::models::{FeedItem, NewFeedItem, Subscription};
+use crate::models::{FeedItem, Subscription};
+
+#[cfg(test)]
+use crate::content_processor::html_to_markdown_pipeline;
+#[cfg(test)]
+use crate::models::NewFeedItem;
 use crate::repositories::{FeedItemRepository, SubscriptionRepository};
 
 /// Summary of a batch fetch operation.
@@ -35,7 +39,6 @@ pub struct FeedService {
     ai_service: Option<Arc<dyn crate::ai::service::AiService>>,
 }
 
-#[allow(dead_code)]
 impl FeedService {
     /// Create a new FeedService with only the item repository.
     /// Fulfills basic CRUD needs. Call builder methods to add optional capabilities.
@@ -60,34 +63,23 @@ impl FeedService {
         self
     }
 
-    /// Attach an AI service (needed for classification).
-    pub fn with_ai_service(mut self, ai: Arc<dyn crate::ai::service::AiService>) -> Self {
-        self.ai_service = Some(ai);
-        self
-    }
-
     // ------------------------------------------------------------------
-    // Basic CRUD passthrough
+    // Test helpers (only available in test builds)
     // ------------------------------------------------------------------
 
-    /// Create a new feed item from input.
+    #[cfg(test)]
     pub async fn create_item(&self, input: NewFeedItem) -> Result<FeedItem> {
         self.repo.create(input).await
     }
 
-    /// Get a feed item by ID.
+    #[cfg(test)]
     pub async fn get_item(&self, id: i64) -> Result<FeedItem> {
         self.repo.find_by_id(id).await
     }
 
-    /// List items for a subscription.
+    #[cfg(test)]
     pub async fn get_items_by_subscription(&self, subscription_id: i64) -> Result<Vec<FeedItem>> {
         self.repo.find_by_subscription(subscription_id).await
-    }
-
-    /// Delete a feed item by ID.
-    pub async fn remove_item(&self, id: i64) -> Result<()> {
-        self.repo.delete(id).await
     }
 
     // ------------------------------------------------------------------
@@ -238,16 +230,6 @@ impl FeedService {
     // Classification
     // ------------------------------------------------------------------
 
-    /// Classify a feed item using AI.
-    pub async fn classify_item(&self, item_id: i64, subscription_title: &str) -> Result<()> {
-        let ai = self
-            .ai_service
-            .as_ref()
-            .ok_or_else(|| AppError::Internal("AiService not configured".into()))?;
-        self.classify_item_inner(item_id, subscription_title, ai.as_ref())
-            .await
-    }
-
     /// Internal: classify using a concrete AiService reference.
     async fn classify_item_inner(
         &self,
@@ -279,6 +261,7 @@ impl FeedService {
     // ------------------------------------------------------------------
 
     /// Cache website content as Markdown for a feed item.
+    #[cfg(test)]
     pub async fn cache_website_content(&self, item_id: i64, raw_html: &str) -> Result<FeedItem> {
         let md = html_to_markdown_pipeline(raw_html)?;
         self.repo.update_content_md(item_id, &md).await

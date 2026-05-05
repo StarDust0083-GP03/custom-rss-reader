@@ -321,76 +321,6 @@ impl AiService for LlmAiService {
 }
 
 // ---------------------------------------------------------------------------
-// Mock implementation for testing
-// ---------------------------------------------------------------------------
-
-/// Mock AI service that returns hardcoded responses (no network calls).
-#[allow(dead_code)]
-pub struct MockAiService;
-
-#[async_trait]
-impl AiService for MockAiService {
-    async fn translate_bilingual(
-        &self,
-        content: &str,
-        _source_lang: &str,
-        target_lang: &str,
-    ) -> Result<String> {
-        let blocks = if content.contains('<') {
-            extract_blocks(content, MAX_CHARS_PER_SEGMENT)
-        } else {
-            extract_paragraphs_plain(content)
-        };
-
-        let mut results = Vec::new();
-        for block in &blocks {
-            if block.trim().is_empty() {
-                continue;
-            }
-            results.push(format!(
-                r#"<div class="translation-paragraph">
-<div class="paragraph-original">{}</div>
-<div class="paragraph-translated">[{translated}] {}</div>
-</div>"#,
-                block,
-                block,
-                translated = target_lang
-            ));
-        }
-
-        Ok(results.join("\n"))
-    }
-
-    async fn classify(&self, request: ClassificationRequest) -> Result<ClassificationResponse> {
-        let content_snippet = request
-            .content_snippet
-            .as_deref()
-            .unwrap_or("")
-            .chars()
-            .take(500)
-            .collect::<String>();
-
-        let response = simulated_classification_api(
-            &request.title,
-            &request.description.unwrap_or_default(),
-            &content_snippet,
-        );
-
-        parse_classification_json(&response)
-    }
-
-    async fn test_connection(&self) -> Result<String> {
-        Ok("OK".to_string())
-    }
-}
-
-/// Simulated LLM classification response (no network).
-#[allow(dead_code)]
-fn simulated_classification_api(_title: &str, _description: &str, _content_snippet: &str) -> String {
-    r#"{"tags":["tech","programming"],"category":"technology"}"#.to_string()
-}
-
-// ---------------------------------------------------------------------------
 // Pure content-processing functions (no LLM calls needed)
 // ---------------------------------------------------------------------------
 
@@ -587,163 +517,6 @@ pub fn split_large_paragraph(paragraph: &str, max_chars: usize) -> Vec<String> {
     chunks
 }
 
-/// Split an HTML block at text boundaries for long content.
-#[allow(dead_code)]
-pub fn split_html_block(block: &str, max_chars: usize) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut current_len = 0;
-    let mut in_tag = false;
-    let mut tag_buffer = String::new();
-    let mut text_buffer = String::new();
-
-    for c in block.chars() {
-        match c {
-            '<' => {
-                if !in_tag {
-                    flush_text_buffer(
-                        &mut text_buffer,
-                        &mut current,
-                        &mut current_len,
-                        &mut chunks,
-                        max_chars,
-                    );
-                }
-                in_tag = true;
-                tag_buffer.push(c);
-            }
-            '>' => {
-                tag_buffer.push(c);
-                if in_tag {
-                    flush_buffer(
-                        &mut tag_buffer,
-                        &mut current,
-                        &mut current_len,
-                        &mut chunks,
-                        max_chars,
-                    );
-                    in_tag = false;
-                }
-            }
-            _ => {
-                if in_tag {
-                    tag_buffer.push(c);
-                } else {
-                    text_buffer.push(c);
-                }
-            }
-        }
-    }
-
-    flush_text_buffer(
-        &mut text_buffer,
-        &mut current,
-        &mut current_len,
-        &mut chunks,
-        max_chars,
-    );
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    if chunks.is_empty() && !block.is_empty() {
-        chunks.push(block.to_string());
-    }
-
-    chunks
-}
-
-#[allow(dead_code)]
-fn flush_buffer(
-    buf: &mut String,
-    current: &mut String,
-    current_len: &mut usize,
-    chunks: &mut Vec<String>,
-    max_chars: usize,
-) {
-    if !buf.is_empty() {
-        if *current_len + buf.len() > max_chars && !current.is_empty() {
-            chunks.push(current.clone());
-            current.clear();
-            *current_len = 0;
-        }
-        if !current.is_empty() {
-            current.push_str(buf);
-        } else {
-            *current = buf.clone();
-        }
-        *current_len += buf.len();
-        buf.clear();
-    }
-}
-
-#[allow(dead_code)]
-fn flush_text_buffer(
-    buf: &mut String,
-    current: &mut String,
-    current_len: &mut usize,
-    chunks: &mut Vec<String>,
-    max_chars: usize,
-) {
-    if !buf.is_empty() {
-        if *current_len + buf.len() > max_chars && !current.is_empty() {
-            chunks.push(current.clone());
-            current.clear();
-            *current_len = 0;
-        }
-        if !current.is_empty() {
-            current.push_str(buf);
-        } else {
-            *current = buf.clone();
-        }
-        *current_len += buf.len();
-        buf.clear();
-    }
-}
-
-/// Check if a translation appears truncated (too short, mid-sentence, or unbalanced tags).
-#[allow(dead_code)]
-pub fn is_translation_truncated(original: &str, translated: &str) -> bool {
-    if original.len() < 200 {
-        return false;
-    }
-
-    // Check 1: translation is much shorter than expected
-    let min_ratio = 0.4;
-    if translated.len() < (original.len() as f32 * min_ratio) as usize {
-        return true;
-    }
-
-    // Check 2: ends mid-sentence
-    let trimmed = translated.trim_end();
-    if let Some(last_char) = trimmed.chars().last() {
-        let proper_endings = ['。', '！', '？', '.', '!', '?', '」', '》', ')', '）', '`', '"', '\''];
-        if !proper_endings.contains(&last_char) {
-            if let Some(orig_last) = original.trim_end().chars().last() {
-                if proper_endings.contains(&orig_last) && !proper_endings.contains(&last_char) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    // Check 3: unbalanced Markdown markers
-    if translated.matches("**").count() % 2 != 0 {
-        return true;
-    }
-    if translated.matches('`').count() % 2 != 0 {
-        return true;
-    }
-
-    // Check 4: unclosed HTML tags
-    let open_tags = translated.matches('<').count();
-    let close_tags = translated.matches('>').count();
-    if open_tags != close_tags {
-        return true;
-    }
-
-    false
-}
-
 /// Parse a JSON classification response from the LLM.
 pub fn parse_classification_json(response: &str) -> Result<ClassificationResponse> {
     let value: serde_json::Value =
@@ -768,6 +541,159 @@ pub fn parse_classification_json(response: &str) -> Result<ClassificationRespons
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Escape HTML special characters for safe display.
+    fn escape_html(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#x27;")
+    }
+
+    /// Split an HTML block at text boundaries for long content.
+    fn split_html_block(block: &str, max_chars: usize) -> Vec<String> {
+        let mut chunks = Vec::new();
+        let mut current = String::new();
+        let mut current_len = 0;
+        let mut in_tag = false;
+        let mut tag_buffer = String::new();
+        let mut text_buffer = String::new();
+
+        for c in block.chars() {
+            match c {
+                '<' => {
+                    if !in_tag {
+                        flush_text_buffer(
+                            &mut text_buffer,
+                            &mut current,
+                            &mut current_len,
+                            &mut chunks,
+                            max_chars,
+                        );
+                    }
+                    in_tag = true;
+                    tag_buffer.push(c);
+                }
+                '>' => {
+                    tag_buffer.push(c);
+                    if in_tag {
+                        flush_buffer(
+                            &mut tag_buffer,
+                            &mut current,
+                            &mut current_len,
+                            &mut chunks,
+                            max_chars,
+                        );
+                        in_tag = false;
+                    }
+                }
+                _ => {
+                    if in_tag {
+                        tag_buffer.push(c);
+                    } else {
+                        text_buffer.push(c);
+                    }
+                }
+            }
+        }
+
+        flush_text_buffer(
+            &mut text_buffer,
+            &mut current,
+            &mut current_len,
+            &mut chunks,
+            max_chars,
+        );
+        if !current.is_empty() {
+            chunks.push(current);
+        }
+        if chunks.is_empty() && !block.is_empty() {
+            chunks.push(block.to_string());
+        }
+
+        chunks
+    }
+
+    fn flush_buffer(
+        buf: &mut String,
+        current: &mut String,
+        current_len: &mut usize,
+        chunks: &mut Vec<String>,
+        max_chars: usize,
+    ) {
+        if !buf.is_empty() {
+            if *current_len + buf.len() > max_chars && !current.is_empty() {
+                chunks.push(current.clone());
+                current.clear();
+                *current_len = 0;
+            }
+            if !current.is_empty() {
+                current.push_str(buf);
+            } else {
+                *current = buf.clone();
+            }
+            *current_len += buf.len();
+            buf.clear();
+        }
+    }
+
+    fn flush_text_buffer(
+        buf: &mut String,
+        current: &mut String,
+        current_len: &mut usize,
+        chunks: &mut Vec<String>,
+        max_chars: usize,
+    ) {
+        if !buf.is_empty() {
+            if *current_len + buf.len() > max_chars && !current.is_empty() {
+                chunks.push(current.clone());
+                current.clear();
+                *current_len = 0;
+            }
+            if !current.is_empty() {
+                current.push_str(buf);
+            } else {
+                *current = buf.clone();
+            }
+            *current_len += buf.len();
+            buf.clear();
+        }
+    }
+
+    /// Check if a translation appears truncated.
+    fn is_translation_truncated(original: &str, translated: &str) -> bool {
+        if original.len() < 200 {
+            return false;
+        }
+        let min_ratio = 0.4;
+        if translated.len() < (original.len() as f32 * min_ratio) as usize {
+            return true;
+        }
+        let trimmed = translated.trim_end();
+        if let Some(last_char) = trimmed.chars().last() {
+            let proper_endings = ['。', '！', '？', '.', '!', '?', '」', '》', ')', '）', '`', '"', '\''];
+            if !proper_endings.contains(&last_char) {
+                if let Some(orig_last) = original.trim_end().chars().last() {
+                    if proper_endings.contains(&orig_last) && !proper_endings.contains(&last_char) {
+                        return true;
+                    }
+                }
+            }
+        }
+        if translated.matches("**").count() % 2 != 0 {
+            return true;
+        }
+        if translated.matches('`').count() % 2 != 0 {
+            return true;
+        }
+        let open_tags = translated.matches('<').count();
+        let close_tags = translated.matches('>').count();
+        if open_tags != close_tags {
+            return true;
+        }
+        false
+    }
 
     // -----------------------------------------------------------------------
     // extract_blocks

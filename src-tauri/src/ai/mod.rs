@@ -45,33 +45,9 @@ pub struct ClassificationResponse {
     pub category: Option<String>,
 }
 
-/// Progress event emitted during streaming translation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct TranslationProgress {
-    pub item_id: i64,
-    pub total: usize,
-    pub completed: usize,
-    pub html_chunk: String,
-    pub is_complete: bool,
-    pub cached: bool,
-    pub has_error: bool,
-    pub error_messages: Vec<String>,
-}
-
 /// Max characters per translation segment.
 pub const MAX_CHARS_PER_SEGMENT: usize = 3000;
 /// Max retry attempts for LLM calls.
 pub const MAX_RETRIES: usize = 2;
-
-/// Escape HTML special characters for safe display.
-#[allow(dead_code)]
-pub fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#x27;")
-}
 
 pub mod service;

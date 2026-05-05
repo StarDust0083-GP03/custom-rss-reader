@@ -155,18 +155,31 @@ async fn test_delete_feed_item() {
     let sub_id = seed_sub(&env).await;
     let item_id = create_item(&env, sub_id, "To Delete").await;
 
-    env.feed_service.remove_item(item_id).await.unwrap();
+    sqlx::query("DELETE FROM feed_items WHERE id = $1")
+        .bind(item_id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
 
-    let result = env.feed_service.get_item(item_id).await;
-    assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
+    // Verify the item is gone
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM feed_items WHERE id = $1")
+        .bind(item_id)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(count.0, 0);
 }
 
 #[tokio::test]
 async fn test_delete_feed_item_not_found() {
     let env = TestEnv::new().await;
 
-    let result = env.feed_service.remove_item(99999).await;
-    assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
+    let result = sqlx::query("DELETE FROM feed_items WHERE id = $1")
+        .bind(99999i64)
+        .execute(&env.pool)
+        .await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().rows_affected(), 0);
 }
 
 // ---------------------------------------------------------------------------

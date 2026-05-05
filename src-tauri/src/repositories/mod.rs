@@ -24,10 +24,6 @@ pub trait FeedItemRepository: Send + Sync {
     /// Returns `AppError::NotFound` if the item doesn't exist.
     async fn update_content_md(&self, id: i64, content_md: &str) -> Result<FeedItem>;
 
-    /// Delete a feed item by ID.
-    /// Returns `AppError::NotFound` if it doesn't exist.
-    async fn delete(&self, id: i64) -> Result<()>;
-
     /// List feed items with optional subscription filter and pagination.
     async fn find_all(
         &self,

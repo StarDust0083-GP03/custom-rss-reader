@@ -151,22 +151,6 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         Ok(row.into())
     }
 
-    #[allow(dead_code)]
-    async fn delete(&self, id: i64) -> Result<()> {
-        let result = sqlx::query("DELETE FROM feed_items WHERE id = $1")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-
-        if result.rows_affected() == 0 {
-            return Err(AppError::NotFound(format!(
-                "FeedItem with id {} not found",
-                id
-            )));
-        }
-
-        Ok(())
-    }
 
     async fn find_all(
         &self,
