@@ -197,7 +197,7 @@ fn collapse_empty_lines(s: &str) -> String {
 ///
 /// - Empty links `[](url)` (from icon-only `<a>` tags)
 /// - Links whose URL contains non-content patterns like `/signin`, `/vote/`, etc.
-fn clean_markdown(md: &str) -> String {
+pub fn clean_markdown(md: &str) -> String {
     let mut result = String::with_capacity(md.len());
     let bytes = md.as_bytes();
     let len = md.len();

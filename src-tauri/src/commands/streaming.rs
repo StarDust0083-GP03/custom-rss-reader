@@ -6,6 +6,7 @@ use tauri::State;
 
 use crate::ai::service::{AiService, extract_blocks, LlmAiService};
 use crate::ai::{AiConfig, MAX_CHARS_PER_SEGMENT};
+use crate::content_processor::clean_markdown;
 use crate::error::{AppError, Result};
 
 use super::AppState;
@@ -51,10 +52,10 @@ pub async fn translate_html_content_streaming(
         }
     }
 
-    // Use the provided HTML content directly.
-    // The AI system prompt instructs it to preserve all HTML tags
-    // (including <img> and <a>), keeping images and links in the output.
-    let translation_content = content;
+    // Clean markdown links — strip non-content patterns (signin, clap, etc.)
+    // before passing to the AI for translation. This ensures non-content links
+    // are not preserved in the bilingual output.
+    let translation_content = clean_markdown(&content);
 
     let ai_service = get_ai_service(&state).await?;
 
@@ -223,6 +224,10 @@ pub async fn translate_item_bilingual_streaming(
     }
     .ok_or_else(|| AppError::OperationFailed("No content to translate".into()))?
     .clone();
+
+    // Strip non-content markdown links (signin, clap, bookmark, etc.)
+    // before passing to the AI for translation.
+    let content = clean_markdown(&content);
 
     let ai_service = get_ai_service(&state).await?;
 
