@@ -1,6 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open, save, ask } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
+import { marked, Renderer } from "marked";
+
+// Configure marked for proper link and image rendering.
+// Use tokens instead of raw text to properly handle nested elements
+// (e.g., images inside links: [![alt](img.jpg)](url)).
+const mdRenderer = new Renderer();
+mdRenderer.link = function ({ href, title, tokens }) {
+  const text = this.parser ? this.parser.parseInline(tokens) : "";
+  return `<a target="_blank" rel="noopener noreferrer" href="${href}"${title ? ` title="${title}"` : ""}>${text}</a>`;
+};
+marked.use({ renderer: mdRenderer, gfm: true });
 
 interface Subscription {
   id: number;
@@ -22,6 +33,7 @@ interface FeedItem {
   title: string;
   link: string | null;
   content: string | null;
+  content_md: string | null;
   description: string | null;
   author: string | null;
   published_at: string | null;
@@ -758,13 +770,32 @@ function renderItemDetail(item: FeedItem) {
         ${item.translated_content}
       </div>
     `;
+
+    // Convert markdown links to HTML in original paragraphs.
+    // When the source text is markdown (content_md), the AI outputs
+    // markdown syntax as plain text inside the HTML div, so we need
+    // to convert it to proper HTML for clickable links.
+    const detailBody = detail.querySelector('.detail-body');
+    if (detailBody) {
+      detailBody.querySelectorAll('.paragraph-original').forEach(para => {
+        // Only process if the content doesn't already contain HTML tags
+        // (RSS HTML content arrives pre-rendered by the AI)
+        if (!para.innerHTML.includes('<')) {
+          try {
+            para.innerHTML = marked.parseInline(para.innerHTML) as string;
+          } catch (_e) {
+            // Leave as-is if parsing fails
+          }
+        }
+      });
+    }
   } else if (useWebViewForItem && item.link) {
     try {
       // 创建 webview 容器
       const { iframe, loading } = createWebviewContainer(detail);
 
       // 从后端获取网页内容并加载到 iframe
-      invoke<string>("fetch_website_content", { url: item.link })
+      invoke<string>("fetch_website_content", { url: item.link, itemId: item.id })
         .then((htmlContent) => {
           loadIframeContent({
             iframe,
@@ -801,7 +832,10 @@ function renderItemDetail(item: FeedItem) {
     }
 
     // 显示文本内容（支持翻译）
-    const originalContent = item.content || item.description || "No content available";
+    // Prefer markdown content (content_md), fall back to raw HTML or description
+    const originalContent = item.content_md
+      ? marked.parse(item.content_md)
+      : (item.content || item.description || "No content available");
 
     detail.innerHTML = `
       <div class="detail-source">${subName}${item.category ? ` • ${item.category}` : ""}</div>
@@ -1322,10 +1356,11 @@ async function openAiSettingsModal() {
 
   // Load current AI config and fill the form
   try {
-    const config = await invoke<{ api_key: string; base_url: string; model: string }>("get_ai_config");
+    const config = await invoke<{ api_key: string; base_url: string; model: string; max_chars_per_segment: number | null }>("get_ai_config");
     (document.getElementById("ai-api-key") as HTMLInputElement).value = config.api_key || "";
     (document.getElementById("ai-base-url") as HTMLInputElement).value = config.base_url || "";
     (document.getElementById("ai-model") as HTMLInputElement).value = config.model || "";
+    (document.getElementById("ai-max-chars") as HTMLInputElement).value = config.max_chars_per_segment?.toString() || "3000";
   } catch (error) {
     // If no config exists, just leave the fields empty or with defaults
     console.log("No AI config found, using defaults");
@@ -1395,78 +1430,108 @@ async function translateItem(item: FeedItem, htmlContent?: string) {
   try {
     showSuccess("Translating...");
 
-    // Listen for translation error events
-    const unlistenError = await listen<{ item_id: number; error: string; paragraph_index: number }>(
-      "translation-error",
-      (event) => {
-        if (event.payload.item_id !== item.id) return;
-        const currentState = translationStateByItemId.get(item.id);
-        if (currentState) {
-          currentState.hasError = true;
-          currentState.errorMessage = event.payload.error;
-        }
-        showError(`Translation error: ${event.payload.error}`);
-      }
-    );
+    let unlistenProgress: (() => void) | null = null;
+    let unlistenError: (() => void) | null = null;
 
-    // Listen for translation progress events
-    const unlistenProgress = await listen<{ item_id: number; total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean; has_error?: boolean; error_messages?: string[]; partial_content?: string }>(
-      "translation-progress",
-      (event) => {
-        const { item_id, completed, total, html_chunk, is_complete, cached, has_error, error_messages } = event.payload;
-
-        // 确保事件属于正确的文章
-        if (item_id !== item.id) {
-          return;
-        }
-
-        // 检查是否已取消
-        if (abortController.signal.aborted) {
-          return;
-        }
-
-        // 获取最新的翻译状态
-        const currentState = translationStateByItemId.get(item.id);
-        if (!currentState) return;
-
-        // 如果是缓存命中，直接设置完整内容
-        if (cached && html_chunk) {
-          item.translated_content = html_chunk;
-          currentState.useTranslation = true;
-          currentState.inProgressContent = null;
-          currentState.abortController = null;
-          currentState.hasError = false;
-          // 只有当前选中的文章才渲染和显示提示
-          if (selectedItem?.id === item.id) {
-            renderItems(true);
-            renderItemDetail(item);
-            showSuccess("Using cached translation");
-          }
-          return;
-        }
-
-        // Update progress indicator - 只在当前选中时显示
-        if (!cached && selectedItem?.id === item.id && !currentState.hasError) {
-          showSuccess(`Translating... ${completed}/${total}`);
-        }
-
-        // Append the chunk to state storage (not to item yet)
-        if (is_complete) {
-          // Final event - clean up state
-          currentState.abortController = null;
-
-          // Handle error case
-          if (has_error) {
+    try {
+      // Listen for translation error events
+      unlistenError = await listen<{ item_id: number; error: string; paragraph_index: number }>(
+        "translation-error",
+        (event) => {
+          if (event.payload.item_id !== item.id) return;
+          const currentState = translationStateByItemId.get(item.id);
+          if (currentState) {
             currentState.hasError = true;
-            currentState.errorMessage = error_messages?.[0] || "Translation failed";
-            // Use the partial content from html_chunk if available
-            if (html_chunk) {
-              currentState.inProgressContent = html_chunk;
-              item.translated_content = html_chunk;
-            } else {
-              currentState.inProgressContent = null;
+            currentState.errorMessage = event.payload.error;
+          }
+          showError(`Translation error: ${event.payload.error}`);
+        }
+      );
+
+      // Listen for translation progress events
+      unlistenProgress = await listen<{ item_id: number; total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean; has_error?: boolean; error_messages?: string[]; partial_content?: string }>(
+        "translation-progress",
+        (event) => {
+          const { item_id, completed, total, html_chunk, is_complete, cached, has_error, error_messages } = event.payload;
+
+          // 确保事件属于正确的文章
+          if (item_id !== item.id) {
+            return;
+          }
+
+          // 检查是否已取消
+          if (abortController.signal.aborted) {
+            return;
+          }
+
+          // 获取最新的翻译状态
+          const currentState = translationStateByItemId.get(item.id);
+          if (!currentState) return;
+
+          // 如果是缓存命中，直接设置完整内容
+          if (cached && html_chunk) {
+            item.translated_content = html_chunk;
+            currentState.useTranslation = true;
+            currentState.inProgressContent = null;
+            currentState.abortController = null;
+            currentState.hasError = false;
+            // 只有当前选中的文章才渲染和显示提示
+            if (selectedItem?.id === item.id) {
+              renderItems(true);
+              renderItemDetail(item);
+              showSuccess("Using cached translation");
             }
-            currentState.useTranslation = false;
+            return;
+          }
+
+          // Update progress indicator - 只在当前选中时显示
+          if (!cached && selectedItem?.id === item.id && !currentState.hasError) {
+            showSuccess(`Translating... ${completed}/${total}`);
+          }
+
+          // Append the chunk to state storage (not to item yet)
+          if (is_complete) {
+            // Final event - clean up state
+            currentState.abortController = null;
+
+            // Handle error case
+            if (has_error) {
+              currentState.hasError = true;
+              currentState.errorMessage = error_messages?.[0] || "Translation failed";
+              // Use the partial content from html_chunk if available
+              if (html_chunk) {
+                currentState.inProgressContent = html_chunk;
+                item.translated_content = html_chunk;
+              } else {
+                currentState.inProgressContent = null;
+              }
+              currentState.useTranslation = false;
+
+              // 更新列表徽章
+              renderItems(true);
+
+              // 只有当前选中的文章才渲染
+              if (selectedItem?.id === item.id) {
+                renderItemDetail(item);
+                if (html_chunk) {
+                  showError(`Translation partially complete: ${currentState.errorMessage}`);
+                } else {
+                  showError(`Translation failed: ${currentState.errorMessage}. Check ~/.rss-reader/ai_errors.log for details.`);
+                }
+              }
+              return;
+            }
+
+            // Success case
+            if (currentState.inProgressContent && !currentState.inProgressContent.endsWith("</div>")) {
+              currentState.inProgressContent += "</div>";
+            }
+
+            // 缓存翻译结果到 item
+            item.translated_content = currentState.inProgressContent;
+            currentState.useTranslation = true;
+            currentState.inProgressContent = null;
+            currentState.hasError = false;
 
             // 更新列表徽章
             renderItems(true);
@@ -1474,74 +1539,61 @@ async function translateItem(item: FeedItem, htmlContent?: string) {
             // 只有当前选中的文章才渲染
             if (selectedItem?.id === item.id) {
               renderItemDetail(item);
-              if (html_chunk) {
-                showError(`Translation partially complete: ${currentState.errorMessage}`);
-              } else {
-                showError(`Translation failed: ${currentState.errorMessage}. Check ~/.rss-reader/ai_errors.log for details.`);
+              showSuccess("Translation complete");
+            }
+          } else if (html_chunk) {
+            // Append this paragraph chunk to state storage
+            // Normalize the chunk - ensure it's properly wrapped and closed
+            let normalizedChunk = html_chunk;
+            if (!normalizedChunk.endsWith("</div>")) {
+              normalizedChunk += "</div>";
+            }
+            if (!currentState.inProgressContent) {
+              currentState.inProgressContent = `<div class="bilingual-content">\n${normalizedChunk}`;
+            } else {
+              // Ensure previous content is properly closed before adding new chunk
+              if (!currentState.inProgressContent.endsWith("</div>")) {
+                currentState.inProgressContent += "</div>";
               }
+              currentState.inProgressContent += `\n${normalizedChunk}`;
             }
-            return;
-          }
-
-          // Success case
-          if (currentState.inProgressContent && !currentState.inProgressContent.endsWith("</div>")) {
-            currentState.inProgressContent += "</div>";
-          }
-
-          // 缓存翻译结果到 item
-          item.translated_content = currentState.inProgressContent;
-          currentState.useTranslation = true;
-          currentState.inProgressContent = null;
-          currentState.hasError = false;
-
-          // 更新列表徽章
-          renderItems(true);
-
-          // 只有当前选中的文章才渲染
-          if (selectedItem?.id === item.id) {
-            renderItemDetail(item);
-            showSuccess("Translation complete");
-          }
-        } else if (html_chunk) {
-          // Append this paragraph chunk to state storage
-          // Normalize the chunk - ensure it's properly wrapped and closed
-          let normalizedChunk = html_chunk;
-          if (!normalizedChunk.endsWith("</div>")) {
-            normalizedChunk += "</div>";
-          }
-          if (!currentState.inProgressContent) {
-            currentState.inProgressContent = `<div class="bilingual-content">\n${normalizedChunk}`;
-          } else {
-            // Ensure previous content is properly closed before adding new chunk
-            if (!currentState.inProgressContent.endsWith("</div>")) {
-              currentState.inProgressContent += "</div>";
+            // 只有当前选中的文章才渲染
+            if (selectedItem?.id === item.id) {
+              renderItemDetail({ ...item, translated_content: currentState.inProgressContent });
             }
-            currentState.inProgressContent += `\n${normalizedChunk}`;
-          }
-          // 只有当前选中的文章才渲染
-          if (selectedItem?.id === item.id) {
-            renderItemDetail({ ...item, translated_content: currentState.inProgressContent });
           }
         }
+      );
+
+      // 如果提供了 htmlContent（从 webview iframe 获取），使用新的翻译命令
+      // 否则使用原来的翻译命令（翻译 RSS 内容）
+      if (htmlContent) {
+        await invoke<string>("translate_html_content_streaming", {
+          itemId: item.id,
+          content: htmlContent,
+        });
+      } else {
+        // 使用流式双语对照翻译
+        await invoke<string>("translate_item_bilingual_streaming", {
+          itemId: item.id,
+        });
       }
-    );
-
-    // 如果提供了 htmlContent（从 webview iframe 获取），使用新的翻译命令
-    // 否则使用原来的翻译命令（翻译 RSS 内容）
-    if (htmlContent) {
-      await invoke<string>("translate_html_content_streaming", {
-        itemId: item.id,
-        content: htmlContent,
-      });
-    } else {
-      // 使用流式双语对照翻译
-      await invoke<string>("translate_item_bilingual_streaming", {
-        itemId: item.id,
-      });
+    } finally {
+      // Always clean up listeners
+      if (unlistenProgress) unlistenProgress();
+      if (unlistenError) unlistenError();
+      // Clean up translation state on error (keep cached success entries)
+      const currentState = translationStateByItemId.get(item.id);
+      if (currentState) {
+        if (abortController.signal.aborted) {
+          // User cancelled - clean up
+          translationStateByItemId.delete(item.id);
+        } else if (currentState.hasError) {
+          // Error - keep entry so user sees the error badge, but clear bulky content
+          currentState.inProgressContent = null;
+        }
+      }
     }
-
-    unlistenProgress();
-    unlistenError();
   } catch (error) {
     const currentState = translationStateByItemId.get(item.id);
     if (abortController.signal.aborted) {
@@ -1761,7 +1813,7 @@ async function init() {
     if (link && link.href && link.target !== "_self") {
       e.preventDefault();
       // 使用 shell.open 在系统浏览器中打开
-      invoke("open_url_in_webview", { url: link.href });
+      invoke("open_url_in_browser", { url: link.href });
     }
   });
 
@@ -1769,7 +1821,20 @@ async function init() {
   document.getElementById("add-feed-btn")?.addEventListener("click", openAddFeedModal);
   document.getElementById("import-opml-btn")?.addEventListener("click", importOpml);
   document.getElementById("export-opml-btn")?.addEventListener("click", exportOpml);
-  document.getElementById("refresh-all-btn")?.addEventListener("click", refreshAllFeeds);
+
+  // 刷新所有订阅 - 带防抖 (防止快速重复点击)
+  let refreshDebounceTimer: number | null = null;
+  document.getElementById("refresh-all-btn")?.addEventListener("click", () => {
+    if (refreshDebounceTimer !== null) {
+      showSuccess("Refresh already in progress...");
+      return;
+    }
+    refreshAllFeeds().finally(() => {
+      refreshDebounceTimer = window.setTimeout(() => {
+        refreshDebounceTimer = null;
+      }, 2000);
+    });
+  });
 
   // 筛选标签
   document.querySelectorAll(".filter-tab").forEach(tab => {
@@ -1917,43 +1982,22 @@ async function init() {
       renderItems();
     }
 
-    // 检查是否在 webview 模式下，如果是则获取 iframe 内容
+    // 检查是否在 webview 模式下，如果是则先将网页内容保存为 content_md
     const useWebViewForItem = webviewPerSubscription.get(selectedItem.subscription_id) ?? false;
-    let htmlContent: string | undefined = undefined;
 
     if (useWebViewForItem && selectedItem.link) {
-      // 尝试从已加载的 iframe 获取内容
-      const iframe = document.getElementById('content-iframe') as HTMLIFrameElement;
-      if (iframe && iframe.contentDocument && iframe.contentDocument.body) {
-        const bodyHtml = iframe.contentDocument.body.innerHTML;
-        if (bodyHtml && bodyHtml.length > 100) {
-          // iframe 已加载内容，使用它进行翻译
-          htmlContent = bodyHtml;
-          console.log('[Translate] Using iframe content for translation, length:', htmlContent.length);
-        }
-      }
-
-      // 如果 iframe 没有内容，则从后端获取网站内容
-      if (!htmlContent) {
-        try {
-          console.log('[Translate] Fetching website content for translation');
-          htmlContent = await invoke<string>("fetch_website_content", { url: selectedItem.link });
-        } catch (error) {
-          console.error('[Translate] Failed to fetch website content:', error);
-          // 回退到使用 RSS 内容
-          htmlContent = undefined;
-        }
-      }
-
-      // 应用与显示相同的修复逻辑，确保翻译结果与显示一致
-      if (htmlContent) {
-        htmlContent = fixHtmlContent(htmlContent, selectedItem.link || '');
-        console.log('[Translate] Fixed HTML for translation, length:', htmlContent.length);
+      // 从后端获取网站内容（会自动保存 content_md 并标记 is_website_content）
+      try {
+        console.log('[Translate] Fetching website content for markdown');
+        await invoke<string>("fetch_website_content", { url: selectedItem.link, itemId: selectedItem.id });
+      } catch (error) {
+        console.error('[Translate] Failed to fetch website content:', error);
       }
     }
 
-    // 开始翻译
-    await translateItem(selectedItem, htmlContent);
+    // 开始翻译 — 使用 translate_item_bilingual_streaming 从数据库读取
+    // WebView 模式：优先使用 content_md；RSS 模式：优先使用 content
+    await translateItem(selectedItem, undefined);
   });
 
   document.getElementById("classify-btn")?.addEventListener("click", async () => {
@@ -1968,6 +2012,7 @@ async function init() {
     const apiKey = (document.getElementById("ai-api-key") as HTMLInputElement).value;
     const baseUrl = (document.getElementById("ai-base-url") as HTMLInputElement).value;
     const model = (document.getElementById("ai-model") as HTMLInputElement).value;
+    const maxCharsPerSegment = parseInt((document.getElementById("ai-max-chars") as HTMLInputElement).value) || undefined;
 
     if (!apiKey) {
       showError("Please enter an API key first");
@@ -1981,7 +2026,7 @@ async function init() {
 
     try {
       // 测试连接（会同时保存配置）
-      await invoke("set_ai_config", { apiKey, baseUrl: baseUrl || undefined, model: model || undefined, skipTest: false });
+      await invoke("set_ai_config", { apiKey, baseUrl: baseUrl || undefined, model: model || undefined, maxCharsPerSegment, skipTest: false });
       showSuccess("API connection successful! Configuration saved.");
     } catch (error) {
       showError(`Connection test failed: ${error}`);
@@ -1997,6 +2042,7 @@ async function init() {
     const apiKey = (document.getElementById("ai-api-key") as HTMLInputElement).value;
     const baseUrl = (document.getElementById("ai-base-url") as HTMLInputElement).value;
     const model = (document.getElementById("ai-model") as HTMLInputElement).value;
+    const maxCharsPerSegment = parseInt((document.getElementById("ai-max-chars") as HTMLInputElement).value) || undefined;
 
     if (!apiKey) {
       showError("Please enter an API key");
@@ -2005,7 +2051,7 @@ async function init() {
 
     try {
       // 直接保存，跳过连接测试
-      await invoke("set_ai_config", { apiKey, baseUrl: baseUrl || undefined, model: model || undefined, skipTest: true });
+      await invoke("set_ai_config", { apiKey, baseUrl: baseUrl || undefined, model: model || undefined, maxCharsPerSegment, skipTest: true });
       closeAiSettingsModal();
       showSuccess("AI configuration saved (not tested)");
     } catch (error) {

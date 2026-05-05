@@ -153,6 +153,10 @@
                         <label for="ai-model">Model</label>
                         <input type="text" id="ai-model" placeholder="deepseek-chat" value="deepseek-chat" />
                     </div>
+                    <div class="form-group">
+                        <label for="ai-max-chars">Max chars per segment</label>
+                        <input type="number" id="ai-max-chars" placeholder="3000" value="3000" min="500" max="10000" />
+                    </div>
                     <div class="form-actions">
                         <button type="button" id="test-ai-btn" class="test-btn">Test Connection</button>
                         <button type="submit">Save Configuration</button>

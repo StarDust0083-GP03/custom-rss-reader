@@ -1,94 +1,43 @@
-use crate::debug::DebugLogger;
+use crate::error::{AppError, Result};
+use crate::models::NewFeedItem;
 use feed_rs::parser;
-use thiserror::Error;
+use html2md;
 
-use crate::database::schema::NewFeedItem;
-
-#[derive(Error, Debug)]
-pub enum ParseError {
-    #[error("Feed parsing error: {0}")]
-    FeedError(String),
-    #[error("No items found in feed")]
-    NoItems,
-    #[error("Invalid feed format: {0}")]
-    InvalidFormat(String),
-}
-
-/// Parse feed content with debug logging
-pub fn parse_with_logger(
-    feed_content: &str,
-    subscription_id: i64,
-    debug_logger: &DebugLogger,
-) -> Result<Vec<NewFeedItem>, ParseError> {
-    debug_logger.log_info(
-        "parse",
-        &format!(
-            "Parsing feed for subscription {}, content length: {}",
-            subscription_id,
-            feed_content.len()
-        ),
-    );
-
-    // Log content preview for debugging
-    let preview = if feed_content.len() > 500 {
-        // Handle UTF-8 boundaries properly
-        let end_index = feed_content
-            .char_indices()
-            .nth(500)
-            .map(|(i, _)| i)
-            .unwrap_or(feed_content.len());
-        format!("{}...", &feed_content[..end_index])
-    } else {
-        feed_content.to_string()
-    };
-    debug_logger.log_info("parse", &format!("Content preview: {}", preview));
-
-    // Check if content is empty
-    if feed_content.trim().is_empty() {
-        return Err(ParseError::FeedError("Empty feed content".to_string()));
-    }
-
-    // Note: Compressed data should be handled at the fetcher level
-    // This check is kept as a safety measure
-    if feed_content.as_bytes().len() >= 2 && feed_content.as_bytes()[0..2] == [0x1f, 0x8b] {
-        debug_logger.log_error(
-            "parse",
-            "Feed appears to still be gzip compressed (should be decompressed at fetcher level)",
-        );
-        return Err(ParseError::InvalidFormat(
-            "Feed is still compressed (gzip). This is a bug in the fetcher.".to_string(),
-        ));
-    }
-    if feed_content.as_bytes().len() >= 1 && feed_content.as_bytes()[0] == 0x78 {
-        debug_logger.log_error(
-            "parse",
-            "Feed appears to still be deflate compressed (should be decompressed at fetcher level)",
-        );
-        return Err(ParseError::InvalidFormat(
-            "Feed is still compressed (deflate). This is a bug in the fetcher.".to_string(),
-        ));
-    }
-
-    // Check if content is JSON (some feeds return JSON)
-    if feed_content.trim().starts_with('{') || feed_content.trim().starts_with('[') {
-        debug_logger.log_error("parse", "Feed returned JSON instead of XML/Atom format");
-        return Err(ParseError::InvalidFormat("Feed returned JSON format instead of XML/Atom. This URL may not be a valid RSS/Atom feed.".to_string()));
-    }
-
-    // Check for empty content that might cause JSON parsing errors
+/// Parse RSS/Atom feed content into `NewFeedItem` vectors.
+///
+/// Validates content before parsing: checks for empty content,
+/// compressed data (should be decompressed at fetcher level),
+/// JSON-only feeds, and HTML error pages (Cloudflare, Obsidian, etc.).
+pub fn parse_feed(feed_content: &str, subscription_id: i64) -> Result<Vec<NewFeedItem>> {
     let trimmed = feed_content.trim();
-    if trimmed.is_empty() || trimmed.len() < 10 {
-        debug_logger.log_error("parse", "Feed content is empty or too short");
-        return Err(ParseError::FeedError(
-            "Feed content is empty or too short to be valid".to_string(),
+
+    if trimmed.is_empty() {
+        return Err(AppError::Parse("Empty feed content".into()));
+    }
+
+    // Safety check: compressed data should be decompressed at the fetcher level
+    let bytes = feed_content.as_bytes();
+    if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
+        return Err(AppError::Parse(
+            "Feed is still gzip compressed (should be decompressed at fetcher level)".into(),
+        ));
+    }
+    if bytes.len() >= 1 && bytes[0] == 0x78 {
+        return Err(AppError::Parse(
+            "Feed is still deflate compressed (should be decompressed at fetcher level)".into(),
+        ));
+    }
+
+    // Check for JSON-only feeds (some endpoints return JSON instead of XML)
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return Err(AppError::Parse(
+            "Feed returned JSON format instead of XML/Atom. This URL may not be a valid RSS/Atom feed."
+                .into(),
         ));
     }
 
     // Check if content is HTML (error page)
     if feed_content.contains("<!DOCTYPE html>") || feed_content.contains("<html>") {
-        debug_logger.log_error("parse", "Feed returned HTML instead of RSS/Atom");
-
-        // Try to provide more helpful error message
         let error_msg = if feed_content.contains("Obsidian") {
             "This appears to be an Obsidian Publish page, not a valid RSS feed. Please check the feed URL."
         } else if feed_content.contains("Cloudflare") {
@@ -96,13 +45,11 @@ pub fn parse_with_logger(
         } else {
             "Feed returned HTML instead of RSS/Atom. The URL may not be a valid feed."
         };
-
-        return Err(ParseError::InvalidFormat(error_msg.to_string()));
+        return Err(AppError::Parse(error_msg.into()));
     }
 
     let feed = parser::parse(feed_content.as_bytes()).map_err(|e| {
-        debug_logger.log_error("parse", &format!("Feed parsing error: {}", e));
-        ParseError::FeedError(format!(
+        AppError::Parse(format!(
             "{} (content type: {})",
             e,
             detect_content_type(feed_content)
@@ -110,26 +57,18 @@ pub fn parse_with_logger(
     })?;
 
     if feed.entries.is_empty() {
-        debug_logger.log_error("parse", "No items found in feed");
-        return Err(ParseError::NoItems);
+        return Err(AppError::Parse("No items found in feed".into()));
     }
-
-    debug_logger.log_info(
-        "parse",
-        &format!("Found {} entries in feed", feed.entries.len()),
-    );
 
     let items: Vec<NewFeedItem> = feed
         .entries
         .into_iter()
         .map(|entry| {
-            // Get content from various sources
             let content = entry
                 .content
                 .and_then(|c| c.body)
                 .or(entry.summary.clone().map(|s| s.content));
 
-            // Get GUID from id or link
             let guid = if entry.id.is_empty() {
                 entry.links.first().map(|l| l.href.clone())
             } else {
@@ -145,6 +84,7 @@ pub fn parse_with_logger(
                     .unwrap_or_else(|| "Untitled".to_string()),
                 link: entry.links.first().map(|l| l.href.clone()),
                 content: content.clone(),
+                content_md: content.clone().map(|c| html2md::parse_html(&c)),
                 description: entry.summary.map(|s| s.content),
                 author: entry.authors.first().map(|a| a.name.clone()),
                 published_at: entry.published,
@@ -158,29 +98,20 @@ pub fn parse_with_logger(
                 translated_title: None,
                 translated_content: None,
                 translated_at: None,
+                ..Default::default()
             }
         })
         .collect();
 
-    // 记录解析后的条目
-    if let Ok(items_json) = serde_json::to_string_pretty(&items) {
-        debug_logger.log_parsed_items(subscription_id, &items_json);
-    }
-
-    debug_logger.log_info(
-        "parse",
-        &format!("Successfully parsed {} items", items.len()),
-    );
-
     Ok(items)
 }
 
-// Helper function to detect content type
+/// Detect the content type of a feed string for diagnostic messages.
 fn detect_content_type(content: &str) -> String {
     let content = content.trim();
     if content.starts_with("<?xml") {
         "XML".to_string()
-    } else if content.contains("<rss>") {
+    } else if content.contains("<rss") {
         "RSS".to_string()
     } else if content.contains("<feed") {
         "Atom".to_string()
@@ -190,5 +121,98 @@ fn detect_content_type(content: &str) -> String {
         "HTML".to_string()
     } else {
         "Unknown".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_empty_content() {
+        let result = parse_feed("", 1);
+        assert!(matches!(result.unwrap_err(), AppError::Parse(_)));
+    }
+
+    #[test]
+    fn test_parse_html_content() {
+        let result = parse_feed("<!DOCTYPE html><html><body>Not a feed</body></html>", 1);
+        assert!(matches!(result.unwrap_err(), AppError::Parse(_)));
+    }
+
+    #[test]
+    fn test_parse_cloudflare_html() {
+        let result = parse_feed("<html><body>Cloudflare challenge page</body></html>", 1);
+        assert!(matches!(result.unwrap_err(), AppError::Parse(_)));
+    }
+
+    #[test]
+    fn test_parse_obsidian_html() {
+        let result = parse_feed("<html><body>Obsidian Publish content</body></html>", 1);
+        assert!(matches!(result.unwrap_err(), AppError::Parse(_)));
+    }
+
+    #[test]
+    fn test_parse_json_content() {
+        let result = parse_feed("{\"key\": \"value\"}", 1);
+        assert!(matches!(result.unwrap_err(), AppError::Parse(_)));
+    }
+
+    #[test]
+    fn test_parse_atom_with_content_md() {
+        let feed_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Test Feed</title>
+  <entry>
+    <title>Article with HTML Content</title>
+    <id>urn:uuid:test-content-md</id>
+    <content type="html">&lt;p&gt;Visit &lt;a href="https://example.com"&gt;our site&lt;/a&gt; for details.&lt;/p&gt;&lt;p&gt;&lt;img src="https://example.com/photo.jpg" alt="Photo"/&gt;&lt;/p&gt;</content>
+  </entry>
+</feed>"#;
+        let items = parse_feed(feed_xml, 1).unwrap();
+        assert_eq!(items.len(), 1);
+
+        let item = &items[0];
+        // content_md must be populated from the HTML content
+        assert!(
+            item.content_md.is_some(),
+            "content_md should be populated during parse"
+        );
+        let md = item.content_md.as_ref().unwrap();
+        assert!(!md.is_empty(), "content_md should not be empty");
+
+        // Must contain markdown link syntax from the <a> tag
+        assert!(
+            md.contains("[our site]"),
+            "content_md should contain converted link text: got '{}'",
+            md
+        );
+        assert!(
+            md.contains("(https://example.com)"),
+            "content_md should contain converted link URL: got '{}'",
+            md
+        );
+
+        // Must contain markdown image syntax from the <img> tag
+        assert!(
+            md.contains("![Photo]"),
+            "content_md should contain converted image alt: got '{}'",
+            md
+        );
+        assert!(
+            md.contains("(https://example.com/photo.jpg)"),
+            "content_md should contain converted image src: got '{}'",
+            md
+        );
+    }
+
+    #[test]
+    fn test_detect_content_type() {
+        assert_eq!(detect_content_type("<?xml version=\"1.0\"?>"), "XML");
+        assert_eq!(detect_content_type("<rss version=\"2.0\">"), "RSS");
+        assert_eq!(detect_content_type("<feed xmlns=\"http://www.w3.org/2005/Atom\">"), "Atom");
+        assert_eq!(detect_content_type("{\"key\": \"value\"}"), "JSON");
+        assert_eq!(detect_content_type("<!DOCTYPE html>"), "HTML");
+        assert_eq!(detect_content_type("random text"), "Unknown");
     }
 }

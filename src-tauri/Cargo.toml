@@ -29,14 +29,13 @@ sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono"] }
 feed-rs = "2.1"
 quick-xml = { version = "0.36", features = ["serialize"] }
 reqwest = { version = "0.12", features = ["json", "gzip", "brotli"] }
-scraper = "0.20"
-url = "2.5"
+scraper = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1.0"
+async-trait = "0.1"
 flate2 = "1.0"
-brotli = "6.0"
-uuid = { version = "1.0", features = ["v4"] }
 dirs = "5.0"
 lazy_static = "1.4"
-ammonia = "4.0"
+html2md = "0.2"
+futures = "0.3"
 
