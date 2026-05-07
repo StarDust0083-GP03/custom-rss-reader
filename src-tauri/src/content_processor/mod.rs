@@ -1,11 +1,7 @@
 use crate::error::{AppError, Result};
 use scraper::{Html, Selector};
 
-/// Extract the main content from an HTML page using CSS selectors.
-///
-/// Returns the HTML of the first matching content element, or an error if none found.
-/// Selectors are ordered by specificity, mirroring the original backend's
-/// `FeedFetcher::extract_main_content` and the Readability.js approach used by MD-This-Page.
+/// Extract the main content from HTML using CSS selectors, ordered by specificity.
 pub fn extract_main_content(html: &str) -> Result<String> {
     let document = Html::parse_document(html);
 
@@ -48,10 +44,7 @@ pub fn extract_main_content(html: &str) -> Result<String> {
     ))
 }
 
-/// Convert HTML to Markdown.
-///
-/// Uses the `html2md` crate, which follows a similar approach to Turndown.js
-/// (the library used by MD-This-Page).
+/// Convert HTML to Markdown using the html2md crate.
 pub fn html_to_markdown(html: &str) -> Result<String> {
     if html.trim().is_empty() {
         return Err(AppError::Validation("Empty HTML content".into()));
@@ -61,14 +54,7 @@ pub fn html_to_markdown(html: &str) -> Result<String> {
     Ok(md)
 }
 
-/// Full pipeline: extract main content from HTML, then convert to Markdown.
-///
-/// This mirrors the MD-This-Page two-step approach:
-/// 1. Content extraction (Readability.js → scraper selectors)
-/// 2. HTML-to-Markdown conversion (Turndown.js → html2md)
-///
-/// Before extraction, non-content elements (nav, footer, button, svg, etc.)
-/// are stripped to prevent them from appearing in the final markdown.
+/// Strip non-content elements, extract main content, then convert to Markdown.
 pub fn html_to_markdown_pipeline(html: &str) -> Result<String> {
     let cleaned = clean_html_for_markdown(html);
     let main_content = extract_main_content(&cleaned)?;
@@ -77,11 +63,7 @@ pub fn html_to_markdown_pipeline(html: &str) -> Result<String> {
     Ok(collapse_empty_lines(&md))
 }
 
-/// Strip non-content HTML elements that have no place in a reading view.
-///
-/// Removes: nav, footer, aside, button, form, svg, script, style, noscript
-/// — anything that is UI chrome, decoration, or interactivity rather than
-/// article text. Also strips their entire contents (not just the tags).
+/// Remove UI elements (nav, footer, script, etc.) and their contents.
 fn clean_html_for_markdown(html: &str) -> String {
     let mut result = String::with_capacity(html.len());
     let mut pos = 0;
@@ -633,5 +615,33 @@ mod tests {
         let md = "Look at ![photo](/img/photo.jpg) here";
         let cleaned = clean_markdown(md);
         assert_eq!(cleaned, "Look at ![photo](/img/photo.jpg) here");
+    }
+
+    #[test]
+    fn test_clean_markdown_preserves_bold() {
+        let md = "this is **bold** and __italic__ text";
+        let cleaned = clean_markdown(md);
+        assert_eq!(cleaned, md);
+    }
+
+    #[test]
+    fn test_clean_markdown_preserves_heading() {
+        let md = "# Title\n\n## Subtitle\n\nNormal paragraph.";
+        let cleaned = clean_markdown(md);
+        assert_eq!(cleaned, md);
+    }
+
+    #[test]
+    fn test_clean_markdown_preserves_mixed_formatting() {
+        let md = "# Article\n\n**Bold paragraph** with [a link](https://example.com) inside.";
+        let cleaned = clean_markdown(md);
+        assert_eq!(cleaned, md);
+    }
+
+    #[test]
+    fn test_clean_markdown_preserves_code_block() {
+        let md = "Some text\n\n```rust\nlet x = 1;\n```\n\nMore text.";
+        let cleaned = clean_markdown(md);
+        assert_eq!(cleaned, md);
     }
 }

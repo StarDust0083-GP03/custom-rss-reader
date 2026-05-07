@@ -133,7 +133,7 @@ impl LlmAiService {
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
+            .map(|c| strip_think_tags(&c.message.content))
             .ok_or_else(|| AppError::Parse("LLM returned no choices".into()))
     }
 
@@ -212,6 +212,11 @@ impl AiService for LlmAiService {
             } else {
                 format!(
                     "You are a professional translator. Translate the following text from {} to {}.\n\
+                    The text may contain Markdown formatting (**bold**, [links](url), # headings, etc.).\n\
+                    CRITICAL RULES:\n\
+                    1. In the paragraph-original div, PRESERVE all Markdown formatting syntax exactly as-is.\n\
+                    2. In the paragraph-translated div, output only clean translated text — do NOT add HTML or Markdown formatting.\n\
+                    3. Do NOT wrap the content in HTML tags like <p> or <span>.\n\
                     Output format:\n\
                     <div class=\"translation-paragraph\">\n\
                     <div class=\"paragraph-original\">[ORIGINAL]</div>\n\
@@ -536,6 +541,35 @@ pub fn parse_classification_json(response: &str) -> Result<ClassificationRespons
     let category = value["category"].as_str().map(String::from);
 
     Ok(ClassificationResponse { tags, category })
+}
+
+/// Strip `<think>...</think>` blocks from reasoning model responses.
+///
+/// Reasoning models (e.g., DeepSeek R1) output internal reasoning wrapped
+/// in `<think>` tags. Remove these so only the final answer reaches the caller.
+fn strip_think_tags(response: &str) -> String {
+    if !response.contains("<think>") {
+        return response.to_string();
+    }
+
+    let mut result = String::with_capacity(response.len());
+    let mut pos = 0;
+
+    while let Some(start) = response[pos..].find("<think>") {
+        let abs_start = pos + start;
+        result.push_str(&response[pos..abs_start]);
+
+        if let Some(end) = response[abs_start..].find("</think>") {
+            pos = abs_start + end + "</think>".len();
+        } else {
+            // No closing tag — strip to end
+            pos = response.len();
+            break;
+        }
+    }
+
+    result.push_str(&response[pos..]);
+    result
 }
 
 #[cfg(test)]
@@ -978,6 +1012,39 @@ mod tests {
         let result = parse_classification_json(json).unwrap();
         assert!(result.tags.is_empty());
         assert_eq!(result.category, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // strip_think_tags
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strip_think_tags_basic() {
+        let result = strip_think_tags("before<think>internal reasoning</think>after");
+        assert_eq!(result, "beforeafter");
+    }
+
+    #[test]
+    fn test_strip_think_tags_no_tags() {
+        let text = "normal response without think tags";
+        assert_eq!(strip_think_tags(text), text);
+    }
+
+    #[test]
+    fn test_strip_think_tags_multiple() {
+        let result = strip_think_tags("a<think>first</think>b<think>second</think>c");
+        assert_eq!(result, "abc");
+    }
+
+    #[test]
+    fn test_strip_think_tags_unclosed() {
+        let result = strip_think_tags("before<think>no closing");
+        assert_eq!(result, "before");
+    }
+
+    #[test]
+    fn test_strip_think_tags_empty_input() {
+        assert_eq!(strip_think_tags(""), "");
     }
 
     // -----------------------------------------------------------------------

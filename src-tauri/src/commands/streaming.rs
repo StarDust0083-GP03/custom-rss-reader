@@ -425,3 +425,72 @@ fn strip_images_from_translated(html: &str) -> String {
     out.push_str(&html[pos..]);
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_images_no_images() {
+        let html = r#"<div class="paragraph-original">Some text</div><div class="paragraph-translated">一些文本</div>"#;
+        let result = strip_images_from_translated(html);
+        assert_eq!(result, html);
+    }
+
+    #[test]
+    fn test_strip_images_from_translated() {
+        let html = r#"<div class="paragraph-translated">一些文本 <img src="img.jpg" /></div>"#;
+        let result = strip_images_from_translated(html);
+        assert_eq!(result, r#"<div class="paragraph-translated">一些文本 </div>"#);
+    }
+
+    #[test]
+    fn test_strip_images_preserves_original_images() {
+        let html = r#"<div class="paragraph-original"><img src="img.jpg" /> Original</div><div class="paragraph-translated">翻译</div>"#;
+        let result = strip_images_from_translated(html);
+        assert_eq!(result, html);
+    }
+
+    #[test]
+    fn test_strip_images_mixed_content() {
+        let html = r#"<div class="paragraph-block">
+<div class="paragraph-original"><img src="keep.jpg" /> Text</div>
+<div class="paragraph-translated"><img src="remove.jpg" /> 文本</div>
+</div>"#;
+        let result = strip_images_from_translated(html);
+        let expected = r#"<div class="paragraph-block">
+<div class="paragraph-original"><img src="keep.jpg" /> Text</div>
+<div class="paragraph-translated"> 文本</div>
+</div>"#;
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_strip_images_empty_input() {
+        assert_eq!(strip_images_from_translated(""), "");
+    }
+
+    #[test]
+    fn test_strip_images_no_translated_div() {
+        let html = r#"<div class="paragraph-original">Only original</div>"#;
+        let result = strip_images_from_translated(html);
+        assert_eq!(result, html);
+    }
+
+    #[test]
+    fn test_strip_images_multiple_translated_blocks() {
+        let html = r#"<div class="paragraph-translated">第一段 <img src="a.jpg" /></div>
+<div class="paragraph-translated">第二段 <img src="b.jpg" /></div>"#;
+        let result = strip_images_from_translated(html);
+        let expected = r#"<div class="paragraph-translated">第一段 </div>
+<div class="paragraph-translated">第二段 </div>"#;
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_strip_images_case_insensitive() {
+        let html = r#"<div class="paragraph-translated">text <IMG SRC="x.jpg"></div>"#;
+        let result = strip_images_from_translated(html);
+        assert_eq!(result, r#"<div class="paragraph-translated">text </div>"#);
+    }
+}

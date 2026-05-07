@@ -42,7 +42,7 @@ interface FeedItem {
   is_read: boolean;
   is_favorite: boolean;
   is_read_later: boolean;
-  is_ignored: boolean; // Flag for ignored/skipped articles
+  is_ignored: boolean;
   tags: string | null; // JSON array string
   category: string | null;
   translated_title: string | null;
@@ -605,6 +605,8 @@ function selectItem(item: FeedItem) {
     // 查找订阅源配置，如果设置了 use_website=true，则默认使用 webview 模式
     const subscription = subscriptions.find(s => s.id === subId);
     useWebView = subscription?.use_website ?? false;
+    // Persist to map so renderItemDetail reads the same value
+    webviewPerSubscription.set(subId, useWebView);
   }
 
   // 更新按钮状态
@@ -666,6 +668,11 @@ function cancelIgnoreTimer() {
     ignoreTimer = null;
     console.log('[Ignore] Timer cancelled due to user action');
   }
+}
+
+// Check if text contains markdown syntax that marked can render.
+function containsMarkdown(text: string): boolean {
+  return /(\*\*|__|^#{1,6}\s|\[.+\]\(.+\)|!\[.+\]\(.+\)|`{1,3})/m.test(text);
 }
 
 // 显示内容详情
@@ -771,18 +778,16 @@ function renderItemDetail(item: FeedItem) {
       </div>
     `;
 
-    // Convert markdown links to HTML in original paragraphs.
-    // When the source text is markdown (content_md), the AI outputs
-    // markdown syntax as plain text inside the HTML div, so we need
-    // to convert it to proper HTML for clickable links.
+    // AI outputs markdown syntax as plain text in both original and
+    // translated paragraphs — render it so links/formatting are visible.
+    // Only parse when markdown patterns are detected (avoids double-processing
+    // content that's already HTML).
     const detailBody = detail.querySelector('.detail-body');
     if (detailBody) {
-      detailBody.querySelectorAll('.paragraph-original').forEach(para => {
-        // Only process if the content doesn't already contain HTML tags
-        // (RSS HTML content arrives pre-rendered by the AI)
-        if (!para.innerHTML.includes('<')) {
+      detailBody.querySelectorAll('.paragraph-original, .paragraph-translated').forEach(para => {
+        if (containsMarkdown(para.innerHTML)) {
           try {
-            para.innerHTML = marked.parseInline(para.innerHTML) as string;
+            para.innerHTML = marked.parse(para.innerHTML) as string;
           } catch (_e) {
             // Leave as-is if parsing fails
           }
