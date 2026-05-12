@@ -360,14 +360,18 @@ pub fn extract_blocks(content: &str, max_chars: usize) -> Vec<String> {
     merge_small_blocks(blocks, max_chars)
 }
 
-/// Extract blocks from HTML content using tag-based selection.
+/// Extract blocks from HTML content in document order.
+/// Uses linear scanning to preserve the original order of elements.
 fn extract_html_blocks(content: &str) -> Vec<String> {
-    let mut blocks = Vec::new();
     let block_tags = [
         "p", "h1", "h2", "h3", "h4", "h5", "h6",
         "li", "blockquote", "pre",
         "div", "section", "article",
     ];
+
+    // First pass: collect all block positions (start, end, element text)
+    // so we can sort by position and handle nesting.
+    let mut candidates: Vec<(usize, usize, String)> = Vec::new();
 
     for tag in &block_tags {
         let open_tag = format!("<{}", tag);
@@ -389,28 +393,35 @@ fn extract_html_blocks(content: &str) -> Vec<String> {
 
             let block = content[abs_start..close_pos].to_string();
             if !block.trim().is_empty() {
-                blocks.push(block);
+                candidates.push((abs_start, close_pos, block));
             }
 
             search_start = close_pos;
         }
     }
 
-    // Deduplicate: avoid extracting nested blocks
-    let mut deduplicated = Vec::new();
-    for block in &blocks {
-        let is_nested = blocks.iter().any(|other| {
-            if other == block {
-                return false;
+    // Sort by position in document order
+    candidates.sort_by_key(|(start, _, _)| *start);
+
+    // Deduplicate: when one block fully contains another, keep only the outer one
+    // (e.g., a wrapping <div> that contains <p> and <h1> elements).
+    let mut deduplicated: Vec<(usize, usize, String)> = Vec::new();
+    'outer: for &(start, end, ref block) in &candidates {
+        for &(other_start, other_end, ref other) in &candidates {
+            if other_start == start && other_end == end {
+                continue;
             }
-            other.len() > block.len() && other.contains(block)
-        });
-        if !is_nested {
-            deduplicated.push(block.clone());
+            // other contains this block
+            if other_start <= start && other_end >= end && other.len() > block.len() {
+                continue 'outer;
+            }
         }
+        // Not contained by any other block — keep it
+        deduplicated.push((start, end, block.clone()));
     }
 
-    deduplicated
+    // Return blocks in document order
+    deduplicated.into_iter().map(|(_, _, block)| block).collect()
 }
 
 /// Extract paragraphs from plain text (double newline separation).
