@@ -1,7 +1,38 @@
-pub mod subs;
-pub mod feeds;
-pub mod items;
-pub mod opml;
-pub mod item_actions;
-pub mod ai;
+pub mod ai_commands;
+pub mod debug;
+pub mod feed_commands;
+pub mod item_commands;
+pub mod streaming;
+pub mod subscription_commands;
 pub mod webview;
+
+pub use ai_commands::*;
+pub use debug::*;
+pub use feed_commands::*;
+pub use item_commands::*;
+pub use streaming::*;
+pub use subscription_commands::*;
+pub use webview::*;
+
+use std::sync::Arc;
+
+use sqlx::SqlitePool;
+
+use crate::ai::service::AiService;
+use crate::feed::FeedFetcher;
+use crate::repositories::FeedItemRepository;
+use crate::{FeedService, SubscriptionService};
+
+/// Application state managed by Tauri.
+///
+/// Holds all service instances and shared infrastructure.
+/// Services are the canonical way to access business logic;
+/// repositories and the pool are exposed for command convenience.
+pub struct AppState {
+    pub subscription_service: SubscriptionService,
+    pub feed_service: FeedService,
+    pub feed_repo: Arc<dyn FeedItemRepository>,
+    pub fetcher: Arc<FeedFetcher>,
+    pub ai_service: Option<Arc<dyn AiService>>,
+    pub pool: SqlitePool,
+}

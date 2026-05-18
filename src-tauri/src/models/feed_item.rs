@@ -1,33 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct Subscription {
-    pub id: i64,
-    pub url: String,
-    pub title: Option<String>,
-    pub website_url: Option<String>,
-    pub rsshub_url: Option<String>,
-    pub use_website: bool,
-    pub auto_classify: bool,             // Whether to auto-classify new items
-    pub opml_attributes: Option<String>, // JSON string
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
+/// Domain model for a feed item (article).
+///
+/// `content_md` stores the Markdown-cached version of the HTML content,
+/// produced by the `content_processor` pipeline (extract → convert).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewSubscription {
-    pub url: String,
-    pub title: Option<String>,
-    pub website_url: Option<String>,
-    pub rsshub_url: Option<String>,
-    pub use_website: bool,
-    pub auto_classify: bool,
-    pub opml_attributes: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct FeedItem {
     pub id: i64,
     pub subscription_id: i64,
@@ -35,6 +13,8 @@ pub struct FeedItem {
     pub title: String,
     pub link: Option<String>,
     pub content: Option<String>,
+    /// Markdown-cached version of the content (produced by html_to_markdown_pipeline).
+    pub content_md: Option<String>,
     pub description: Option<String>,
     pub author: Option<String>,
     pub published_at: Option<DateTime<Utc>>,
@@ -43,15 +23,15 @@ pub struct FeedItem {
     pub is_read: bool,
     pub is_favorite: bool,
     pub is_read_later: bool,
-    pub is_ignored: bool, // Flag for ignored/skipped articles
-    // AI-generated fields
-    pub tags: Option<String>, // JSON array string: ["tag1", "tag2"]
+    pub is_ignored: bool,
+    pub tags: Option<String>,
     pub category: Option<String>,
     pub translated_title: Option<String>,
     pub translated_content: Option<String>,
-    pub translated_at: Option<DateTime<Utc>>, // Translation cache timestamp
+    pub translated_at: Option<DateTime<Utc>>,
 }
 
+/// Input for creating a new feed item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewFeedItem {
     pub subscription_id: i64,
@@ -59,6 +39,7 @@ pub struct NewFeedItem {
     pub title: String,
     pub link: Option<String>,
     pub content: Option<String>,
+    pub content_md: Option<String>,
     pub description: Option<String>,
     pub author: Option<String>,
     pub published_at: Option<DateTime<Utc>>,
@@ -66,11 +47,36 @@ pub struct NewFeedItem {
     pub is_read: bool,
     pub is_favorite: bool,
     pub is_read_later: bool,
-    pub is_ignored: bool, // Flag for ignored/skipped articles
-    // AI-generated fields
+    pub is_ignored: bool,
     pub tags: Option<String>,
     pub category: Option<String>,
     pub translated_title: Option<String>,
     pub translated_content: Option<String>,
     pub translated_at: Option<DateTime<Utc>>,
+}
+
+impl Default for NewFeedItem {
+    fn default() -> Self {
+        Self {
+            subscription_id: 0,
+            guid: None,
+            title: String::new(),
+            link: None,
+            content: None,
+            content_md: None,
+            description: None,
+            author: None,
+            published_at: None,
+            is_website_content: false,
+            is_read: false,
+            is_favorite: false,
+            is_read_later: false,
+            is_ignored: false,
+            tags: None,
+            category: None,
+            translated_title: None,
+            translated_content: None,
+            translated_at: None,
+        }
+    }
 }

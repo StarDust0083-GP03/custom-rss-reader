@@ -680,6 +680,16 @@ body {
     font-size: 1rem;
 }
 
+.detail-body a {
+    color: var(--accent-color);
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.detail-body a:hover {
+    opacity: 0.8;
+}
+
 .detail-source {
     font-size: 0.75rem;
     color: var(--accent-color);
@@ -830,25 +840,58 @@ body {
 
 /* Translation paragraph styles - paragraph-by-paragraph bilingual display */
 .translation-paragraph {
-    margin-bottom: 2rem;
-    padding-bottom: 1rem;
+    margin-bottom: 0.75rem;
+    padding-bottom: 0;
 }
 
 .translation-paragraph:last-child {
     margin-bottom: 0;
-    padding-bottom: 0;
 }
 
 .paragraph-original {
-    opacity: 0.5;
-    font-size: 0.9rem;
+    font-size: 0.95rem;
     line-height: 1.6;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.2rem;
+    color: var(--text-primary);
 }
 
 .paragraph-translated {
-    font-size: 1rem;
-    line-height: 1.8;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    margin-bottom: 0.4rem;
+    color: var(--text-secondary);
+    opacity: 0.8;
+}
+
+/* Hide SVG icons, buttons, and form elements in bilingual view */
+.bilingual-content svg,
+.bilingual-content button,
+.bilingual-content form,
+.bilingual-content select,
+.bilingual-content input,
+.bilingual-content textarea {
+    display: none !important;
+}
+
+/* Tiny inline images (avatars, icons) in bilingual view — hide them */
+.bilingual-content img[width][height]:not([width="0"]):not([height="0"]) {
+    max-width: 100px;
+    max-height: 80px;
+    margin: 0.2rem;
+}
+/* Hide images under 64px (likely avatars / UI icons) in translation view */
+.bilingual-content img[width][height] {
+    max-width: 100%;
+    max-height: none;
+}
+.bilingual-content img[width] {
+    max-width: 100%;
+}
+
+/* Collapse consecutive empty lines in rendered content */
+.detail-body p:empty,
+.detail-body div:empty {
+    display: none;
 }
 
 /* Legacy segment styles (for backward compatibility) */
