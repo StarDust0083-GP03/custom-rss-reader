@@ -135,7 +135,7 @@ async fn test_update_content_md() {
 
     let updated = env
         .feed_repo
-        .update_content_md(item_id, "# Cached Markdown\n\nOriginal HTML")
+        .update_content_md(item_id, "# Cached Markdown\n\nOriginal HTML", true)
         .await
         .unwrap();
 
@@ -143,6 +143,7 @@ async fn test_update_content_md() {
         updated.content_md,
         Some("# Cached Markdown\n\nOriginal HTML".into())
     );
+    assert!(updated.is_website_content, "website cache flips the flag");
 }
 
 // ---------------------------------------------------------------------------
@@ -220,4 +221,250 @@ async fn test_cache_website_content() {
     assert!(md.contains("main"), "Markdown should contain paragraph text");
     assert!(!md.contains("Nav"), "Navigation should be stripped");
     assert!(!md.contains("Footer"), "Footer should be stripped");
+}
+
+// ---------------------------------------------------------------------------
+// Lazy RSS → markdown on first read
+// ---------------------------------------------------------------------------
+
+/// Regression: after `get_item` lazily populates `content_md`, the frontend
+/// never sees raw HTML on the text-mode display path. RSS `content` is
+/// converted to markdown (with pipeline-or-fallback) and the
+/// `is_website_content` flag stays false (it's RSS, not website).
+#[tokio::test]
+async fn test_ensure_content_md_for_item_populates_and_preserves_flag() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+
+    // Item with rich HTML content but no cached markdown.
+    let item_id = env
+        .feed_service
+        .create_item(NewFeedItem {
+            subscription_id: sub_id,
+            title: "RSS Item".into(),
+            content: Some(
+                "<article><h1>Headline</h1><p>This is the body. ".repeat(20) + "</p></article>",
+            ),
+            ..Default::default()
+        })
+        .await
+        .expect("create item")
+        .id;
+
+    // Sanity: starts with no markdown, no website flag.
+    let pre = env.feed_repo.find_by_id(item_id).await.unwrap();
+    assert!(pre.content_md.is_none());
+    assert!(!pre.is_website_content);
+
+    let updated = crate::services::feed_service::ensure_content_md_for_item(
+        &env.feed_repo,
+        item_id,
+    )
+    .await
+    .expect("lazy conversion");
+
+    let md = updated
+        .content_md
+        .as_deref()
+        .expect("content_md should be populated");
+    assert!(md.contains("Headline"), "Markdown should contain the heading");
+    assert!(
+        !md.contains("<article>"),
+        "Raw HTML must not survive the conversion"
+    );
+    assert!(
+        !updated.is_website_content,
+        "Lazy RSS conversion must not flip is_website_content"
+    );
+
+    // Second call is a no-op (already cached).
+    let again = crate::services::feed_service::ensure_content_md_for_item(
+        &env.feed_repo,
+        item_id,
+    )
+    .await
+    .expect("second call");
+    assert_eq!(again.content_md.as_deref(), Some(md));
+}
+
+/// Short RSS content (smaller than the main-content 200-char threshold)
+/// falls back to plain `html2md::parse_html` instead of erroring.
+#[tokio::test]
+async fn test_ensure_content_md_short_rss_falls_back_to_plain() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+
+    let item_id = env
+        .feed_service
+        .create_item(NewFeedItem {
+            subscription_id: sub_id,
+            title: "Short".into(),
+            // Below the 200-char threshold that extract_main_content requires.
+            content: Some("<p>Hi <a href=\"https://example.com\">there</a>.</p>".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .id;
+
+    let updated = crate::services::feed_service::ensure_content_md_for_item(
+        &env.feed_repo,
+        item_id,
+    )
+    .await
+    .expect("lazy conversion should not error on short input");
+
+    let md = updated.content_md.expect("markdown should be populated");
+    assert!(md.contains("[there]"));
+    assert!(md.contains("(https://example.com)"));
+}
+
+// ---------------------------------------------------------------------------
+// Bulk id lookups (ChromaDB similar-articles support)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_find_summaries_by_ids() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+    let a = create_item(&env, sub_id, "Alpha").await;
+    let b = create_item(&env, sub_id, "Beta").await;
+    let _c = create_item(&env, sub_id, "Gamma").await;
+
+    let mut summaries = env
+        .feed_repo
+        .find_summaries_by_ids(&[b, a])
+        .await
+        .expect("Should fetch summaries by ids");
+    summaries.sort_by_key(|s| s.id);
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].title, "Alpha");
+    assert_eq!(summaries[1].title, "Beta");
+
+    // Unknown ids are silently omitted; empty input short-circuits.
+    let missing = env
+        .feed_repo
+        .find_summaries_by_ids(&[999_999])
+        .await
+        .expect("Missing ids should not error");
+    assert!(missing.is_empty());
+    let empty = env
+        .feed_repo
+        .find_summaries_by_ids(&[])
+        .await
+        .expect("Empty input should not error");
+    assert!(empty.is_empty());
+}
+
+#[tokio::test]
+async fn test_find_ids_by_subscription() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+    let a = create_item(&env, sub_id, "One").await;
+    let b = create_item(&env, sub_id, "Two").await;
+
+    let mut ids = env
+        .feed_repo
+        .find_ids_by_subscription(sub_id)
+        .await
+        .expect("Should fetch ids");
+    ids.sort();
+    assert_eq!(ids, vec![a.min(b), a.max(b)]);
+
+    let none = env
+        .feed_repo
+        .find_ids_by_subscription(999_999)
+        .await
+        .expect("Unknown subscription should not error");
+    assert!(none.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Chroma sync support: IndexRow keyset pagination + max_item_id
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_find_index_page_orders_ascending_after_id() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+    let id1 = create_item(&env, sub_id, "one").await;
+    let id2 = create_item(&env, sub_id, "two").await;
+    let id3 = create_item(&env, sub_id, "three").await;
+
+    // Page 1 from the watermark 0
+    let page = env
+        .feed_repo
+        .find_index_page(0, 2)
+        .await
+        .expect("find_index_page failed");
+    assert_eq!(page.len(), 2);
+    assert_eq!(page[0].id, id1);
+    assert_eq!(page[1].id, id2);
+    assert_eq!(page[0].title, "one");
+
+    // Page 2 continues strictly after the last seen id — keyset semantics
+    let page2 = env
+        .feed_repo
+        .find_index_page(page[1].id, 2)
+        .await
+        .expect("find_index_page page 2 failed");
+    assert_eq!(page2.len(), 1);
+    assert_eq!(page2[0].id, id3);
+
+    // Beyond the end → empty page terminates the sync walk
+    let page3 = env.feed_repo.find_index_page(id3, 2).await.unwrap();
+    assert!(page3.is_empty());
+}
+
+#[tokio::test]
+async fn test_find_index_page_truncates_text_columns() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+    // 5000 CJK chars in description = ~15KB; the projection must bound it.
+    env.feed_service
+        .create_item(NewFeedItem {
+            subscription_id: sub_id,
+            title: "big".into(),
+            description: Some("字".repeat(5000)),
+            ..Default::default()
+        })
+        .await
+        .expect("create big item failed");
+
+    let rows = env.feed_repo.find_index_page(0, 10).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let desc = rows[0].description.as_deref().expect("description present");
+    assert!(desc.chars().count() <= 2001, "description must be truncated, got {} chars", desc.chars().count());
+}
+
+#[tokio::test]
+async fn test_max_item_id_tracks_inserts_and_empty() {
+    let env = TestEnv::new().await;
+    // Empty table → 0 (not NULL / error) so the watermark validation works.
+    assert_eq!(env.feed_repo.max_item_id().await.unwrap(), 0);
+
+    let sub_id = seed_sub(&env).await;
+    let id = create_item(&env, sub_id, "x").await;
+    assert_eq!(env.feed_repo.max_item_id().await.unwrap(), id);
+}
+
+#[tokio::test]
+async fn test_find_index_rows_by_ids() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+    let id1 = create_item(&env, sub_id, "one").await;
+    let id2 = create_item(&env, sub_id, "two").await;
+
+    // Empty input → empty output, no SQL error
+    assert!(env.feed_repo.find_index_rows_by_ids(&[]).await.unwrap().is_empty());
+
+    let rows = env
+        .feed_repo
+        .find_index_rows_by_ids(&[id1, id2, 999999])
+        .await
+        .unwrap();
+    // Missing ids silently omitted; ascending order
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, id1);
+    assert_eq!(rows[1].id, id2);
 }

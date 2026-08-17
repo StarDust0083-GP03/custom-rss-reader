@@ -1,3 +1,6 @@
+//! Debug-only commands. Never compiled into release builds.
+#![cfg(debug_assertions)]
+
 use crate::error::Result;
 
 #[tauri::command]

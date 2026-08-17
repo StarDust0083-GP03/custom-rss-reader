@@ -1,9 +1,24 @@
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use sqlx::SqlitePool;
 
 use super::FeedItemRepository;
+use super::IndexRow;
 use crate::error::{AppError, Result};
-use crate::models::{FeedItem, NewFeedItem};
+use crate::models::{FeedItem, FeedItemSummary, NewFeedItem};
+
+/// Character cap applied to `description`/`content` in the [`IndexRow`]
+/// projection queries. Generously above what the embedding-document builder
+/// can consume (it truncates the joined document anyway).
+const INDEX_TEXT_CHARS_SQL: i64 = 2000;
+
+/// Columns selected for summary (list-view) queries. Excludes the large text
+/// columns (`content`, `content_md`, `translated_content`, `guid`).
+const SUMMARY_COLS: &str = "id, subscription_id, title, link, description, author, \
+    published_at, fetched_at, is_website_content, is_read, is_favorite, is_read_later, \
+    is_ignored, tags, category, translated_title, \
+    (translated_content IS NOT NULL AND translated_content != '') AS has_translation";
 
 /// Private database row type mapping to the `feed_items` table.
 #[derive(sqlx::FromRow)]
@@ -29,6 +44,28 @@ struct FeedItemRow {
     pub translated_title: Option<String>,
     pub translated_content: Option<String>,
     pub translated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Row type for summary queries (projection of `feed_items`).
+#[derive(sqlx::FromRow)]
+struct FeedItemSummaryRow {
+    pub id: i64,
+    pub subscription_id: i64,
+    pub title: String,
+    pub link: Option<String>,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub published_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+    pub is_website_content: bool,
+    pub is_read: bool,
+    pub is_favorite: bool,
+    pub is_read_later: bool,
+    pub is_ignored: bool,
+    pub tags: Option<String>,
+    pub category: Option<String>,
+    pub translated_title: Option<String>,
+    pub has_translation: bool,
 }
 
 impl From<FeedItemRow> for FeedItem {
@@ -59,6 +96,67 @@ impl From<FeedItemRow> for FeedItem {
     }
 }
 
+/// Private row type for the [`IndexRow`] projection queries.
+#[derive(sqlx::FromRow)]
+struct IndexRowImpl {
+    pub id: i64,
+    pub title: String,
+    pub link: Option<String>,
+    pub author: Option<String>,
+    pub published_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub category: Option<String>,
+    pub description: Option<String>,
+    pub content: Option<String>,
+}
+
+impl From<IndexRowImpl> for IndexRow {
+    fn from(r: IndexRowImpl) -> Self {
+        IndexRow {
+            id: r.id,
+            title: r.title,
+            link: r.link,
+            author: r.author,
+            published_at: r.published_at,
+            category: r.category,
+            description: r.description,
+            content: r.content,
+        }
+    }
+}
+
+impl From<FeedItemSummaryRow> for FeedItemSummary {
+    fn from(r: FeedItemSummaryRow) -> Self {
+        FeedItemSummary {
+            id: r.id,
+            subscription_id: r.subscription_id,
+            title: r.title,
+            link: r.link,
+            description: r.description,
+            author: r.author,
+            published_at: r.published_at,
+            fetched_at: r.fetched_at,
+            is_website_content: r.is_website_content,
+            is_read: r.is_read,
+            is_favorite: r.is_favorite,
+            is_read_later: r.is_read_later,
+            is_ignored: r.is_ignored,
+            tags: r.tags,
+            category: r.category,
+            translated_title: r.translated_title,
+            has_translation: r.has_translation,
+        }
+    }
+}
+
+/// Escape LIKE special characters so user input is matched literally.
+/// Use together with `ESCAPE '\'` in the SQL.
+fn escape_like(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 /// Production implementation backed by a real SQLite pool.
 #[derive(Clone)]
 pub struct SqliteFeedItemRepository {
@@ -69,11 +167,38 @@ impl SqliteFeedItemRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
+
+    /// Run a summary query with the given WHERE suffix and bound params.
+    async fn fetch_summaries(
+        &self,
+        where_sql: &str,
+        subscription_id: Option<i64>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<FeedItemSummary>> {
+        let sql = format!(
+            "SELECT {} FROM feed_items {} ORDER BY published_at DESC LIMIT $1 OFFSET $2",
+            SUMMARY_COLS, where_sql
+        );
+        let mut q = sqlx::query_as::<_, FeedItemSummaryRow>(&sql)
+            .bind(limit)
+            .bind(offset);
+        if let Some(sub_id) = subscription_id {
+            // subscription_id is referenced as $3 in the WHERE clause
+            q = q.bind(sub_id);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
 }
 
 #[async_trait]
 impl FeedItemRepository for SqliteFeedItemRepository {
     async fn create(&self, input: NewFeedItem) -> Result<FeedItem> {
+        // ON CONFLICT DO NOTHING relies on the (subscription_id, guid) unique
+        // index as a last-resort dedup guard; in-memory dedup during fetch is
+        // the primary mechanism. A conflicting insert returns no row, which we
+        // surface as a Duplicate error that callers treat as "already exists".
         let row = sqlx::query_as::<_, FeedItemRow>(
             r#"
             INSERT INTO feed_items (
@@ -83,6 +208,7 @@ impl FeedItemRepository for SqliteFeedItemRepository {
                 tags, category,
                 translated_title, translated_content, translated_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+            ON CONFLICT DO NOTHING
             RETURNING *
             "#,
         )
@@ -105,9 +231,15 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         .bind(&input.translated_title)
         .bind(&input.translated_content)
         .bind(input.translated_at)
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await
-        .map_err(|e| map_feed_item_sqlx_error(e, "creating feed item"))?;
+        .map_err(|e| map_feed_item_sqlx_error(e, "creating feed item"))?
+        .ok_or_else(|| {
+            AppError::Duplicate(format!(
+                "feed item already exists (subscription {}, guid {:?})",
+                input.subscription_id, input.guid
+            ))
+        })?;
 
         Ok(row.into())
     }
@@ -122,6 +254,31 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         Ok(row.into())
     }
 
+    async fn find_dedup_keys(
+        &self,
+        subscription_id: i64,
+    ) -> Result<(HashSet<String>, HashSet<String>)> {
+        let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT guid, link FROM feed_items WHERE subscription_id = $1",
+        )
+        .bind(subscription_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let guids = rows.iter().filter_map(|r| r.0.clone()).collect();
+        let links = rows.iter().filter_map(|r| r.1.clone()).collect();
+        Ok((guids, links))
+    }
+
+    async fn find_ids_by_subscription(&self, subscription_id: i64) -> Result<Vec<i64>> {
+        let rows: Vec<(i64,)> =
+            sqlx::query_as("SELECT id FROM feed_items WHERE subscription_id = $1")
+                .bind(subscription_id)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
     async fn find_by_subscription(&self, subscription_id: i64) -> Result<Vec<FeedItem>> {
         let rows = sqlx::query_as::<_, FeedItemRow>(
             "SELECT * FROM feed_items WHERE subscription_id = $1 ORDER BY published_at DESC",
@@ -133,17 +290,95 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 
-    async fn update_content_md(&self, id: i64, content_md: &str) -> Result<FeedItem> {
+    async fn find_all_full(&self, limit: i64, offset: i64) -> Result<Vec<FeedItem>> {
+        let rows = sqlx::query_as::<_, FeedItemRow>(
+            "SELECT * FROM feed_items ORDER BY id LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+
+    async fn find_index_page(&self, after_id: i64, limit: i64) -> Result<Vec<IndexRow>> {
+        // substr(...) truncates in CHARACTERS (SQLite text semantics), which
+        // bounds each row regardless of article size while still supplying
+        // everything the 2000-unit document truncation can consume.
+        let rows = sqlx::query_as::<_, IndexRowImpl>(
+            r#"
+            SELECT id, title, link, author, published_at, category,
+                   substr(description, 1, $2) AS description,
+                   substr(content, 1, $2)    AS content
+            FROM feed_items
+            WHERE id > $1
+            ORDER BY id ASC
+            LIMIT $3
+            "#,
+        )
+        .bind(after_id)
+        .bind(INDEX_TEXT_CHARS_SQL)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+
+    async fn find_index_rows_by_ids(&self, ids: &[i64]) -> Result<Vec<IndexRow>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut qb = sqlx::QueryBuilder::new(
+            r#"
+            SELECT id, title, link, author, published_at, category,
+                   substr(description, 1, "#,
+        );
+        qb.push_bind(INDEX_TEXT_CHARS_SQL)
+            .push(r#") AS description, substr(content, 1, "#)
+            .push_bind(INDEX_TEXT_CHARS_SQL)
+            .push(r#") AS content FROM feed_items WHERE id IN ("#);
+        let mut separated = qb.separated(", ");
+        for id in ids {
+            separated.push_bind(id);
+        }
+        separated.push_unseparated(") ORDER BY id ASC");
+        let rows = qb
+            .build_query_as::<IndexRowImpl>()
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+
+    async fn max_item_id(&self) -> Result<i64> {
+        // MAX() over an empty table yields NULL → Option<i64> row value.
+        let max: Option<i64> = sqlx::query_scalar("SELECT MAX(id) FROM feed_items")
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(max.unwrap_or(0))
+    }
+
+    async fn update_content_md(
+        &self,
+        id: i64,
+        content_md: &str,
+        from_website: bool,
+    ) -> Result<FeedItem> {
+        // Only flip `is_website_content` when the markdown came from the
+        // website. Lazy RSS→markdown conversions leave the flag untouched so
+        // `is_website_content` keeps its original semantic meaning.
         let row = sqlx::query_as::<_, FeedItemRow>(
             r#"
             UPDATE feed_items
-            SET content_md = $2
+            SET content_md = $2,
+                is_website_content = CASE WHEN $3 THEN 1 ELSE is_website_content END
             WHERE id = $1
             RETURNING *
             "#,
         )
         .bind(id)
         .bind(content_md)
+        .bind(from_website)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("FeedItem with id {} not found", id)))?;
@@ -151,50 +386,82 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         Ok(row.into())
     }
 
+    async fn update_translation(
+        &self,
+        item_id: i64,
+        translated_title: Option<&str>,
+        translated_content: &str,
+    ) -> Result<FeedItem> {
+        let row = sqlx::query_as::<_, FeedItemRow>(
+            r#"
+            UPDATE feed_items
+            SET translated_content = $2,
+                translated_title = COALESCE($3, translated_title),
+                translated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+            RETURNING *
+            "#,
+        )
+        .bind(item_id)
+        .bind(translated_content)
+        .bind(translated_title)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("FeedItem with id {} not found", item_id)))?;
+
+        Ok(row.into())
+    }
 
     async fn find_all(
         &self,
         subscription_id: Option<i64>,
         limit: i64,
         offset: i64,
-    ) -> Result<Vec<FeedItem>> {
-        let rows = if let Some(sub_id) = subscription_id {
-            sqlx::query_as::<_, FeedItemRow>(
-                "SELECT * FROM feed_items WHERE subscription_id = $1 ORDER BY published_at DESC LIMIT $2 OFFSET $3",
-            )
-            .bind(sub_id)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?
+    ) -> Result<Vec<FeedItemSummary>> {
+        let where_sql = if subscription_id.is_some() {
+            "WHERE subscription_id = $3"
         } else {
-            sqlx::query_as::<_, FeedItemRow>(
-                "SELECT * FROM feed_items ORDER BY published_at DESC LIMIT $1 OFFSET $2",
-            )
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?
+            ""
         };
+        self.fetch_summaries(where_sql, subscription_id, limit, offset).await
+    }
+
+    async fn search(&self, query: &str, limit: i64) -> Result<Vec<FeedItemSummary>> {
+        let pattern = format!("%{}%", escape_like(query));
+        let sql = format!(
+            r#"SELECT {} FROM feed_items
+               WHERE (title LIKE $1 ESCAPE '\' OR description LIKE $1 ESCAPE '\' OR content LIKE $1 ESCAPE '\')
+               ORDER BY published_at DESC LIMIT $2"#,
+            SUMMARY_COLS
+        );
+        let rows = sqlx::query_as::<_, FeedItemSummaryRow>(&sql)
+            .bind(&pattern)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 
-    async fn search(&self, query: &str, limit: i64) -> Result<Vec<FeedItem>> {
-        let pattern = format!("%{}%", query);
-        let rows = sqlx::query_as::<_, FeedItemRow>(
-            r#"
-            SELECT * FROM feed_items
-            WHERE title LIKE $1 OR description LIKE $1 OR content LIKE $1
-            ORDER BY published_at DESC
-            LIMIT $2
-            "#,
-        )
-        .bind(&pattern)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-
+    async fn find_summaries_by_ids(&self, ids: &[i64]) -> Result<Vec<FeedItemSummary>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // QueryBuilder is used (not format!) so the IN list is bound
+        // parameters, keeping the query plan cacheable and injection-safe.
+        let mut qb = sqlx::QueryBuilder::new(format!(
+            "SELECT {} FROM feed_items WHERE id IN (",
+            SUMMARY_COLS
+        ));
+        let mut separated = qb.separated(", ");
+        for id in ids {
+            separated.push_bind(id);
+        }
+        separated.push_unseparated(")");
+        let rows = qb
+            .build_query_as::<FeedItemSummaryRow>()
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 
@@ -204,34 +471,30 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         subscription_id: Option<i64>,
         limit: i64,
         offset: i64,
-    ) -> Result<Vec<FeedItem>> {
-        // Match the tag as a JSON string element: "tag"
-        let pattern = format!("%\"{}\"%", tag);
+    ) -> Result<Vec<FeedItemSummary>> {
+        // Exact element match inside the tags JSON array
+        let base = format!(
+            r#"SELECT {} FROM feed_items
+               WHERE EXISTS (SELECT 1 FROM json_each(feed_items.tags) WHERE value = $1)"#,
+            SUMMARY_COLS
+        );
         let rows = if let Some(sub_id) = subscription_id {
-            sqlx::query_as::<_, FeedItemRow>(
-                r#"
-                SELECT * FROM feed_items
-                WHERE tags LIKE $1 AND subscription_id = $2
-                ORDER BY published_at DESC
-                LIMIT $3 OFFSET $4
-                "#,
-            )
-            .bind(&pattern)
+            sqlx::query_as::<_, FeedItemSummaryRow>(&format!(
+                "{} AND subscription_id = $2 ORDER BY published_at DESC LIMIT $3 OFFSET $4",
+                base
+            ))
+            .bind(tag)
             .bind(sub_id)
             .bind(limit)
             .bind(offset)
             .fetch_all(&self.pool)
             .await?
         } else {
-            sqlx::query_as::<_, FeedItemRow>(
-                r#"
-                SELECT * FROM feed_items
-                WHERE tags LIKE $1
-                ORDER BY published_at DESC
-                LIMIT $2 OFFSET $3
-                "#,
-            )
-            .bind(&pattern)
+            sqlx::query_as::<_, FeedItemSummaryRow>(&format!(
+                "{} ORDER BY published_at DESC LIMIT $2 OFFSET $3",
+                base
+            ))
+            .bind(tag)
             .bind(limit)
             .bind(offset)
             .fetch_all(&self.pool)
@@ -244,29 +507,24 @@ impl FeedItemRepository for SqliteFeedItemRepository {
     async fn find_all_tags(&self, subscription_id: Option<i64>) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = if let Some(sub_id) = subscription_id {
             sqlx::query_as(
-                "SELECT tags FROM feed_items WHERE tags IS NOT NULL AND subscription_id = $1",
+                r#"SELECT DISTINCT value FROM feed_items, json_each(feed_items.tags)
+                   WHERE tags IS NOT NULL AND json_valid(tags) AND subscription_id = $1
+                   ORDER BY value"#,
             )
             .bind(sub_id)
             .fetch_all(&self.pool)
             .await?
         } else {
-            sqlx::query_as("SELECT tags FROM feed_items WHERE tags IS NOT NULL")
-                .fetch_all(&self.pool)
-                .await?
+            sqlx::query_as(
+                r#"SELECT DISTINCT value FROM feed_items, json_each(feed_items.tags)
+                   WHERE tags IS NOT NULL AND json_valid(tags)
+                   ORDER BY value"#,
+            )
+            .fetch_all(&self.pool)
+            .await?
         };
 
-        let mut all_tags: Vec<String> = Vec::new();
-        for (tags_json,) in rows {
-            if let Ok(tags) = serde_json::from_str::<Vec<String>>(&tags_json) {
-                for tag in tags {
-                    if !all_tags.contains(&tag) {
-                        all_tags.push(tag);
-                    }
-                }
-            }
-        }
-        all_tags.sort();
-        Ok(all_tags)
+        Ok(rows.into_iter().map(|(tag,)| tag).collect())
     }
 
     async fn mark_read(&self, id: i64, is_read: bool) -> Result<FeedItem> {
@@ -290,13 +548,15 @@ impl FeedItemRepository for SqliteFeedItemRepository {
     async fn mark_all_read(&self, subscription_id: Option<i64>) -> Result<()> {
         match subscription_id {
             Some(id) => {
-                sqlx::query("UPDATE feed_items SET is_read = 1 WHERE subscription_id = $1")
-                    .bind(id)
-                    .execute(&self.pool)
-                    .await?;
+                sqlx::query(
+                    "UPDATE feed_items SET is_read = 1 WHERE subscription_id = $1 AND is_read = 0",
+                )
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
             }
             None => {
-                sqlx::query("UPDATE feed_items SET is_read = 1")
+                sqlx::query("UPDATE feed_items SET is_read = 1 WHERE is_read = 0")
                     .execute(&self.pool)
                     .await?;
             }
@@ -305,60 +565,23 @@ impl FeedItemRepository for SqliteFeedItemRepository {
     }
 
     async fn toggle_favorite(&self, id: i64) -> Result<bool> {
-        let row: FeedItemRow = self.find_by_id_internal(id).await?;
-        let new_value = !row.is_favorite;
-        sqlx::query("UPDATE feed_items SET is_favorite = $2 WHERE id = $1")
-            .bind(id)
-            .bind(new_value)
-            .execute(&self.pool)
-            .await?;
-        Ok(new_value)
+        self.toggle_flag(id, "is_favorite").await
     }
 
     async fn toggle_read_later(&self, id: i64) -> Result<bool> {
-        let row: FeedItemRow = self.find_by_id_internal(id).await?;
-        let new_value = !row.is_read_later;
-        sqlx::query("UPDATE feed_items SET is_read_later = $2 WHERE id = $1")
-            .bind(id)
-            .bind(new_value)
-            .execute(&self.pool)
-            .await?;
-        Ok(new_value)
+        self.toggle_flag(id, "is_read_later").await
     }
 
     async fn toggle_ignored(&self, id: i64) -> Result<bool> {
-        let row: FeedItemRow = self.find_by_id_internal(id).await?;
-        let new_value = !row.is_ignored;
-        sqlx::query("UPDATE feed_items SET is_ignored = $2 WHERE id = $1")
-            .bind(id)
-            .bind(new_value)
-            .execute(&self.pool)
-            .await?;
-        Ok(new_value)
+        self.toggle_flag(id, "is_ignored").await
     }
 
-    async fn get_favorites(&self, limit: i64, offset: i64) -> Result<Vec<FeedItem>> {
-        let rows = sqlx::query_as::<_, FeedItemRow>(
-            "SELECT * FROM feed_items WHERE is_favorite = 1 ORDER BY published_at DESC LIMIT $1 OFFSET $2",
-        )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows.into_iter().map(|r| r.into()).collect())
+    async fn get_favorites(&self, limit: i64, offset: i64) -> Result<Vec<FeedItemSummary>> {
+        self.fetch_summaries("WHERE is_favorite = 1", None, limit, offset).await
     }
 
-    async fn get_read_later(&self, limit: i64, offset: i64) -> Result<Vec<FeedItem>> {
-        let rows = sqlx::query_as::<_, FeedItemRow>(
-            "SELECT * FROM feed_items WHERE is_read_later = 1 ORDER BY published_at DESC LIMIT $1 OFFSET $2",
-        )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows.into_iter().map(|r| r.into()).collect())
+    async fn get_read_later(&self, limit: i64, offset: i64) -> Result<Vec<FeedItemSummary>> {
+        self.fetch_summaries("WHERE is_read_later = 1", None, limit, offset).await
     }
 
     async fn get_unread(
@@ -366,37 +589,13 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         subscription_id: Option<i64>,
         limit: i64,
         offset: i64,
-    ) -> Result<Vec<FeedItem>> {
-        let rows = if let Some(sub_id) = subscription_id {
-            sqlx::query_as::<_, FeedItemRow>(
-                r#"
-                SELECT * FROM feed_items
-                WHERE subscription_id = $1 AND is_read = 0
-                ORDER BY published_at DESC
-                LIMIT $2 OFFSET $3
-                "#,
-            )
-            .bind(sub_id)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?
+    ) -> Result<Vec<FeedItemSummary>> {
+        let where_sql = if subscription_id.is_some() {
+            "WHERE subscription_id = $3 AND is_read = 0"
         } else {
-            sqlx::query_as::<_, FeedItemRow>(
-                r#"
-                SELECT * FROM feed_items
-                WHERE is_read = 0
-                ORDER BY published_at DESC
-                LIMIT $1 OFFSET $2
-                "#,
-            )
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?
+            "WHERE is_read = 0"
         };
-
-        Ok(rows.into_iter().map(|r| r.into()).collect())
+        self.fetch_summaries(where_sql, subscription_id, limit, offset).await
     }
 
     async fn get_today_items(
@@ -405,72 +604,41 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         unread_only: bool,
         limit: i64,
         offset: i64,
-    ) -> Result<Vec<FeedItem>> {
-        let rows = match (subscription_id, unread_only) {
-            (Some(sub_id), true) => {
-                sqlx::query_as::<_, FeedItemRow>(
-                    r#"
-                    SELECT * FROM feed_items
-                    WHERE subscription_id = $1
-                      AND DATE(published_at) = DATE('now')
-                      AND is_read = 0
-                    ORDER BY published_at DESC
-                    LIMIT $2 OFFSET $3
-                    "#,
-                )
-                .bind(sub_id)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            (Some(sub_id), false) => {
-                sqlx::query_as::<_, FeedItemRow>(
-                    r#"
-                    SELECT * FROM feed_items
-                    WHERE subscription_id = $1
-                      AND DATE(published_at) = DATE('now')
-                    ORDER BY published_at DESC
-                    LIMIT $2 OFFSET $3
-                    "#,
-                )
-                .bind(sub_id)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            (None, true) => {
-                sqlx::query_as::<_, FeedItemRow>(
-                    r#"
-                    SELECT * FROM feed_items
-                    WHERE DATE(published_at) = DATE('now')
-                      AND is_read = 0
-                    ORDER BY published_at DESC
-                    LIMIT $1 OFFSET $2
-                    "#,
-                )
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            (None, false) => {
-                sqlx::query_as::<_, FeedItemRow>(
-                    r#"
-                    SELECT * FROM feed_items
-                    WHERE DATE(published_at) = DATE('now')
-                    ORDER BY published_at DESC
-                    LIMIT $1 OFFSET $2
-                    "#,
-                )
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await?
-            }
-        };
+    ) -> Result<Vec<FeedItemSummary>> {
+        // "Today" in the user's LOCAL timezone, expressed as a UTC range so
+        // the published_at index can be used (no per-row DATE() function).
+        let today = chrono::Local::now().date_naive();
+        let start_local = today
+            .and_hms_opt(0, 0, 0)
+            .expect("00:00:00 is always valid");
+        let start_utc: chrono::DateTime<chrono::Utc> = start_local
+            .and_local_timezone(chrono::Local)
+            .single()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|| start_local.and_utc());
+        let end_utc = start_utc + chrono::Duration::days(1);
 
+        let mut where_sql = String::from("WHERE published_at >= $1 AND published_at < $2");
+        if subscription_id.is_some() {
+            where_sql.push_str(" AND subscription_id = $5");
+        }
+        if unread_only {
+            where_sql.push_str(" AND is_read = 0");
+        }
+
+        let sql = format!(
+            "SELECT {} FROM feed_items {} ORDER BY published_at DESC LIMIT $3 OFFSET $4",
+            SUMMARY_COLS, where_sql
+        );
+        let mut q = sqlx::query_as::<_, FeedItemSummaryRow>(&sql)
+            .bind(start_utc)
+            .bind(end_utc)
+            .bind(limit)
+            .bind(offset);
+        if let Some(sub_id) = subscription_id {
+            q = q.bind(sub_id);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 
@@ -495,13 +663,18 @@ impl FeedItemRepository for SqliteFeedItemRepository {
 }
 
 impl SqliteFeedItemRepository {
-    /// Internal helper: fetch a row by ID for toggle operations.
-    async fn find_by_id_internal(&self, id: i64) -> Result<FeedItemRow> {
-        sqlx::query_as::<_, FeedItemRow>("SELECT * FROM feed_items WHERE id = $1")
+    /// Atomically flip a boolean column and return the new value.
+    async fn toggle_flag(&self, id: i64, column: &str) -> Result<bool> {
+        // `column` is only ever one of the three hardcoded literals above.
+        let sql = format!(
+            "UPDATE feed_items SET {col} = NOT {col} WHERE id = $1 RETURNING {col}",
+            col = column
+        );
+        let value: Option<bool> = sqlx::query_scalar(&sql)
             .bind(id)
             .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("FeedItem with id {} not found", id)))
+            .await?;
+        value.ok_or_else(|| AppError::NotFound(format!("FeedItem with id {} not found", id)))
     }
 }
 
@@ -516,240 +689,5 @@ fn map_feed_item_sqlx_error(e: sqlx::Error, context: &str) -> AppError {
             }
         }
         _ => AppError::Database(e),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tests::helpers::TestEnv;
-
-    async fn seed_sub(env: &TestEnv) -> i64 {
-        seed_sub_with_url(env, "https://example.com/rss").await
-    }
-
-    async fn seed_sub_with_url(env: &TestEnv, url: &str) -> i64 {
-        env.service
-            .add_subscription(crate::models::NewSubscription {
-                url: url.into(),
-                title: Some("Test Sub".into()),
-                ..Default::default()
-            })
-            .await
-            .expect("Failed to seed subscription")
-            .id
-    }
-
-    async fn create_item(env: &TestEnv, sub_id: i64, title: &str) -> i64 {
-        env.feed_service
-            .create_item(NewFeedItem {
-                subscription_id: sub_id,
-                title: title.into(),
-                content: Some("<p>Test content</p>".into()),
-                ..Default::default()
-            })
-            .await
-            .expect("Failed to create feed item")
-            .id
-    }
-
-    #[tokio::test]
-    async fn test_find_all_pagination() {
-        let env = TestEnv::new().await;
-        let sub_id = seed_sub(&env).await;
-        for i in 0..5 {
-            create_item(&env, sub_id, &format!("Item {}", i)).await;
-        }
-
-        let page1 = env.feed_repo.find_all(Some(sub_id), 2, 0).await.unwrap();
-        assert_eq!(page1.len(), 2);
-
-        let all = env.feed_repo.find_all(None, 10, 0).await.unwrap();
-        assert_eq!(all.len(), 5);
-    }
-
-    #[tokio::test]
-    async fn test_search_items() {
-        let env = TestEnv::new().await;
-        let sub_id = seed_sub(&env).await;
-        create_item(&env, sub_id, "Rust Programming").await;
-        create_item(&env, sub_id, "JavaScript Tips").await;
-        create_item(&env, sub_id, "Cooking Recipes").await;
-
-        let results = env.feed_repo.search("Rust", 10).await.unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "Rust Programming");
-    }
-
-    #[tokio::test]
-    async fn test_mark_read() {
-        let env = TestEnv::new().await;
-        let sub_id = seed_sub(&env).await;
-        let item_id = create_item(&env, sub_id, "To Read").await;
-
-        let updated = env.feed_repo.mark_read(item_id, true).await.unwrap();
-        assert!(updated.is_read);
-
-        let updated = env.feed_repo.mark_read(item_id, false).await.unwrap();
-        assert!(!updated.is_read);
-    }
-
-    #[tokio::test]
-    async fn test_mark_all_read() {
-        let env = TestEnv::new().await;
-        let sub_id = seed_sub(&env).await;
-        create_item(&env, sub_id, "Item 1").await;
-        create_item(&env, sub_id, "Item 2").await;
-
-        env.feed_repo.mark_all_read(Some(sub_id)).await.unwrap();
-
-        let items = env.feed_repo.find_by_subscription(sub_id).await.unwrap();
-        assert!(items.iter().all(|i| i.is_read));
-    }
-
-    #[tokio::test]
-    async fn test_mark_all_read_all_subscriptions() {
-        let env = TestEnv::new().await;
-        let sub_a = seed_sub_with_url(&env, "https://example.com/feed-a").await;
-        let sub_b = seed_sub_with_url(&env, "https://example.com/feed-b").await;
-        create_item(&env, sub_a, "A1").await;
-        create_item(&env, sub_b, "B1").await;
-
-        // Mark ALL items read across every subscription
-        env.feed_repo.mark_all_read(None).await.unwrap();
-
-        for sub_id in [sub_a, sub_b] {
-            let items = env.feed_repo.find_by_subscription(sub_id).await.unwrap();
-            assert!(items.iter().all(|i| i.is_read), "all items in sub {} should be read", sub_id);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_toggle_favorite() {
-        let env = TestEnv::new().await;
-        let sub_id = seed_sub(&env).await;
-        let item_id = create_item(&env, sub_id, "Fav Test").await;
-
-        let state = env.feed_repo.toggle_favorite(item_id).await.unwrap();
-        assert!(state);
-
-        let state = env.feed_repo.toggle_favorite(item_id).await.unwrap();
-        assert!(!state);
-    }
-
-    #[tokio::test]
-    async fn test_toggle_read_later() {
-        let env = TestEnv::new().await;
-        let sub_id = seed_sub(&env).await;
-        let item_id = create_item(&env, sub_id, "Later").await;
-
-        let state = env.feed_repo.toggle_read_later(item_id).await.unwrap();
-        assert!(state);
-
-        let state = env.feed_repo.toggle_read_later(item_id).await.unwrap();
-        assert!(!state);
-    }
-
-    #[tokio::test]
-    async fn test_toggle_ignored() {
-        let env = TestEnv::new().await;
-        let sub_id = seed_sub(&env).await;
-        let item_id = create_item(&env, sub_id, "Ignore").await;
-
-        let state = env.feed_repo.toggle_ignored(item_id).await.unwrap();
-        assert!(state);
-
-        let state = env.feed_repo.toggle_ignored(item_id).await.unwrap();
-        assert!(!state);
-    }
-
-    #[tokio::test]
-    async fn test_get_favorites() {
-        let env = TestEnv::new().await;
-        let sub_id = seed_sub(&env).await;
-        let id1 = create_item(&env, sub_id, "Fav 1").await;
-        let id2 = create_item(&env, sub_id, "Fav 2").await;
-        create_item(&env, sub_id, "Not Fav").await;
-
-        env.feed_repo.toggle_favorite(id1).await.unwrap();
-        env.feed_repo.toggle_favorite(id2).await.unwrap();
-
-        let favs = env.feed_repo.get_favorites(10, 0).await.unwrap();
-        assert_eq!(favs.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_get_unread() {
-        let env = TestEnv::new().await;
-        let sub_id = seed_sub(&env).await;
-        let id1 = create_item(&env, sub_id, "Unread 1").await;
-        create_item(&env, sub_id, "Unread 2").await;
-        env.feed_repo.mark_read(id1, true).await.unwrap();
-
-        let unread = env.feed_repo.get_unread(Some(sub_id), 10, 0).await.unwrap();
-        assert_eq!(unread.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_save_tags() {
-        let env = TestEnv::new().await;
-        let sub_id = seed_sub(&env).await;
-        let item_id = create_item(&env, sub_id, "Tagged").await;
-
-        let updated = env
-            .feed_repo
-            .save_tags(item_id, r#"["rust","programming"]"#, "tech")
-            .await
-            .unwrap();
-        assert_eq!(updated.tags, Some(r#"["rust","programming"]"#.into()));
-        assert_eq!(updated.category, Some("tech".into()));
-    }
-
-    #[tokio::test]
-    async fn test_find_by_tag() {
-        let env = TestEnv::new().await;
-        let sub_id = seed_sub(&env).await;
-        let id1 = create_item(&env, sub_id, "Rust Article").await;
-        let id2 = create_item(&env, sub_id, "Cooking Article").await;
-
-        env.feed_repo
-            .save_tags(id1, r#"["rust","programming"]"#, "tech")
-            .await
-            .unwrap();
-        env.feed_repo
-            .save_tags(id2, r#"["cooking"]"#, "lifestyle")
-            .await
-            .unwrap();
-
-        let results = env
-            .feed_repo
-            .find_by_tag("rust", None, 10, 0)
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "Rust Article");
-    }
-
-    #[tokio::test]
-    async fn test_find_all_tags() {
-        let env = TestEnv::new().await;
-        let sub_id = seed_sub(&env).await;
-
-        let id1 = create_item(&env, sub_id, "Article 1").await;
-        let id2 = create_item(&env, sub_id, "Article 2").await;
-
-        env.feed_repo
-            .save_tags(id1, r#"["rust","programming"]"#, "tech")
-            .await
-            .unwrap();
-        env.feed_repo
-            .save_tags(id2, r#"["rust","web"]"#, "tech")
-            .await
-            .unwrap();
-
-        let all_tags = env.feed_repo.find_all_tags(None).await.unwrap();
-        assert!(all_tags.contains(&"rust".to_string()));
-        assert!(all_tags.contains(&"programming".to_string()));
-        assert!(all_tags.contains(&"web".to_string()));
     }
 }

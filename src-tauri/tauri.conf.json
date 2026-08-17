@@ -15,12 +15,11 @@
       {
         "title": "RSS Reader",
         "width": 1200,
-        "height": 800,
-        "devtools": true
+        "height": 800
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1421; font-src 'self' data:; object-src 'none'; base-uri 'none'"
     }
   },
   "bundle": {

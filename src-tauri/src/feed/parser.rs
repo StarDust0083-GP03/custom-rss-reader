@@ -1,13 +1,23 @@
 use crate::error::{AppError, Result};
 use crate::models::NewFeedItem;
 use feed_rs::parser;
-use html2md;
+
+/// Detect whether the document declares itself as an HTML page
+/// (handles `<!DOCTYPE html>`, `<html lang=...>`, etc.).
+fn is_html_document(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    lower.contains("<!doctype html") || lower.contains("<html ") || lower.contains("<html>")
+}
 
 /// Parse RSS/Atom feed content into `NewFeedItem` vectors.
 ///
-/// Validates content before parsing: checks for empty content,
-/// compressed data (should be decompressed at fetcher level),
-/// JSON-only feeds, and HTML error pages (Cloudflare, Obsidian, etc.).
+/// Validates content before parsing: empty content, compressed bytes (the
+/// fetcher is responsible for decompression), JSON-only feeds, and HTML
+/// error pages (Cloudflare, Obsidian, etc.).
+///
+/// `content_md` is populated lazily by [`ensure_content_md`] the first time
+/// the item is needed — this avoids blocking the fetch loop on a
+/// CPU-intensive HTML→Markdown conversion for every freshly parsed entry.
 pub fn parse_feed(feed_content: &str, subscription_id: i64) -> Result<Vec<NewFeedItem>> {
     let trimmed = feed_content.trim();
 
@@ -15,20 +25,17 @@ pub fn parse_feed(feed_content: &str, subscription_id: i64) -> Result<Vec<NewFee
         return Err(AppError::Parse("Empty feed content".into()));
     }
 
-    // Safety check: compressed data should be decompressed at the fetcher level
+    // After the fetcher rewrite (which lets reqwest handle decompression),
+    // reaching here with a gzip/deflate signature is a bug — but if it
+    // happens we want to surface it loudly rather than silently mis-parse.
     let bytes = feed_content.as_bytes();
     if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
         return Err(AppError::Parse(
             "Feed is still gzip compressed (should be decompressed at fetcher level)".into(),
         ));
     }
-    if bytes.len() >= 1 && bytes[0] == 0x78 {
-        return Err(AppError::Parse(
-            "Feed is still deflate compressed (should be decompressed at fetcher level)".into(),
-        ));
-    }
 
-    // Check for JSON-only feeds (some endpoints return JSON instead of XML)
+    // JSON-only feeds (some endpoints return JSON instead of XML)
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         return Err(AppError::Parse(
             "Feed returned JSON format instead of XML/Atom. This URL may not be a valid RSS/Atom feed."
@@ -37,7 +44,7 @@ pub fn parse_feed(feed_content: &str, subscription_id: i64) -> Result<Vec<NewFee
     }
 
     // Check if content is HTML (error page)
-    if feed_content.contains("<!DOCTYPE html>") || feed_content.contains("<html>") {
+    if is_html_document(feed_content) {
         let error_msg = if feed_content.contains("Obsidian") {
             "This appears to be an Obsidian Publish page, not a valid RSS feed. Please check the feed URL."
         } else if feed_content.contains("Cloudflare") {
@@ -83,27 +90,45 @@ pub fn parse_feed(feed_content: &str, subscription_id: i64) -> Result<Vec<NewFee
                     .map(|t| t.content)
                     .unwrap_or_else(|| "Untitled".to_string()),
                 link: entry.links.first().map(|l| l.href.clone()),
-                content: content.clone(),
-                content_md: content.clone().map(|c| html2md::parse_html(&c)),
+                // content_md is computed lazily on first read (see
+                // ensure_content_md) so we don't pay the html2md cost for
+                // every entry during bulk fetch.
+                content_md: None,
+                content,
                 description: entry.summary.map(|s| s.content),
                 author: entry.authors.first().map(|a| a.name.clone()),
                 published_at: entry.published,
-                is_website_content: false,
-                is_read: false,
-                is_favorite: false,
-                is_read_later: false,
-                is_ignored: false,
-                tags: None,
-                category: None,
-                translated_title: None,
-                translated_content: None,
-                translated_at: None,
                 ..Default::default()
             }
         })
         .collect();
 
     Ok(items)
+}
+
+/// Compute `content_md` from RSS `content` (HTML → Markdown).
+///
+/// Tries the full `html_to_markdown_pipeline` first (which extracts main
+/// content and cleans UI chrome). Falls back to a direct `html2md::parse_html`
+/// when the pipeline rejects the input — RSS content is often already the
+/// article body and may not satisfy the pipeline's main-content selectors.
+///
+/// Returns the empty string when the conversion yields no useful text; the
+/// caller is expected to treat that as "nothing to show" and skip caching.
+///
+/// `html2md::parse_html` is CPU-bound and synchronous; call sites that need
+/// to run it on a Tokio worker thread should wrap with `spawn_blocking`.
+pub fn ensure_content_md(content: &str) -> String {
+    if content.is_empty() {
+        return String::new();
+    }
+    let md = crate::content_processor::html_to_markdown_pipeline(content)
+        .unwrap_or_else(|_| html2md::parse_html(content));
+    if md.trim().is_empty() {
+        String::new()
+    } else {
+        md
+    }
 }
 
 /// Detect the content type of a feed string for diagnostic messages.
@@ -117,7 +142,7 @@ fn detect_content_type(content: &str) -> String {
         "Atom".to_string()
     } else if content.starts_with('{') || content.starts_with('[') {
         "JSON".to_string()
-    } else if content.contains("<!DOCTYPE") || content.contains("<html") {
+    } else if is_html_document(content) {
         "HTML".to_string()
     } else {
         "Unknown".to_string()
@@ -153,57 +178,29 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_html_with_attributes() {
+        // Regression: <html lang=...> previously slipped past the "<html>" check.
+        let result = parse_feed(r#"<html lang="en"><body>not a feed</body></html>"#, 1);
+        assert!(matches!(result.unwrap_err(), AppError::Parse(_)));
+    }
+
+    #[test]
     fn test_parse_json_content() {
         let result = parse_feed("{\"key\": \"value\"}", 1);
         assert!(matches!(result.unwrap_err(), AppError::Parse(_)));
     }
 
     #[test]
-    fn test_parse_atom_with_content_md() {
-        let feed_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom">
-  <title>Test Feed</title>
-  <entry>
-    <title>Article with HTML Content</title>
-    <id>urn:uuid:test-content-md</id>
-    <content type="html">&lt;p&gt;Visit &lt;a href="https://example.com"&gt;our site&lt;/a&gt; for details.&lt;/p&gt;&lt;p&gt;&lt;img src="https://example.com/photo.jpg" alt="Photo"/&gt;&lt;/p&gt;</content>
-  </entry>
-</feed>"#;
-        let items = parse_feed(feed_xml, 1).unwrap();
-        assert_eq!(items.len(), 1);
+    fn test_ensure_content_md_returns_empty_for_empty_input() {
+        assert!(ensure_content_md("").is_empty());
+    }
 
-        let item = &items[0];
-        // content_md must be populated from the HTML content
-        assert!(
-            item.content_md.is_some(),
-            "content_md should be populated during parse"
-        );
-        let md = item.content_md.as_ref().unwrap();
-        assert!(!md.is_empty(), "content_md should not be empty");
-
-        // Must contain markdown link syntax from the <a> tag
-        assert!(
-            md.contains("[our site]"),
-            "content_md should contain converted link text: got '{}'",
-            md
-        );
-        assert!(
-            md.contains("(https://example.com)"),
-            "content_md should contain converted link URL: got '{}'",
-            md
-        );
-
-        // Must contain markdown image syntax from the <img> tag
-        assert!(
-            md.contains("![Photo]"),
-            "content_md should contain converted image alt: got '{}'",
-            md
-        );
-        assert!(
-            md.contains("(https://example.com/photo.jpg)"),
-            "content_md should contain converted image src: got '{}'",
-            md
-        );
+    #[test]
+    fn test_ensure_content_md_converts_basic_html() {
+        let html = r#"<p>Hello <a href="https://example.com">world</a>!</p>"#;
+        let md = ensure_content_md(html);
+        assert!(md.contains("[world]"));
+        assert!(md.contains("(https://example.com)"));
     }
 
     #[test]
@@ -213,6 +210,7 @@ mod tests {
         assert_eq!(detect_content_type("<feed xmlns=\"http://www.w3.org/2005/Atom\">"), "Atom");
         assert_eq!(detect_content_type("{\"key\": \"value\"}"), "JSON");
         assert_eq!(detect_content_type("<!DOCTYPE html>"), "HTML");
+        assert_eq!(detect_content_type("<html lang=\"en\">"), "HTML");
         assert_eq!(detect_content_type("random text"), "Unknown");
     }
 }

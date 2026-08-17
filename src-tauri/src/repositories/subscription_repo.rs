@@ -100,14 +100,17 @@ impl SubscriptionRepository for SqliteSubscriptionRepository {
     }
 
     async fn update(&self, id: i64, input: UpdateSubscription) -> Result<Subscription> {
+        // Double-option semantics for clearable fields: a "touched" flag
+        // decides whether the column is written; the value may itself be NULL
+        // (explicit clear).
         let row = sqlx::query_as::<_, SubscriptionRow>(
             r#"
             UPDATE subscriptions
             SET
                 title = COALESCE($2, title),
-                website_url = COALESCE($3, website_url),
-                use_website = COALESCE($4, use_website),
-                rsshub_url = COALESCE($5, rsshub_url),
+                website_url = CASE WHEN $3 THEN $4 ELSE website_url END,
+                use_website = COALESCE($5, use_website),
+                rsshub_url = CASE WHEN $6 THEN $7 ELSE rsshub_url END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
             RETURNING *
@@ -115,9 +118,11 @@ impl SubscriptionRepository for SqliteSubscriptionRepository {
         )
         .bind(id)
         .bind(&input.title)
-        .bind(&input.website_url)
+        .bind(input.website_url.is_some())
+        .bind(input.website_url.clone().flatten())
         .bind(input.use_website)
-        .bind(&input.rsshub_url)
+        .bind(input.rsshub_url.is_some())
+        .bind(input.rsshub_url.clone().flatten())
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Subscription with id {} not found", id)))?;

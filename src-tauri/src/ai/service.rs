@@ -1,17 +1,64 @@
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::Semaphore;
-use tokio::time::sleep;
+use tokio::sync::{Mutex, Semaphore};
+use tokio::time::{sleep, Instant};
 
 use crate::ai::*;
 use crate::error::{AppError, Result};
 
 // ---------------------------------------------------------------------------
-// LLM concurrency semaphore: max 3 concurrent API calls
+// LLM call throttling.
+//
+// Every LLM call in the app (translate block, classify, connection test)
+// funnels through `send_request`, so this is the single place to enforce a
+// global rate limit. A bulk refresh can enqueue dozens of auto-classify
+// requests at once; without spacing they fire as a burst and the provider
+// answers with HTTP 429.
+//
+// Two mechanisms:
+// 1. A semaphore of 1 — calls are serialized, never parallel.
+// 2. A minimum interval between call STARTS (token spacing), so even
+//    back-to-back short calls cannot exceed the configured request rate.
 // ---------------------------------------------------------------------------
-lazy_static::lazy_static! {
-    static ref LLM_SEMAPHORE: Semaphore = Semaphore::new(3);
+
+/// Max concurrent LLM API calls. 1 = serialized; raising this re-introduces
+/// burst pressure on the provider's rate limit.
+const LLM_MAX_CONCURRENT: usize = 1;
+
+/// Minimum spacing between the start of two consecutive LLM calls.
+/// ~1200ms ≈ 50 requests/minute ceiling, comfortably under typical
+/// provider tiers (DeepSeek/OpenAI non-burst limits).
+const LLM_MIN_INTERVAL_MS: u64 = 1200;
+
+fn llm_semaphore() -> &'static Semaphore {
+    static SEM: OnceLock<Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| Semaphore::new(LLM_MAX_CONCURRENT))
+}
+
+/// Timestamp of when the last LLM call was allowed to start (None = never).
+/// Guarded by a tokio Mutex so the wait-then-mark sequence is atomic even
+/// though the semaphore already serializes callers.
+fn llm_last_call_at() -> &'static Mutex<Option<Instant>> {
+    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    LAST.get_or_init(|| Mutex::new(None))
+}
+
+/// Block until the next LLM call slot is available, then mark it as taken.
+/// Must be called while holding the semaphore permit so the lock is never
+/// actually contended for long.
+async fn acquire_llm_slot() {
+    let mut last = llm_last_call_at().lock().await;
+    let now = Instant::now();
+    let min_interval = Duration::from_millis(LLM_MIN_INTERVAL_MS);
+    if let Some(prev) = *last {
+        let elapsed = now.duration_since(prev);
+        if elapsed < min_interval {
+            sleep(min_interval - elapsed).await;
+        }
+    }
+    *last = Some(Instant::now());
 }
 
 // ---------------------------------------------------------------------------
@@ -49,19 +96,24 @@ struct ChatResponseMessage {
     content: String,
 }
 
+/// Categories of LLM/HTTP failures. Drives the retry policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LlmErrorKind {
+    /// Retryable: 5xx, 408, 429, network errors
+    Transient,
+    /// Non-retryable: 4xx (auth, bad request, not found) and parse errors
+    Permanent,
+}
+
 // ---------------------------------------------------------------------------
 // Trait definition
 // ---------------------------------------------------------------------------
 
 /// AI service trait — translate and classify content via LLM.
-///
-/// Like the repository pattern, this trait allows:
-/// - A real implementation that calls an actual LLM API
-/// - A mock implementation for tests (no API key needed)
 #[async_trait]
 pub trait AiService: Send + Sync {
-    /// Translate content with bilingual (original + translated) format.
-    /// Handles both HTML and plain text automatically.
+    /// Translate a content string with bilingual output (original + translated).
+    /// Detects HTML automatically and re-extracts blocks internally.
     async fn translate_bilingual(
         &self,
         content: &str,
@@ -69,11 +121,45 @@ pub trait AiService: Send + Sync {
         target_lang: &str,
     ) -> Result<String>;
 
+    /// Translate an already-prepared block (no further extraction or merging).
+    /// Used by the streaming pipeline, which chunks content once and then
+    /// hands each chunk directly to the LLM.
+    async fn translate_block(
+        &self,
+        block: &str,
+        source_lang: &str,
+        target_lang: &str,
+        is_html: bool,
+    ) -> Result<String>;
+
     /// Classify an article: return tags and a category.
     async fn classify(&self, request: ClassificationRequest) -> Result<ClassificationResponse>;
 
+    /// Classify many articles in ONE LLM call.
+    ///
+    /// Returns one response per entry, aligned with the input order. Entries
+    /// the model skipped or mis-indexed come back as empty tags (never an
+    /// error), so one bad row can't fail the whole batch.
+    async fn classify_batch(
+        &self,
+        entries: &[crate::ai::BatchClassifyEntry],
+    ) -> Result<Vec<ClassificationResponse>>;
+
+    /// Recommend the most worthwhile reads from a candidate list (one LLM
+    /// call). Returns `(item_id, reason)` picks in the model's ranking
+    /// order; candidates the model mis-indexed are skipped, never fatal.
+    async fn recommend_reads(
+        &self,
+        candidates: &[crate::ai::RecommendCandidate],
+    ) -> Result<Vec<crate::ai::Recommendation>>;
+
     /// Test the LLM API connection.
     async fn test_connection(&self) -> Result<String>;
+
+    /// Expose the effective `max_chars_per_segment` so callers (e.g. the
+    /// streaming pipeline) can chunk content consistently with what the
+    /// service would do internally.
+    fn config_max_chars(&self) -> usize;
 }
 
 // ---------------------------------------------------------------------------
@@ -96,13 +182,20 @@ impl LlmAiService {
         Ok(Self { config, client })
     }
 
+    fn max_chars(&self) -> usize {
+        self.config.max_chars_per_segment.unwrap_or(MAX_CHARS_PER_SEGMENT)
+    }
+
     /// Send a chat completion request to the LLM API.
     /// Acquires a semaphore permit before sending (max 3 concurrent).
     async fn send_request(&self, request: &ChatRequest) -> Result<String> {
-        let _permit = LLM_SEMAPHORE
+        let _permit = llm_semaphore()
             .acquire()
             .await
             .map_err(|_| AppError::Internal("LLM semaphore closed".into()))?;
+
+        // Serialize AND space out call starts — this is the rate-limit guard.
+        acquire_llm_slot().await;
 
         let url = format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'));
 
@@ -115,9 +208,17 @@ impl LlmAiService {
             .await
             .map_err(|e| AppError::Network(format!("LLM request failed: {}", e)))?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+        let status = response.status();
+        if !status.is_success() {
+            // Read but truncate the body so a KB-scale HTML error page can't
+            // blow up the AppError payload.
+            let body = response
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(500)
+                .collect::<String>();
             return Err(AppError::Network(format!(
                 "LLM API returned {}: {}",
                 status, body
@@ -137,29 +238,94 @@ impl LlmAiService {
             .ok_or_else(|| AppError::Parse("LLM returned no choices".into()))
     }
 
-    /// Retry a fallible async operation with exponential backoff.
+    /// Build the (system, user) prompt pair for translating a single block.
+    fn build_translation_prompts(
+        &self,
+        block: &str,
+        source_lang: &str,
+        target_lang: &str,
+        is_html: bool,
+    ) -> (String, String) {
+        let system_prompt = if is_html {
+            format!(
+                "You are a professional translator. Translate the following HTML content from {} to {}.\n\
+                CRITICAL RULES:\n\
+                1. ONLY translate the text provided below. Do NOT add, generate, or retrieve any content from your training data or external knowledge.\n\
+                2. Preserve ALL HTML tags from the original exactly as they are. Do not modify, remove, or add any HTML tags.\n\
+                3. Do NOT generate any HTML structure, CSS classes, or UI elements that were not in the original.\n\
+                4. If the content is just a short snippet or summary, translate ONLY that snippet — do not expand it into a full article.\n\
+                Output format:\n\
+                <div class=\"translation-paragraph\">\n\
+                <div class=\"paragraph-original\">[ORIGINAL]</div>\n\
+                <div class=\"paragraph-translated\">[TRANSLATED]</div>\n\
+                </div>\n\
+                Replace [ORIGINAL] with the original text and [TRANSLATED] with the translation.\
+                Keep all HTML tags from the original inside the paragraph-original div.\
+                The translated version should contain clean text (no HTML tags).",
+                source_lang, target_lang
+            )
+        } else {
+            format!(
+                "You are a professional translator. Translate the following text from {} to {}.\n\
+                The text may contain Markdown formatting (**bold**, [links](url), # headings, etc.).\n\
+                CRITICAL RULES:\n\
+                1. In the paragraph-original div, PRESERVE all Markdown formatting syntax exactly as-is.\n\
+                2. In the paragraph-translated div, output only clean translated text — do NOT add HTML or Markdown formatting.\n\
+                3. Do NOT wrap the content in HTML tags like <p> or <span>.\n\
+                Output format:\n\
+                <div class=\"translation-paragraph\">\n\
+                <div class=\"paragraph-original\">[ORIGINAL]</div>\n\
+                <div class=\"paragraph-translated\">[TRANSLATED]</div>\n\
+                </div>",
+                source_lang, target_lang
+            )
+        };
+        (system_prompt, block.to_string())
+    }
+
+    /// Classify a network/HTTP error as transient (retry) or permanent (give up).
+    fn classify_error(err: &AppError) -> LlmErrorKind {
+        match err {
+            AppError::Network(msg) => {
+                let lower = msg.to_lowercase();
+                if lower.contains("connect")
+                    || lower.contains("timeout")
+                    || lower.contains("429")
+                    || lower.contains("408")
+                    || lower.contains(" 5")
+                {
+                    LlmErrorKind::Transient
+                } else {
+                    LlmErrorKind::Permanent
+                }
+            }
+            AppError::Parse(_) => LlmErrorKind::Permanent,
+            _ => LlmErrorKind::Permanent,
+        }
+    }
+
+    /// Retry a fallible async operation, but only for transient errors.
     async fn with_retry<F, Fut, T>(&self, f: F) -> Result<T>
     where
         F: Fn() -> Fut,
-        Fut: std::future::Future<Output = std::result::Result<T, String>>,
+        Fut: std::future::Future<Output = Result<T>>,
     {
-        let mut last_error = String::new();
+        let mut last_err: Option<AppError> = None;
         for attempt in 0..=MAX_RETRIES {
             match f().await {
                 Ok(val) => return Ok(val),
                 Err(e) => {
-                    last_error = e;
-                    if attempt < MAX_RETRIES {
-                        let delay = Duration::from_millis(500 * 2_u64.pow(attempt as u32));
-                        sleep(delay).await;
+                    let kind = Self::classify_error(&e);
+                    if kind == LlmErrorKind::Permanent || attempt == MAX_RETRIES {
+                        return Err(e);
                     }
+                    last_err = Some(e);
+                    let delay = Duration::from_millis(500 * 2_u64.pow(attempt as u32));
+                    sleep(delay).await;
                 }
             }
         }
-        Err(AppError::Network(format!(
-            "LLM call failed after {} retries: {}",
-            MAX_RETRIES, last_error
-        )))
+        Err(last_err.unwrap_or_else(|| AppError::Internal("retry loop exited unexpectedly".into())))
     }
 }
 
@@ -171,94 +337,57 @@ impl AiService for LlmAiService {
         source_lang: &str,
         target_lang: &str,
     ) -> Result<String> {
-        let is_html = content.contains('<')
-            && (content.contains("</p>")
-                || content.contains("</h")
-                || content.contains("</div"));
-
-        let max_chars = self.config.max_chars_per_segment.unwrap_or(MAX_CHARS_PER_SEGMENT);
-
-        let blocks = if is_html {
-            extract_blocks(content, max_chars)
-        } else {
-            extract_paragraphs_plain(content)
-        };
+        let is_html = is_html_content(content);
+        let blocks = extract_blocks(content, self.max_chars());
 
         let mut results = Vec::new();
         for block in &blocks {
-            let block = block.trim();
-            if block.is_empty() {
+            let trimmed = block.trim();
+            if trimmed.is_empty() {
                 continue;
             }
-
-            let system_prompt = if is_html {
-                format!(
-                    "You are a professional translator. Translate the following HTML content from {} to {}.\n\
-                    CRITICAL RULES:\n\
-                    1. ONLY translate the text provided below. Do NOT add, generate, or retrieve any content from your training data or external knowledge.\n\
-                    2. Preserve ALL HTML tags from the original exactly as they are. Do not modify, remove, or add any HTML tags.\n\
-                    3. Do NOT generate any HTML structure, CSS classes, or UI elements that were not in the original.\n\
-                    4. If the content is just a short snippet or summary, translate ONLY that snippet — do not expand it into a full article.\n\
-                    Output format:\n\
-                    <div class=\"translation-paragraph\">\n\
-                    <div class=\"paragraph-original\">[ORIGINAL]</div>\n\
-                    <div class=\"paragraph-translated\">[TRANSLATED]</div>\n\
-                    </div>\n\
-                    Replace [ORIGINAL] with the original text and [TRANSLATED] with the translation.\
-                    Keep all HTML tags from the original inside the paragraph-original div.\
-                    The translated version should contain clean text (no HTML tags).",
-                    source_lang, target_lang
-                )
-            } else {
-                format!(
-                    "You are a professional translator. Translate the following text from {} to {}.\n\
-                    The text may contain Markdown formatting (**bold**, [links](url), # headings, etc.).\n\
-                    CRITICAL RULES:\n\
-                    1. In the paragraph-original div, PRESERVE all Markdown formatting syntax exactly as-is.\n\
-                    2. In the paragraph-translated div, output only clean translated text — do NOT add HTML or Markdown formatting.\n\
-                    3. Do NOT wrap the content in HTML tags like <p> or <span>.\n\
-                    Output format:\n\
-                    <div class=\"translation-paragraph\">\n\
-                    <div class=\"paragraph-original\">[ORIGINAL]</div>\n\
-                    <div class=\"paragraph-translated\">[TRANSLATED]</div>\n\
-                    </div>",
-                    source_lang, target_lang
-                )
-            };
-
-            let request = ChatRequest {
-                model: self.config.model.clone(),
-                messages: vec![
-                    ChatMessage {
-                        role: "system".into(),
-                        content: system_prompt,
-                    },
-                    ChatMessage {
-                        role: "user".into(),
-                        content: block.to_string(),
-                    },
-                ],
-                max_tokens: self.config.max_tokens,
-                temperature: self.config.temperature,
-            };
-
-            let response = self
-                .with_retry(|| {
-                    let req = ChatRequest {
-                        model: request.model.clone(),
-                        messages: request.messages.clone(),
-                        max_tokens: request.max_tokens,
-                        temperature: request.temperature,
-                    };
-                    let this = &*self; // capture self by ref
-                    async move { this.send_request(&req).await.map_err(|e| e.to_string()) }
-                })
+            let translated = self
+                .translate_block(trimmed, source_lang, target_lang, is_html)
                 .await?;
-
-            results.push(response);
+            results.push(translated);
         }
 
         Ok(results.join("\n"))
+    }
+
+    async fn translate_block(
+        &self,
+        block: &str,
+        source_lang: &str,
+        target_lang: &str,
+        is_html: bool,
+    ) -> Result<String> {
+        let (system_prompt, user_prompt) =
+            self.build_translation_prompts(block, source_lang, target_lang, is_html);
+
+        let model = self.config.model.clone();
+        let max_tokens = self.config.max_tokens;
+        let temperature = self.config.temperature;
+
+        self.with_retry(|| async {
+            let req = ChatRequest {
+                model: model.clone(),
+                messages: vec![
+                    ChatMessage {
+                        role: "system".into(),
+                        content: system_prompt.clone(),
+                    },
+                    ChatMessage {
+                        role: "user".into(),
+                        content: user_prompt.clone(),
+                    },
+                ],
+                max_tokens,
+                temperature,
+            };
+            self.send_request(&req).await
+        })
+        .await
     }
 
     async fn classify(&self, request: ClassificationRequest) -> Result<ClassificationResponse> {
@@ -284,8 +413,9 @@ impl AiService for LlmAiService {
             request.existing_tags.as_deref().unwrap_or(&[]),
         );
 
-        let chat_request = ChatRequest {
-            model: self.config.model.clone(),
+        let model = self.config.model.clone();
+        let req = ChatRequest {
+            model: model.clone(),
             messages: vec![
                 ChatMessage {
                     role: "system".into(),
@@ -300,12 +430,80 @@ impl AiService for LlmAiService {
             temperature: Some(0.1),
         };
 
-        let response = self.send_request(&chat_request).await?;
+        let response = self.send_request(&req).await?;
         parse_classification_json(&response)
     }
 
+    async fn classify_batch(
+        &self,
+        entries: &[crate::ai::BatchClassifyEntry],
+    ) -> Result<Vec<ClassificationResponse>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let system_prompt = "You are an article classification assistant. You will receive a numbered list of article \
+            titles. For EACH article, classify it by title alone and return a JSON array where every element is:\n\
+            {\"index\": <the article number>, \"tags\": [1-3 relevant English tag strings], \"category\": \"<one of: technology, science, politics, entertainment, sports, business, health, education, other>\"}\n\
+            Respond with ONLY the JSON array, one element per input article, no other text.";
+
+        let mut user_message = String::new();
+        for e in entries {
+            user_message.push_str(&format!("[{}] {}\n", e.index, e.title));
+        }
+
+        let req = ChatRequest {
+            model: self.config.model.clone(),
+            messages: vec![
+                ChatMessage { role: "system".into(), content: system_prompt.into() },
+                ChatMessage { role: "user".into(), content: user_message },
+            ],
+            max_tokens: Some(2000),
+            temperature: Some(0.1),
+        };
+
+        let response = self.send_request(&req).await?;
+        Ok(parse_classification_batch_json(&response, entries.len()))
+    }
+
+    async fn recommend_reads(
+        &self,
+        candidates: &[crate::ai::RecommendCandidate],
+    ) -> Result<Vec<crate::ai::Recommendation>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let system_prompt = format!(
+            "You are a discerning editor curating a personal reading list. From the numbered candidate articles, \
+            select the {} most worth reading now — prioritize substance, insight and novelty over clickbait. \
+            Respond with ONLY a JSON array, one element per pick, in priority order (best first):\n\
+            {{\"index\": <candidate number>, \"reason\": \"<one short sentence in 简体中文 saying why it is worth reading>\"}}\n\
+            No other text.",
+            crate::ai::RECOMMEND_PICK_COUNT.min(candidates.len()).max(1)
+        );
+
+        let mut user_message = String::new();
+        for (i, c) in candidates.iter().enumerate() {
+            user_message.push_str(&format!("[{}] {}\n", i, c.context));
+        }
+
+        let req = ChatRequest {
+            model: self.config.model.clone(),
+            messages: vec![
+                ChatMessage { role: "system".into(), content: system_prompt },
+                ChatMessage { role: "user".into(), content: user_message },
+            ],
+            max_tokens: Some(600),
+            temperature: Some(0.3),
+        };
+
+        let response = self.send_request(&req).await?;
+        Ok(parse_recommendation_json(&response, candidates))
+    }
+
     async fn test_connection(&self) -> Result<String> {
-        let chat_request = ChatRequest {
+        let req = ChatRequest {
             model: self.config.model.clone(),
             messages: vec![
                 ChatMessage {
@@ -321,7 +519,11 @@ impl AiService for LlmAiService {
             temperature: Some(0.0),
         };
 
-        self.send_request(&chat_request).await
+        self.send_request(&req).await
+    }
+
+    fn config_max_chars(&self) -> usize {
+        self.max_chars()
     }
 }
 
@@ -329,17 +531,25 @@ impl AiService for LlmAiService {
 // Pure content-processing functions (no LLM calls needed)
 // ---------------------------------------------------------------------------
 
+/// Heuristic: does the content look like HTML rather than plain text?
+pub fn is_html_content(content: &str) -> bool {
+    content.contains('<')
+        && (content.contains("</p>")
+            || content.contains("</h")
+            || content.contains("</div>")
+            || content.contains("<br"))
+}
+
 /// Extract block-level HTML elements (p, h1-h6, li, blockquote, etc.)
 /// Each block is a separate translation unit. Falls back to plain-text
 /// paragraph splitting for non-HTML content.
 pub fn extract_blocks(content: &str, max_chars: usize) -> Vec<String> {
     let mut blocks = Vec::new();
 
-    if content.contains('<') {
+    if is_html_content(content) {
         blocks = extract_html_blocks(content);
     }
 
-    // Fallback: plain text paragraphs split by double newlines
     if blocks.is_empty() {
         for para in content.split("\n\n") {
             let trimmed = para.trim();
@@ -349,7 +559,6 @@ pub fn extract_blocks(content: &str, max_chars: usize) -> Vec<String> {
         }
     }
 
-    // Final fallback: treat entire content as one block (only if substantial)
     if blocks.is_empty() {
         let trimmed = content.trim();
         if !trimmed.is_empty() && trimmed.len() > 5 {
@@ -361,7 +570,8 @@ pub fn extract_blocks(content: &str, max_chars: usize) -> Vec<String> {
 }
 
 /// Extract blocks from HTML content in document order.
-/// Uses linear scanning to preserve the original order of elements.
+/// Uses linear scanning with strict tag boundary checking so `<p` does not
+/// accidentally match `<pre>`/`<picture>`/`<path>`.
 fn extract_html_blocks(content: &str) -> Vec<String> {
     let block_tags = [
         "p", "h1", "h2", "h3", "h4", "h5", "h6",
@@ -369,8 +579,6 @@ fn extract_html_blocks(content: &str) -> Vec<String> {
         "div", "section", "article",
     ];
 
-    // First pass: collect all block positions (start, end, element text)
-    // so we can sort by position and handle nesting.
     let mut candidates: Vec<(usize, usize, String)> = Vec::new();
 
     for tag in &block_tags {
@@ -380,14 +588,30 @@ fn extract_html_blocks(content: &str) -> Vec<String> {
 
         while let Some(start) = content[search_start..].find(&open_tag) {
             let abs_start = search_start + start;
+            let bytes = content.as_bytes();
+
+            // Boundary check: the char right after `<tag` must be `>`,
+            // whitespace, or `/` (i.e., end-of-tag or attribute start).
+            // Otherwise it's a prefix match like `<p` matching `<pre>`.
+            let after = abs_start + open_tag.len();
+            if after >= content.len() {
+                break;
+            }
+            let next_ch = bytes[after];
+            if !(next_ch == b'>' || next_ch == b' ' || next_ch == b'\t' || next_ch == b'\n' || next_ch == b'/') {
+                // Advance past this false hit and keep scanning
+                search_start = abs_start + 1;
+                continue;
+            }
+
             let tag_end = match content[abs_start..].find('>') {
                 Some(pos) => abs_start + pos + 1,
                 None => break,
             };
 
             let remaining = &content[tag_end..];
-            let close_pos = match remaining.find(&close_tag) {
-                Some(pos) => tag_end + pos + close_tag.len(),
+            let close_pos = match find_matching_close(remaining, tag) {
+                Some(p) => tag_end + p,
                 None => break,
             };
 
@@ -400,28 +624,67 @@ fn extract_html_blocks(content: &str) -> Vec<String> {
         }
     }
 
-    // Sort by position in document order
     candidates.sort_by_key(|(start, _, _)| *start);
 
-    // Deduplicate: when one block fully contains another, keep only the outer one
-    // (e.g., a wrapping <div> that contains <p> and <h1> elements).
+    // Deduplicate nested blocks: keep only the outermost wrapper when one
+    // block fully contains another.
     let mut deduplicated: Vec<(usize, usize, String)> = Vec::new();
     'outer: for &(start, end, ref block) in &candidates {
         for &(other_start, other_end, ref other) in &candidates {
             if other_start == start && other_end == end {
                 continue;
             }
-            // other contains this block
             if other_start <= start && other_end >= end && other.len() > block.len() {
                 continue 'outer;
             }
         }
-        // Not contained by any other block — keep it
         deduplicated.push((start, end, block.clone()));
     }
 
-    // Return blocks in document order
     deduplicated.into_iter().map(|(_, _, block)| block).collect()
+}
+
+/// Find the position of the `</tag>` that pairs with the (already-opened)
+/// `<tag` at the start of `html`, respecting nesting for the same tag.
+/// Returns the position immediately after the closing tag.
+fn find_matching_close(html: &str, tag: &str) -> Option<usize> {
+    let open = format!("<{}", tag);
+    let close = format!("</{}>", tag);
+    let mut depth: usize = 1;
+    let mut pos = 0;
+    while pos < html.len() {
+        let next_open = html[pos..].find(&open).map(|p| pos + p);
+        let next_close = html[pos..].find(&close).map(|p| pos + p);
+        match (next_open, next_close) {
+            (None, None) => return None,
+            (None, Some(c)) => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(c + close.len());
+                }
+                pos = c + close.len();
+            }
+            (Some(_), Some(c)) if next_open.unwrap() >= c => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(c + close.len());
+                }
+                pos = c + close.len();
+            }
+            (Some(o), _) => {
+                let after = o + open.len();
+                let bytes = html.as_bytes();
+                if after < bytes.len() {
+                    let ch = bytes[after];
+                    if ch == b'>' || ch == b' ' || ch == b'\t' || ch == b'\n' || ch == b'/' {
+                        depth += 1;
+                    }
+                }
+                pos = o + open.len();
+            }
+        }
+    }
+    None
 }
 
 /// Extract paragraphs from plain text (double newline separation).
@@ -440,6 +703,9 @@ pub fn extract_paragraphs_plain(content: &str) -> Vec<String> {
 }
 
 /// Merge small blocks together to reduce translation API calls.
+/// For HTML blocks larger than `max_chars`, uses [`split_html_block`] (tag-aware)
+/// so the split point doesn't fall inside an attribute value or tag name.
+/// Falls back to [`split_large_paragraph`] for plain text.
 pub fn merge_small_blocks(blocks: Vec<String>, max_chars: usize) -> Vec<String> {
     let mut merged = Vec::new();
     let mut current = String::new();
@@ -458,7 +724,13 @@ pub fn merge_small_blocks(blocks: Vec<String>, max_chars: usize) -> Vec<String> 
                 current.clear();
                 current_len = 0;
             }
-            let chunks = split_large_paragraph(block, max_chars);
+            // Tag-aware split for HTML, plain-text split for everything else
+            let looks_html = is_html_content(block);
+            let chunks = if looks_html {
+                split_html_block(block, max_chars)
+            } else {
+                split_large_paragraph(block, max_chars)
+            };
             merged.extend(chunks);
             continue;
         }
@@ -498,7 +770,92 @@ pub fn merge_small_blocks(blocks: Vec<String>, max_chars: usize) -> Vec<String> 
     merged
 }
 
-/// Split a large paragraph at sentence boundaries.
+/// Tag-aware splitter for oversized HTML blocks. Splits only at text-content
+/// boundaries (between elements), never inside a tag or attribute value.
+pub fn split_html_block(block: &str, max_chars: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0;
+    let mut in_tag = false;
+    let mut tag_buffer = String::new();
+
+    for c in block.chars() {
+        match c {
+            '<' => {
+                in_tag = true;
+                tag_buffer.push(c);
+            }
+            '>' => {
+                tag_buffer.push(c);
+                if in_tag {
+                    flush_buffer(
+                        &mut tag_buffer,
+                        &mut current,
+                        &mut current_len,
+                        &mut chunks,
+                        max_chars,
+                    );
+                    in_tag = false;
+                }
+            }
+            _ => {
+                if in_tag {
+                    tag_buffer.push(c);
+                } else {
+                    if current_len + 1 > max_chars && !current.is_empty() {
+                        chunks.push(current.clone());
+                        current.clear();
+                        current_len = 0;
+                    }
+                    current.push(c);
+                    current_len += 1;
+                }
+            }
+        }
+    }
+
+    flush_buffer(
+        &mut tag_buffer,
+        &mut current,
+        &mut current_len,
+        &mut chunks,
+        max_chars,
+    );
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    if chunks.is_empty() && !block.is_empty() {
+        chunks.push(block.to_string());
+    }
+    chunks
+}
+
+fn flush_buffer(
+    buf: &mut String,
+    current: &mut String,
+    current_len: &mut usize,
+    chunks: &mut Vec<String>,
+    max_chars: usize,
+) {
+    if buf.is_empty() {
+        return;
+    }
+    if *current_len + buf.len() > max_chars && !current.is_empty() {
+        chunks.push(current.clone());
+        current.clear();
+        *current_len = 0;
+    }
+    if !current.is_empty() {
+        current.push_str(buf);
+    } else {
+        *current = buf.clone();
+    }
+    *current_len += buf.len();
+    buf.clear();
+}
+
+/// Split a large paragraph at sentence boundaries (plain text only — does not
+/// understand HTML structure).
 pub fn split_large_paragraph(paragraph: &str, max_chars: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -533,12 +890,69 @@ pub fn split_large_paragraph(paragraph: &str, max_chars: usize) -> Vec<String> {
     chunks
 }
 
-/// Parse a JSON classification response from the LLM.
+/// Heuristic check: does the translated output look truncated relative to the
+/// original? Used to decide whether to retry.
+pub fn is_translation_truncated(original: &str, translated: &str) -> bool {
+    if original.len() < 200 {
+        return false;
+    }
+    let min_ratio = 0.4;
+    if translated.len() < (original.len() as f32 * min_ratio) as usize {
+        return true;
+    }
+    let trimmed = translated.trim_end();
+    if let Some(last_char) = trimmed.chars().last() {
+        let proper_endings = ['。', '！', '？', '.', '!', '?', '」', '》', ')', '）', '`', '"', '\''];
+        if !proper_endings.contains(&last_char) {
+            if let Some(orig_last) = original.trim_end().chars().last() {
+                if proper_endings.contains(&orig_last) && !proper_endings.contains(&last_char) {
+                    return true;
+                }
+            }
+        }
+    }
+    if translated.matches("**").count() % 2 != 0 {
+        return true;
+    }
+    if translated.matches('`').count() % 2 != 0 {
+        return true;
+    }
+    let open_tags = translated.matches('<').count();
+    let close_tags = translated.matches('>').count();
+    if open_tags != close_tags {
+        return true;
+    }
+    false
+}
+
+/// Parse a JSON classification response from the LLM. Tolerates ``` fenced
+/// responses (which many models emit despite the prompt's instructions).
 pub fn parse_classification_json(response: &str) -> Result<ClassificationResponse> {
-    let value: serde_json::Value =
-        serde_json::from_str(response).map_err(|e| {
-            AppError::Parse(format!("Failed to parse classification JSON: {}", e))
-        })?;
+    let trimmed = response.trim();
+
+    // Strip ``` fence (```json ... ``` or ``` ... ```) if present
+    let unbraced = if trimmed.starts_with("```") {
+        let after_open = trimmed
+            .find('\n')
+            .map(|i| i + 1)
+            .unwrap_or(3);
+        let close = trimmed.rfind("```").unwrap_or(trimmed.len());
+        trimmed[after_open..close].trim()
+    } else {
+        trimmed
+    };
+
+    // Take the substring between the first { and the last }
+    let start = unbraced.find('{');
+    let end = unbraced.rfind('}');
+    let json_slice = match (start, end) {
+        (Some(s), Some(e)) if e > s => &unbraced[s..=e],
+        _ => unbraced,
+    };
+
+    let value: serde_json::Value = serde_json::from_str(json_slice).map_err(|e| {
+        AppError::Parse(format!("Failed to parse classification JSON: {}", e))
+    })?;
 
     let tags = value["tags"]
         .as_array()
@@ -554,10 +968,108 @@ pub fn parse_classification_json(response: &str) -> Result<ClassificationRespons
     Ok(ClassificationResponse { tags, category })
 }
 
-/// Strip `<think>...</think>` blocks from reasoning model responses.
+/// Parse the JSON-array response of a batch classification call.
 ///
-/// Reasoning models (e.g., DeepSeek R1) output internal reasoning wrapped
-/// in `<think>` tags. Remove these so only the final answer reaches the caller.
+/// Tolerates ``` fences and preamble text, and maps each element back to its
+/// input position via the echoed `index` field. Missing/duplicate indices
+/// yield empty responses at those positions so the result always has exactly
+/// `expected_len` elements aligned with the input.
+pub fn parse_classification_batch_json(
+    response: &str,
+    expected_len: usize,
+) -> Vec<ClassificationResponse> {
+    let mut out: Vec<ClassificationResponse> = (0..expected_len)
+        .map(|_| ClassificationResponse { tags: Vec::new(), category: None })
+        .collect();
+
+    let trimmed = response.trim();
+    let unbraced = if trimmed.starts_with("```") {
+        let after_open = trimmed.find('\n').map(|i| i + 1).unwrap_or(3);
+        let close = trimmed.rfind("```").unwrap_or(trimmed.len());
+        trimmed[after_open..close].trim()
+    } else {
+        trimmed
+    };
+
+    let start = unbraced.find('[');
+    let end = unbraced.rfind(']');
+    let json_slice = match (start, end) {
+        (Some(s), Some(e)) if e > s => &unbraced[s..=e],
+        _ => return out,
+    };
+
+    let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(json_slice)
+    else {
+        return out;
+    };
+
+    for el in arr {
+        let Some(idx) = el["index"].as_u64() else { continue };
+        if idx as usize >= expected_len {
+            continue;
+        }
+        let tags = el["tags"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let category = el["category"].as_str().map(String::from);
+        out[idx as usize] = ClassificationResponse { tags, category };
+    }
+
+    out
+}
+
+/// Parse the JSON-array response of a read-recommendation call.
+///
+/// Same tolerance contract as [`parse_classification_batch_json`]: ``` fences
+/// and preamble text are stripped; indices are mapped back to candidate
+/// `item_id`s; out-of-range and duplicate picks are dropped. Elements
+/// without a usable reason are dropped too (an empty reason row in the UI
+/// is worse than one fewer pick).
+pub fn parse_recommendation_json(
+    response: &str,
+    candidates: &[crate::ai::RecommendCandidate],
+) -> Vec<crate::ai::Recommendation> {
+    let trimmed = response.trim();
+    let unbraced = if trimmed.starts_with("```") {
+        let after_open = trimmed.find('\n').map(|i| i + 1).unwrap_or(3);
+        let close = trimmed.rfind("```").unwrap_or(trimmed.len());
+        trimmed[after_open..close].trim()
+    } else {
+        trimmed
+    };
+
+    let start = unbraced.find('[');
+    let end = unbraced.rfind(']');
+    let json_slice = match (start, end) {
+        (Some(s), Some(e)) if e > s => &unbraced[s..=e],
+        _ => return Vec::new(),
+    };
+
+    let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(json_slice)
+    else {
+        return Vec::new();
+    };
+
+    let mut out: Vec<crate::ai::Recommendation> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for el in arr {
+        let Some(idx) = el["index"].as_u64() else { continue };
+        let Some(cand) = candidates.get(idx as usize) else { continue };
+        let Some(reason) = el["reason"].as_str() else { continue };
+        let reason = reason.trim();
+        if reason.is_empty() || !seen.insert(cand.item_id) {
+            continue;
+        }
+        out.push(crate::ai::Recommendation {
+            item_id: cand.item_id,
+            reason: reason.to_string(),
+        });
+    }
+    out
+}
+
+/// Strip `<think>...</think>` blocks from reasoning model responses.
 fn strip_think_tags(response: &str) -> String {
     if !response.contains("<think>") {
         return response.to_string();
@@ -573,7 +1085,6 @@ fn strip_think_tags(response: &str) -> String {
         if let Some(end) = response[abs_start..].find("</think>") {
             pos = abs_start + end + "</think>".len();
         } else {
-            // No closing tag — strip to end
             pos = response.len();
             break;
         }
@@ -586,159 +1097,6 @@ fn strip_think_tags(response: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Escape HTML special characters for safe display.
-    fn escape_html(s: &str) -> String {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-            .replace('\'', "&#x27;")
-    }
-
-    /// Split an HTML block at text boundaries for long content.
-    fn split_html_block(block: &str, max_chars: usize) -> Vec<String> {
-        let mut chunks = Vec::new();
-        let mut current = String::new();
-        let mut current_len = 0;
-        let mut in_tag = false;
-        let mut tag_buffer = String::new();
-        let mut text_buffer = String::new();
-
-        for c in block.chars() {
-            match c {
-                '<' => {
-                    if !in_tag {
-                        flush_text_buffer(
-                            &mut text_buffer,
-                            &mut current,
-                            &mut current_len,
-                            &mut chunks,
-                            max_chars,
-                        );
-                    }
-                    in_tag = true;
-                    tag_buffer.push(c);
-                }
-                '>' => {
-                    tag_buffer.push(c);
-                    if in_tag {
-                        flush_buffer(
-                            &mut tag_buffer,
-                            &mut current,
-                            &mut current_len,
-                            &mut chunks,
-                            max_chars,
-                        );
-                        in_tag = false;
-                    }
-                }
-                _ => {
-                    if in_tag {
-                        tag_buffer.push(c);
-                    } else {
-                        text_buffer.push(c);
-                    }
-                }
-            }
-        }
-
-        flush_text_buffer(
-            &mut text_buffer,
-            &mut current,
-            &mut current_len,
-            &mut chunks,
-            max_chars,
-        );
-        if !current.is_empty() {
-            chunks.push(current);
-        }
-        if chunks.is_empty() && !block.is_empty() {
-            chunks.push(block.to_string());
-        }
-
-        chunks
-    }
-
-    fn flush_buffer(
-        buf: &mut String,
-        current: &mut String,
-        current_len: &mut usize,
-        chunks: &mut Vec<String>,
-        max_chars: usize,
-    ) {
-        if !buf.is_empty() {
-            if *current_len + buf.len() > max_chars && !current.is_empty() {
-                chunks.push(current.clone());
-                current.clear();
-                *current_len = 0;
-            }
-            if !current.is_empty() {
-                current.push_str(buf);
-            } else {
-                *current = buf.clone();
-            }
-            *current_len += buf.len();
-            buf.clear();
-        }
-    }
-
-    fn flush_text_buffer(
-        buf: &mut String,
-        current: &mut String,
-        current_len: &mut usize,
-        chunks: &mut Vec<String>,
-        max_chars: usize,
-    ) {
-        if !buf.is_empty() {
-            if *current_len + buf.len() > max_chars && !current.is_empty() {
-                chunks.push(current.clone());
-                current.clear();
-                *current_len = 0;
-            }
-            if !current.is_empty() {
-                current.push_str(buf);
-            } else {
-                *current = buf.clone();
-            }
-            *current_len += buf.len();
-            buf.clear();
-        }
-    }
-
-    /// Check if a translation appears truncated.
-    fn is_translation_truncated(original: &str, translated: &str) -> bool {
-        if original.len() < 200 {
-            return false;
-        }
-        let min_ratio = 0.4;
-        if translated.len() < (original.len() as f32 * min_ratio) as usize {
-            return true;
-        }
-        let trimmed = translated.trim_end();
-        if let Some(last_char) = trimmed.chars().last() {
-            let proper_endings = ['。', '！', '？', '.', '!', '?', '」', '》', ')', '）', '`', '"', '\''];
-            if !proper_endings.contains(&last_char) {
-                if let Some(orig_last) = original.trim_end().chars().last() {
-                    if proper_endings.contains(&orig_last) && !proper_endings.contains(&last_char) {
-                        return true;
-                    }
-                }
-            }
-        }
-        if translated.matches("**").count() % 2 != 0 {
-            return true;
-        }
-        if translated.matches('`').count() % 2 != 0 {
-            return true;
-        }
-        let open_tags = translated.matches('<').count();
-        let close_tags = translated.matches('>').count();
-        if open_tags != close_tags {
-            return true;
-        }
-        false
-    }
 
     // -----------------------------------------------------------------------
     // extract_blocks
@@ -759,6 +1117,27 @@ mod tests {
         assert!(all.contains("第一段"));
         assert!(all.contains("第二段"));
         assert!(all.contains("第三段"));
+    }
+
+    /// Regression for the `<p` prefix bug: `<p` was matching `<pre>`,
+    /// `<picture>`, `<path>` and swallowing unrelated content.
+    #[test]
+    fn test_extract_html_blocks_does_not_match_pre_with_p_prefix() {
+        let html = r#"<pre>print('hi')</pre><p>real paragraph</p>"#;
+        let blocks = extract_html_blocks(html);
+        // The pre block must contain "print('hi')"
+        let all = blocks.join("\n");
+        assert!(all.contains("print('hi')"), "got: {}", all);
+        assert!(all.contains("real paragraph"));
+    }
+
+    #[test]
+    fn test_extract_html_blocks_preserves_document_order() {
+        let html = r#"<h1>Title</h1><p>first</p><h2>Sub</h2><p>second</p>"#;
+        let blocks = extract_html_blocks(html);
+        assert!(blocks.len() >= 4);
+        // The first block should contain "Title"
+        assert!(blocks[0].contains("Title"));
     }
 
     #[test]
@@ -921,6 +1300,22 @@ mod tests {
         }
     }
 
+    /// Regression: large HTML blocks must now use split_html_block and never
+    /// be cut inside an attribute value or tag name.
+    #[test]
+    fn test_merge_small_blocks_large_html_does_not_cut_attributes() {
+        let html = format!(
+            r#"<img src="https://example.com/{}.png" alt="{}" />"#,
+            "x".repeat(2000),
+            "alt text",
+        );
+        let merged = merge_small_blocks(vec![html.clone()], MAX_CHARS_PER_SEGMENT);
+        // Join everything and confirm no attr is left half-open
+        let joined = merged.join("");
+        // Tag boundaries should remain balanced
+        assert_eq!(joined.matches('<').count(), joined.matches('>').count());
+    }
+
     #[test]
     fn test_merge_small_blocks_large_single() {
         let large = format!("<p>{}</p>", "内容".repeat(2000));
@@ -939,6 +1334,17 @@ mod tests {
         assert!(!chunks.is_empty());
         let joined: String = chunks.join("");
         assert_eq!(joined, html);
+    }
+
+    #[test]
+    fn test_split_html_block_does_not_split_inside_tag() {
+        // Attribute value longer than max_chars — must NOT be cut
+        let html = format!(r#"<a href="{}">link</a>"#, "x".repeat(MAX_CHARS_PER_SEGMENT + 100));
+        let chunks = split_html_block(&html, MAX_CHARS_PER_SEGMENT);
+        let joined: String = chunks.join("");
+        assert_eq!(joined, html);
+        // Tag/attribute should still be intact in some chunk
+        assert!(chunks.iter().any(|c| c.starts_with("<a ")));
     }
 
     // -----------------------------------------------------------------------
@@ -1025,6 +1431,125 @@ mod tests {
         assert_eq!(result.category, None);
     }
 
+    /// Regression: many models wrap JSON in ```json ... ``` fences.
+    #[test]
+    fn test_parse_classification_json_strips_fenced_block() {
+        let wrapped = "```json\n{\"tags\":[\"a\"],\"category\":\"x\"}\n```";
+        let result = parse_classification_json(wrapped).unwrap();
+        assert_eq!(result.tags, vec!["a"]);
+        assert_eq!(result.category, Some("x".into()));
+    }
+
+    /// Regression: models occasionally add preamble like "Here is the JSON:".
+    #[test]
+    fn test_parse_classification_json_extracts_json_substring() {
+        let wrapped = "Here you go: {\"tags\":[\"a\"]} -- that's it.";
+        let result = parse_classification_json(wrapped).unwrap();
+        assert_eq!(result.tags, vec!["a"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_classification_batch_json
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_batch_valid() {
+        let resp = r#"[{"index":0,"tags":["rust"],"category":"technology"},{"index":1,"tags":["ai"],"category":"science"}]"#;
+        let out = parse_classification_batch_json(resp, 2);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].tags, vec!["rust"]);
+        assert_eq!(out[1].category.as_deref(), Some("science"));
+    }
+
+    #[test]
+    fn test_parse_batch_missing_entry_fills_empty() {
+        // Model only answered index 1 — index 0 must come back empty, not
+        // shift into the wrong slot.
+        let resp = r#"[{"index":1,"tags":["ai"],"category":"other"}]"#;
+        let out = parse_classification_batch_json(resp, 2);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].tags.is_empty());
+        assert_eq!(out[1].tags, vec!["ai"]);
+    }
+
+    #[test]
+    fn test_parse_batch_out_of_range_index_ignored() {
+        let resp = r#"[{"index":5,"tags":["x"],"category":"other"}]"#;
+        let out = parse_classification_batch_json(resp, 2);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|r| r.tags.is_empty()));
+    }
+
+    #[test]
+    fn test_parse_batch_fenced_and_preamble() {
+        let resp = "Here is the result:\n```json\n[{\"index\":0,\"tags\":[\"a\",\"b\"],\"category\":null}]\n```";
+        let out = parse_classification_batch_json(resp, 1);
+        assert_eq!(out[0].tags, vec!["a", "b"]);
+        assert_eq!(out[0].category, None);
+    }
+
+    #[test]
+    fn test_parse_batch_garbage_returns_all_empty() {
+        let out = parse_classification_batch_json("not json at all", 3);
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|r| r.tags.is_empty()));
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_recommendation_json
+    // -----------------------------------------------------------------------
+
+    fn rec_cands() -> Vec<crate::ai::RecommendCandidate> {
+        (0..3)
+            .map(|i| crate::ai::RecommendCandidate {
+                item_id: 100 + i,
+                context: format!("ctx {}", i),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_parse_recommendation_valid() {
+        let resp = r#"[{"index":2,"reason":"深度好文"},{"index":0,"reason":"时效性强"}]"#;
+        let out = parse_recommendation_json(resp, &rec_cands());
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].item_id, 102);
+        assert_eq!(out[0].reason, "深度好文");
+        assert_eq!(out[1].item_id, 100);
+    }
+
+    #[test]
+    fn test_parse_recommendation_out_of_range_and_dup_dropped() {
+        let resp = r#"[{"index":9,"reason":"x"},{"index":0,"reason":"a"},{"index":0,"reason":"b"}]"#;
+        let out = parse_recommendation_json(resp, &rec_cands());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].item_id, 100);
+        assert_eq!(out[0].reason, "a");
+    }
+
+    #[test]
+    fn test_parse_recommendation_empty_reason_dropped() {
+        let resp = r#"[{"index":0,"reason":"  "},{"index":1,"reason":"ok"}]"#;
+        let out = parse_recommendation_json(resp, &rec_cands());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].item_id, 101);
+    }
+
+    #[test]
+    fn test_parse_recommendation_fenced_and_preamble() {
+        let resp = "Here are my picks:\n```json\n[{\"index\":1,\"reason\":\"值得读\"}]\n```";
+        let out = parse_recommendation_json(resp, &rec_cands());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].item_id, 101);
+        assert_eq!(out[0].reason, "值得读");
+    }
+
+    #[test]
+    fn test_parse_recommendation_garbage_returns_empty() {
+        assert!(parse_recommendation_json("nope", &rec_cands()).is_empty());
+        assert!(parse_recommendation_json("[]", &rec_cands()).is_empty());
+    }
+
     // -----------------------------------------------------------------------
     // strip_think_tags
     // -----------------------------------------------------------------------
@@ -1059,21 +1584,15 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // escape_html
+    // is_html_content
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_escape_html_basic() {
-        let escaped = escape_html("<p>Test & \"quotes\"</p>");
-        assert_eq!(
-            escaped,
-            "&lt;p&gt;Test &amp; &quot;quotes&quot;&lt;/p&gt;"
-        );
-    }
-
-    #[test]
-    fn test_escape_html_no_special_chars() {
-        assert_eq!(escape_html("plain text"), "plain text");
+    fn test_is_html_content_basic() {
+        assert!(is_html_content("<p>hi</p>"));
+        assert!(is_html_content("<div>x</div>"));
+        assert!(!is_html_content("plain text"));
+        assert!(!is_html_content("some <strong>bold</strong> with no closing"));
     }
 
     // -----------------------------------------------------------------------

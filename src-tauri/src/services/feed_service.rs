@@ -4,12 +4,12 @@ use tokio::sync::Semaphore;
 
 use serde::Serialize;
 
+use crate::chroma::service::ChromaService;
 use crate::error::{AppError, Result};
 use crate::feed::parser::parse_feed;
 use crate::feed::FeedFetcher;
 use crate::models::{FeedItem, Subscription};
 
-#[cfg(test)]
 use crate::content_processor::html_to_markdown_pipeline;
 #[cfg(test)]
 use crate::models::NewFeedItem;
@@ -37,6 +37,7 @@ pub struct FeedService {
     sub_repo: Option<Arc<dyn SubscriptionRepository>>,
     fetcher: Option<Arc<FeedFetcher>>,
     ai_service: Option<Arc<dyn crate::ai::service::AiService>>,
+    chroma_service: Option<Arc<ChromaService>>,
 }
 
 impl FeedService {
@@ -48,6 +49,7 @@ impl FeedService {
             sub_repo: None,
             fetcher: None,
             ai_service: None,
+            chroma_service: None,
         }
     }
 
@@ -60,6 +62,12 @@ impl FeedService {
     /// Attach an HTTP fetcher (needed for fetch_and_save methods).
     pub fn with_fetcher(mut self, fetcher: Arc<FeedFetcher>) -> Self {
         self.fetcher = Some(fetcher);
+        self
+    }
+
+    /// Attach a ChromaDB service (enables semantic search indexing).
+    pub fn with_chroma_service(mut self, chroma: Option<Arc<ChromaService>>) -> Self {
+        self.chroma_service = chroma;
         self
     }
 
@@ -86,48 +94,26 @@ impl FeedService {
     // Feed Fetching
     // ------------------------------------------------------------------
 
-    /// Fetch a single feed, parse it, deduplicate, and save new items.
-    pub async fn fetch_and_save_feed(&self, subscription: &Subscription) -> Result<Vec<FeedItem>> {
-        let fetcher = self
-            .fetcher
+    fn require_fetcher(&self) -> Result<&Arc<FeedFetcher>> {
+        self.fetcher
             .as_ref()
-            .ok_or_else(|| AppError::Internal("FeedFetcher not configured".into()))?;
-
-        let feed_url = subscription
-            .rsshub_url
-            .as_deref()
-            .unwrap_or(&subscription.url);
-
-        let content = fetcher.fetch_feed(feed_url).await?;
-        let parsed = parse_feed(&content, subscription.id)?;
-
-        let mut saved = Vec::new();
-        for item in parsed {
-            let exists = self.find_existing_item(subscription.id, &item.guid, &item.link).await?;
-            if exists {
-                continue;
-            }
-            let feed_item = self.repo.create(item).await?;
-
-            // Auto-classify if enabled and AI service is available
-            if subscription.auto_classify {
-                if let Some(ref ai) = self.ai_service {
-                    if let Err(e) = self
-                        .classify_item_inner(feed_item.id, subscription.title.as_deref().unwrap_or(""), ai.as_ref())
-                        .await
-                    {
-                        eprintln!("Classification failed for item {}: {}", feed_item.id, e);
-                    }
-                }
-            }
-
-            saved.push(feed_item);
-        }
-
-        Ok(saved)
+            .ok_or_else(|| AppError::Internal("FeedFetcher not configured".into()))
     }
 
-    /// Fetch all subscriptions concurrently (semaphore-limited to 20).
+    /// Fetch a single feed, parse it, deduplicate, and save new items.
+    pub async fn fetch_and_save_feed(&self, subscription: &Subscription) -> Result<Vec<FeedItem>> {
+        let fetcher = self.require_fetcher()?;
+        fetch_parse_and_save(
+            &self.repo,
+            fetcher,
+            self.ai_service.as_ref(),
+            &self.chroma_service,
+            subscription,
+        )
+        .await
+    }
+
+    /// Fetch all subscriptions concurrently (semaphore-limited).
     pub async fn fetch_and_save_all_feeds(&self) -> FetchSummary {
         let sub_repo = match self.sub_repo.as_ref() {
             Some(r) => r,
@@ -154,25 +140,7 @@ impl FeedService {
             return FetchSummary::default();
         }
 
-        let semaphore = Arc::new(Semaphore::new(20));
-        let mut handles = Vec::new();
-
-        for sub in subs {
-            let sem = Arc::clone(&semaphore);
-            let repo = self.repo.clone();
-            let fetcher = self.fetcher.clone();
-            let ai_service = self.ai_service.clone();
-            let sub_title = sub.title.clone().unwrap_or_default();
-            let auto_classify = sub.auto_classify;
-
-            handles.push(tokio::spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
-                fetch_single_feed_and_save(&repo, &fetcher, ai_service.as_deref(), sub, sub_title, auto_classify).await
-            }));
-        }
-
-        use futures::future::join_all;
-        let results = join_all(handles).await;
+        let results = self.spawn_fetch_tasks(subs).await;
 
         let mut summary = FetchSummary {
             total_subscriptions: total,
@@ -181,24 +149,20 @@ impl FeedService {
 
         for result in results {
             match result {
-                Ok(Ok(items)) => {
+                Ok(items) => {
                     summary.success_count += 1;
-                    summary.total_items += items.len() + 1; // +1 for the subscription itself
+                    summary.total_items += items.len();
                     summary.new_items += items.len();
                 }
-                Ok(Err(e)) => {
-                    summary.errors.push(e.to_string());
-                }
-                Err(e) => {
-                    summary.errors.push(format!("Task panicked: {}", e));
-                }
+                Err(e) => summary.errors.push(e),
             }
         }
 
         summary
     }
 
-    /// Refresh specific subscriptions sequentially.
+    /// Refresh specific subscriptions concurrently (same semaphore-limited
+    /// pipeline as fetch_all). Results are returned in input order.
     pub async fn refresh_subscriptions(
         &self,
         ids: &[i64],
@@ -208,52 +172,73 @@ impl FeedService {
             .as_ref()
             .ok_or_else(|| AppError::Internal("SubscriptionRepository not configured".into()))?;
 
-        let mut results = Vec::new();
+        // Resolve subscriptions first (cheap local lookups, keeps input order)
+        let mut subs: Vec<(i64, Subscription)> = Vec::with_capacity(ids.len());
+        let mut out: Vec<(i64, std::result::Result<Vec<FeedItem>, String>)> = Vec::new();
         for &id in ids {
-            let sub = match sub_repo.find_by_id(id).await {
-                Ok(s) => s,
-                Err(e) => {
-                    results.push((id, Err(format!("Subscription not found: {}", e))));
-                    continue;
-                }
-            };
-            let result = self
-                .fetch_and_save_feed(&sub)
-                .await
-                .map_err(|e| e.to_string());
-            results.push((id, result));
+            match sub_repo.find_by_id(id).await {
+                Ok(s) => subs.push((id, s)),
+                Err(e) => out.push((id, Err(format!("Subscription not found: {}", e)))),
+            }
         }
-        Ok(results)
+
+        let sub_ids: Vec<i64> = subs.iter().map(|(id, _)| *id).collect();
+        let results = self
+            .spawn_fetch_tasks(subs.into_iter().map(|(_, s)| s).collect())
+            .await;
+
+        // spawn_fetch_tasks returns results in the same order as its input
+        out.extend(sub_ids.into_iter().zip(results));
+        // Restore the original input order
+        out.sort_by_key(|(id, _)| ids.iter().position(|i| i == id).unwrap_or(usize::MAX));
+        Ok(out)
     }
 
-    // ------------------------------------------------------------------
-    // Classification
-    // ------------------------------------------------------------------
-
-    /// Internal: classify using a concrete AiService reference.
-    async fn classify_item_inner(
+    /// Spawn one semaphore-limited fetch task per subscription and collect
+    /// the results in input order (join_all preserves order).
+    async fn spawn_fetch_tasks(
         &self,
-        item_id: i64,
-        subscription_title: &str,
-        ai: &dyn crate::ai::service::AiService,
-    ) -> Result<()> {
-        let item = self.repo.find_by_id(item_id).await?;
+        subs: Vec<Subscription>,
+    ) -> Vec<std::result::Result<Vec<FeedItem>, String>> {
+        let semaphore = Arc::new(Semaphore::new(20));
+        let mut handles = Vec::with_capacity(subs.len());
 
-        let request = crate::ai::ClassificationRequest {
-            title: item.title.clone(),
-            description: item.description.clone(),
-            content_snippet: item.content.clone(),
-            rss_title: Some(subscription_title.to_string()),
-            existing_tags: Some(Vec::new()),
-        };
+        for sub in subs {
+            let sem = Arc::clone(&semaphore);
+            let repo = self.repo.clone();
+            let fetcher = self.fetcher.clone();
+            let ai_service = self.ai_service.clone();
+            let chroma_service = self.chroma_service.clone();
 
-        let response = ai.classify(request).await?;
-        let tags_json =
-            serde_json::to_string(&response.tags).unwrap_or_else(|_| "[]".to_string());
-        let category = response.category.unwrap_or_default();
+            handles.push(tokio::spawn(async move {
+                let result = async {
+                    let _permit = sem.acquire().await;
+                    let fetcher = fetcher
+                        .as_ref()
+                        .ok_or_else(|| "FeedFetcher not configured".to_string())?;
+                    fetch_parse_and_save(
+                        &repo,
+                        fetcher,
+                        ai_service.as_ref(),
+                        &chroma_service,
+                        &sub,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+                }
+                .await;
+                result
+            }));
+        }
 
-        self.repo.save_tags(item_id, &tags_json, &category).await?;
-        Ok(())
+        futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| match r {
+                Ok(res) => res,
+                Err(e) => Err(format!("Task panicked: {}", e)),
+            })
+            .collect()
     }
 
     // ------------------------------------------------------------------
@@ -264,115 +249,194 @@ impl FeedService {
     #[cfg(test)]
     pub async fn cache_website_content(&self, item_id: i64, raw_html: &str) -> Result<FeedItem> {
         let md = html_to_markdown_pipeline(raw_html)?;
-        self.repo.update_content_md(item_id, &md).await
-    }
-
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
-
-    /// Check whether a feed item with the given GUID or link already exists.
-    async fn find_existing_item(
-        &self,
-        subscription_id: i64,
-        guid: &Option<String>,
-        link: &Option<String>,
-    ) -> Result<bool> {
-        let items = self.repo.find_by_subscription(subscription_id).await?;
-        Ok(items.iter().any(|item| {
-            if let Some(ref item_guid) = item.guid {
-                if let Some(ref search_guid) = guid {
-                    if item_guid == search_guid {
-                        return true;
-                    }
-                }
-            }
-            if let Some(ref item_link) = item.link {
-                if let Some(ref search_link) = link {
-                    if item_link == search_link {
-                        return true;
-                    }
-                }
-            }
-            false
-        }))
+        self.repo.update_content_md(item_id, &md, true).await
     }
 }
 
-/// Standalone async function: fetch one feed and save items.
-/// Used by tokio::spawn in fetch_and_save_all_feeds.
-async fn fetch_single_feed_and_save(
-    repo: &Arc<dyn FeedItemRepository>,
-    fetcher: &Option<Arc<FeedFetcher>>,
-    ai_service: Option<&dyn crate::ai::service::AiService>,
-    subscription: Subscription,
-    sub_title: String,
-    auto_classify: bool,
-) -> std::result::Result<Vec<FeedItem>, String> {
-    let fetcher = fetcher
-        .as_ref()
-        .ok_or_else(|| "FeedFetcher not configured".to_string())?;
+// ----------------------------------------------------------------------
+// Shared fetch pipeline (single implementation used by both the service
+// method and the spawned per-subscription tasks)
+// ----------------------------------------------------------------------
 
+use crate::feed::parser::ensure_content_md;
+
+/// Lazily fill `content_md` for an item that has raw HTML `content` but no
+/// cached markdown. The conversion runs on a blocking worker because
+/// `html2md::parse_html` is CPU-bound. Once cached, every display path
+/// (host DOM text + iframe webview) routes through `marked` → `setSafeHtml`
+/// and never sees raw RSS HTML.
+///
+/// No-op when `content_md` is already populated or `content` is missing.
+/// Returns the (possibly updated) item so callers can re-fetch the row.
+pub async fn ensure_content_md_for_item(
+    repo: &Arc<dyn FeedItemRepository>,
+    item_id: i64,
+) -> Result<crate::models::FeedItem> {
+    let item = repo.find_by_id(item_id).await?;
+    if item.content_md.is_some() {
+        return Ok(item);
+    }
+    let Some(html) = item.content.clone() else {
+        return Ok(item);
+    };
+    let md = tokio::task::spawn_blocking(move || ensure_content_md(&html))
+        .await
+        .map_err(|e| crate::error::AppError::Internal(format!("markdown task failed: {}", e)))?;
+    if md.is_empty() {
+        return Ok(item);
+    }
+    repo.update_content_md(item_id, &md, false).await
+}
+
+/// Fetch one feed, parse, dedup against existing rows, insert new items and
+/// run per-item side effects (classification, Chroma indexing, website
+/// content pre-caching).
+async fn fetch_parse_and_save(
+    repo: &Arc<dyn FeedItemRepository>,
+    fetcher: &Arc<FeedFetcher>,
+    ai_service: Option<&Arc<dyn crate::ai::service::AiService>>,
+    chroma_service: &Option<Arc<ChromaService>>,
+    subscription: &Subscription,
+) -> Result<Vec<FeedItem>> {
     let feed_url = subscription
         .rsshub_url
         .as_deref()
         .unwrap_or(&subscription.url);
 
-    let content = fetcher.fetch_feed(feed_url).await.map_err(|e| e.to_string())?;
-    let parsed = parse_feed(&content, subscription.id).map_err(|e| e.to_string())?;
+    let content = fetcher.fetch_feed(feed_url).await?;
+    let parsed = parse_feed(&content, subscription.id)?;
 
-    let mut saved = Vec::new();
+    // One lightweight query for in-memory O(1) dedup
+    // (was: one full-content SELECT * per parsed item — the N+1 hot spot).
+    let (existing_guids, existing_links) = repo.find_dedup_keys(subscription.id).await?;
+
+        let mut saved = Vec::new();
+    // Items pending auto-classification. Classification now runs in BATCHES
+    // after the insert loop: one LLM call per ~20 articles instead of one
+    // call per article — a 20x reduction in request count (and thus in
+    // rate-limit pressure) during a bulk refresh.
+    let mut pending_classify: Vec<FeedItem> = Vec::new();
+
     for item in parsed {
-        // Deduplicate
-        let exists = {
-            let items = repo
-                .find_by_subscription(subscription.id)
-                .await
-                .map_err(|e| e.to_string())?;
-            items.iter().any(|existing| {
-                if let Some(ref item_guid) = existing.guid {
-                    if let Some(ref search_guid) = item.guid {
-                        if item_guid == search_guid {
-                            return true;
-                        }
-                    }
-                }
-                if let Some(ref item_link) = existing.link {
-                    if let Some(ref search_link) = item.link {
-                        if item_link == search_link {
-                            return true;
-                        }
-                    }
-                }
-                false
-            })
-        };
-        if exists {
+        let is_dup = item
+            .guid
+            .as_ref()
+            .map_or(false, |g| existing_guids.contains(g))
+            || item
+                .link
+                .as_ref()
+                .map_or(false, |l| existing_links.contains(l));
+        if is_dup {
             continue;
         }
 
-        let feed_item = repo.create(item).await.map_err(|e| e.to_string())?;
+        let feed_item = match repo.create(item).await {
+            Ok(it) => it,
+            // A concurrent refresh beat us to this row; benign, skip it.
+            Err(AppError::Duplicate(_)) => continue,
+            Err(e) => return Err(e),
+        };
 
-        if auto_classify {
-            if let Some(ai) = ai_service {
-                let request = crate::ai::ClassificationRequest {
-                    title: feed_item.title.clone(),
-                    description: feed_item.description.clone(),
-                    content_snippet: feed_item.content.clone(),
-                    rss_title: Some(sub_title.clone()),
-                    existing_tags: Some(Vec::new()),
-                };
-                if let Ok(response) = ai.classify(request).await {
-                    let tags_json =
-                        serde_json::to_string(&response.tags).unwrap_or_else(|_| "[]".to_string());
-                    let category = response.category.unwrap_or_default();
-                    let _ = repo.save_tags(feed_item.id, &tags_json, &category).await;
-                }
+        // Index into ChromaDB if available. A failure here must NOT lose
+        // the item from the semantic index forever — queue it for the next
+        // incremental sync (watermark + pending-upsert retry).
+        if let Some(ref chroma) = chroma_service {
+            if let Err(e) = chroma.index_item(&feed_item).await {
+                eprintln!("ChromaDB indexing failed for item {}: {}", feed_item.id, e);
+                crate::chroma::sync::SyncState::queue_upsert(feed_item.id);
             }
         }
 
+        // Pre-cache website content for use_website subscriptions
+        if subscription.use_website {
+            precache_website_content(repo, fetcher, &feed_item).await;
+        }
+
+        if subscription.auto_classify {
+            pending_classify.push(feed_item.clone());
+        }
         saved.push(feed_item);
     }
 
+    // Batch classification: titles only, one LLM call per
+    // CLASSIFY_BATCH_SIZE articles.
+    if let Some(ai) = ai_service {
+        for chunk in pending_classify.chunks(crate::ai::CLASSIFY_BATCH_SIZE) {
+            if let Err(e) = classify_batch_and_save(repo, ai.as_ref(), chunk).await {
+                eprintln!("Batch classification failed ({} items): {}", chunk.len(), e);
+            }
+        }
+    }
+
     Ok(saved)
+}
+
+/// Classify a batch of items in a single LLM call and persist the results.
+///
+/// Payload per article is the title only — neither description nor
+/// `content` is ever sent.
+async fn classify_batch_and_save(
+    repo: &Arc<dyn FeedItemRepository>,
+    ai: &dyn crate::ai::service::AiService,
+    items: &[FeedItem],
+) -> Result<()> {
+    let entries: Vec<crate::ai::BatchClassifyEntry> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| crate::ai::BatchClassifyEntry {
+            index: i,
+            title: item.title.clone(),
+        })
+        .collect();
+
+    let responses = ai.classify_batch(&entries).await?;
+
+    for (item, response) in items.iter().zip(responses) {
+        // Skip items the model left unclassified (empty tags AND no category)
+        // so we don't wipe anything with a no-op write.
+        if response.tags.is_empty() && response.category.is_none() {
+            continue;
+        }
+        let tags_json =
+            serde_json::to_string(&response.tags).unwrap_or_else(|_| "[]".to_string());
+        let category = response.category.unwrap_or_default();
+        if let Err(e) = repo.save_tags(item.id, &tags_json, &category).await {
+            eprintln!("Failed to save tags for item {}: {}", item.id, e);
+        }
+    }
+    Ok(())
+}
+
+/// Fetch the article's website page and cache its Markdown conversion.
+/// Errors are logged, never propagated (this is a best-effort side effect).
+async fn precache_website_content(
+    repo: &Arc<dyn FeedItemRepository>,
+    fetcher: &Arc<FeedFetcher>,
+    item: &FeedItem,
+) {
+    let Some(ref link) = item.link else { return };
+
+    let html = match fetcher.fetch_website_content(link).await {
+        Ok(html) => html,
+        Err(e) => {
+            eprintln!("Failed to fetch website for item {}: {}", item.id, e);
+            return;
+        }
+    };
+
+    // HTML -> Markdown is CPU-bound; keep it off the async worker threads.
+    let converted = tokio::task::spawn_blocking(move || html_to_markdown_pipeline(&html)).await;
+    match converted {
+        Ok(Ok(md)) => {
+            if let Err(e) = repo.update_content_md(item.id, &md, true).await {
+                eprintln!("Failed to cache website content for item {}: {}", item.id, e);
+            }
+        }
+        Ok(Err(e)) => {
+            eprintln!("Failed to convert website content for item {}: {}", item.id, e);
+        }
+        Err(e) => {
+            eprintln!("Website conversion task failed for item {}: {}", item.id, e);
+        }
+    }
 }
