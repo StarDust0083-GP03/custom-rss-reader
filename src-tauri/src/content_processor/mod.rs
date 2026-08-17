@@ -175,6 +175,14 @@ pub fn clean_markdown(md: &str) -> String {
         }
 
         // Empty image: ![](
+        // Empty alt is the NORM for content images (html2md emits `![]`
+        // whenever the source <img> has no alt attribute) — so keep the
+        // image unless its URL matches the non-content patterns (UI chrome
+        // like vote/signin/share icons). Stripping all of them removed
+        // real article images from the bilingual translation view.
+        // The WHOLE `![](...)` span is consumed here either way — copying
+        // just the `!` would let the empty-link `[](` branch below strip
+        // the rest.
         if i + 3 < len && &bytes[i..i + 4] == b"![](" {
             let mut depth = 1;
             let mut j = i + 4;
@@ -182,6 +190,11 @@ pub fn clean_markdown(md: &str) -> String {
                 if bytes[j] == b'(' { depth += 1; }
                 else if bytes[j] == b')' { depth -= 1; }
                 j += 1;
+            }
+            let url = &md[i + 4..j.saturating_sub(1).max(i + 4)];
+            if !is_non_content_url(url, &path_patterns) {
+                // Content image — copy the whole `![](...)` through.
+                result.push_str(&md[i..j]);
             }
             i = j;
             continue;
@@ -571,9 +584,20 @@ mod tests {
         assert_eq!(cleaned, "read [post](https://example.com/posts/1234) ok");
     }
 
+    /// Empty-alt images are the norm for content images (html2md emits `![]`
+    /// when the source <img> has no alt) — they must be PRESERVED, or real
+    /// article images vanish from the bilingual translation view.
     #[test]
-    fn test_clean_markdown_empty_image() {
+    fn test_clean_markdown_preserves_empty_alt_content_image() {
         let md = "text ![](https://example.com/img.png) more";
+        let cleaned = clean_markdown(md);
+        assert_eq!(cleaned, md);
+    }
+
+    /// Non-content URLs (vote/signin/share chrome) are stripped even as images.
+    #[test]
+    fn test_clean_markdown_strips_non_content_image() {
+        let md = "text ![](https://medium.com/m/signin) more";
         let cleaned = clean_markdown(md);
         assert_eq!(cleaned, "text  more");
     }

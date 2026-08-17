@@ -465,11 +465,17 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
     setSafeHtml(bilingualEl, item.translated_content);
     // The original side carries the article's MARKDOWN (the translation
     // source is content_md). Render it through marked so `**bold**`,
-    // `[links](…)`, `# headers` etc. display as formatting instead of
-    // literal syntax; sanitise again because the markdown is untrusted.
+    // `[links](…)`, `![images](…)`, `# headers` etc. display as formatting
+    // instead of literal syntax; sanitise again because the markdown is
+    // untrusted.
+    // ONLY pure-text originals are re-parsed: if the original already
+    // contains elements (HTML-mode translations keep real `<img>`/`<a>`
+    // inside paragraph-original), textContent would DROP them — leave
+    // element-bearing originals exactly as sanitised.
     bilingualEl.querySelectorAll(".paragraph-original").forEach((el) => {
+      if (el.children.length > 0) return; // real HTML (e.g. <img>) — keep
       const raw = el.textContent ?? "";
-      if (!raw.trim()) return;
+      if (!raw.trim() || !/[\\*\[\]#`_>|~-]/.test(raw)) return; // plain text
       const html = marked.parse(raw, { gfm: true }) as string;
       setSafeHtml(el, html);
     });
