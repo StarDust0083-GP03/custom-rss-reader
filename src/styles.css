@@ -259,38 +259,55 @@ body::after {
     overflow: hidden;
 }
 
-/* Filter tabs — small-caps index, not pills */
+/* Filter tabs — modern icon pills */
 .filter-tabs {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.1rem 1rem;
-    padding: 0.65rem 1rem 0.55rem;
+    gap: 0.4rem;
+    padding: 0.8rem 0.85rem 0.7rem;
     border-bottom: 1px solid var(--border-color);
 }
 
 .filter-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.34rem 0.75rem 0.34rem 0.6rem;
     font-family: var(--font-ui);
     font-size: 0.72rem;
-    font-weight: 500;
-    letter-spacing: 0.09em;
+    font-weight: 600;
+    letter-spacing: 0.045em;
     text-transform: uppercase;
-    padding: 0.25rem 0;
-    background: transparent;
-    border: none;
-    border-bottom: 2px solid transparent;
-    cursor: pointer;
     color: var(--text-secondary);
-    transition: color 0.15s ease, border-color 0.15s ease;
+    background: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    cursor: pointer;
+    transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+}
+
+.filter-tab svg {
+    width: 13px;
+    height: 13px;
+    flex-shrink: 0;
 }
 
 .filter-tab:hover {
     color: var(--text-primary);
+    background: var(--bg-tertiary);
+    border-color: var(--muted-color);
+    transform: translateY(-1px);
+}
+
+.filter-tab:active {
+    transform: translateY(0);
 }
 
 .filter-tab.active {
     color: var(--accent-color);
-    border-bottom-color: var(--accent-color);
-    font-weight: 600;
+    background: var(--accent-soft);
+    border-color: var(--accent-color);
+    font-weight: 700;
 }
 
 .subscription-list {
