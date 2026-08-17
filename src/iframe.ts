@@ -278,20 +278,29 @@ function buildIframeDocument(body: string, cssVars?: Record<string, string>, hea
 ${varDecls}
 }
 *, *::before, *::after { box-sizing: border-box; }
+/* data: iframes can't fetch the self-hosted Radon woff2 (opaque origin),
+   so approximate it with the system mono stack; CJK falls through to
+   heiti-style system sans (issue #5). */
+:root {
+  --cjk-sans: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+              'Noto Sans CJK SC', 'Noto Sans SC', sans-serif;
+  --mono-hand: 'Monaspace Radon', 'Cascadia Code', 'JetBrains Mono', Menlo,
+               Consolas, 'DejaVu Sans Mono', var(--cjk-sans);
+}
 html, body {
   margin: 0;
   padding: 2.5rem 3rem;
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-family: 'Newsreader', Georgia, 'Times New Roman', serif;
-  font-size: 17px;
-  line-height: 1.75;
+  font-family: var(--mono-hand);
+  font-size: 16px;
+  line-height: 1.8;
   min-height: 100%;
 }
 
 /* Header section */
 .source {
-  font-family: 'Public Sans', 'Segoe UI', sans-serif;
+  font-family: 'Public Sans', 'Segoe UI', var(--cjk-sans);
   font-size: 0.72rem;
   color: var(--accent-color);
   font-weight: 700;
@@ -302,7 +311,7 @@ html, body {
 
 /* Title styling - matches .detail-content h1 */
 h1 {
-  font-family: 'Fraunces', 'Iowan Old Style', Georgia, serif;
+  font-family: var(--mono-hand);
   font-size: 2rem;
   font-weight: 600;
   letter-spacing: -0.015em;
@@ -321,7 +330,7 @@ h1 {
   padding-bottom: 1rem;
   border-bottom: 1px solid var(--border-color);
   color: var(--text-secondary);
-  font-family: 'Public Sans', 'Segoe UI', sans-serif;
+  font-family: 'Public Sans', 'Segoe UI', var(--cjk-sans);
   font-size: 0.78rem;
   letter-spacing: 0.03em;
 }
@@ -345,15 +354,15 @@ h1 {
   border-bottom-color: var(--accent-color);
 }
 
-/* Article content */
+/* Article content — fills the panel width at any window size (issue #4) */
 .article-body {
-  line-height: 1.75;
-  font-size: 1.06rem;
-  max-width: 70ch;
+  line-height: 1.8;
+  font-size: 1rem;
+  width: 100%;
 }
 
 .article-body > p:first-of-type::first-letter {
-  font-family: 'Fraunces', Georgia, serif;
+  font-family: var(--mono-hand);
   font-weight: 600;
   font-size: 3.4em;
   float: left;
@@ -392,7 +401,7 @@ p { margin: 0.85rem 0; }
 
 /* Headings */
 h2, h3, h4, h5, h6 {
-  font-family: 'Fraunces', Georgia, serif;
+  font-family: var(--mono-hand);
   color: var(--text-primary);
   font-weight: 600;
   letter-spacing: -0.01em;
@@ -436,7 +445,7 @@ table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
 th, td { border: 1px solid var(--border-color); padding: 0.45rem 0.7rem; }
 th {
   background: var(--bg-secondary);
-  font-family: 'Public Sans', 'Segoe UI', sans-serif;
+  font-family: 'Public Sans', 'Segoe UI', var(--cjk-sans);
   font-size: 0.72rem;
   font-weight: 600;
   letter-spacing: 0.05em;

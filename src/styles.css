@@ -1,47 +1,27 @@
 /* ============================================================
-   THE READING ROOM — editorial print design
+   THE READING ROOM — editorial print design, handwriting type
    ------------------------------------------------------------
-   Self-hosted type trio:
-   - Fraunces   → display: masthead, headlines, drop caps
-   - Newsreader → reading: article body, descriptions
-   - Public Sans→ chrome: buttons, labels, meta, small caps
+   Type (issue #5): Monaspace Radon (handwriting mono) carries all
+   Latin display + reading text; Chinese falls through to system
+   heiti sans; Public Sans stays for dense UI chrome only.
    Palette: warm paper, deep ink, vermilion accent.
    All structural selectors are preserved from the original
    stylesheet — this is a reskin, not a relayout.
    ============================================================ */
 
-/* ---------- Self-hosted fonts (latin subsets) ---------- */
+/* ---------- Self-hosted fonts ----------
+   Monaspace Radon (githubnext/monaspace v1.400, OFL): handwriting-flavored
+   monospace for ALL Latin text (issue #5 — no serifs anywhere).
+   Chinese glyphs fall through to the system heiti/sans stack below —
+   self-hosting CJK is out of scope (10MB+); every desktop OS ships a
+   good heiti. Public Sans stays for dense UI chrome (buttons/labels). */
 @font-face {
-    font-family: 'Fraunces';
+    font-family: 'Monaspace Radon';
     font-style: normal;
-    font-weight: 400 700;
+    font-weight: 200 800;
+    font-stretch: 100% 125%;
     font-display: swap;
-    src: url('./assets/fonts/Fraunces-normal-400-700.woff2') format('woff2');
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-@font-face {
-    font-family: 'Fraunces';
-    font-style: italic;
-    font-weight: 400 700;
-    font-display: swap;
-    src: url('./assets/fonts/Fraunces-italic-400-700.woff2') format('woff2');
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-@font-face {
-    font-family: 'Newsreader';
-    font-style: normal;
-    font-weight: 400 600;
-    font-display: swap;
-    src: url('./assets/fonts/Newsreader-normal-400-600.woff2') format('woff2');
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-@font-face {
-    font-family: 'Newsreader';
-    font-style: italic;
-    font-weight: 400 600;
-    font-display: swap;
-    src: url('./assets/fonts/Newsreader-italic-400-600.woff2') format('woff2');
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    src: url('./assets/fonts/MonaspaceRadon-Var.woff2') format('woff2');
 }
 @font-face {
     font-family: 'Public Sans';
@@ -50,6 +30,15 @@
     font-display: swap;
     src: url('./assets/fonts/PublicSans-normal-400-700.woff2') format('woff2');
     unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* Heiti-style CJK fallback: every major desktop ships one of these.
+   Latin fonts above come first so they win for Latin glyphs; CJK
+   codepoints fall through to the system sans (never a song/serif). */
+:root {
+    --cjk-sans: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+                'Noto Sans CJK SC', 'Noto Sans SC', 'Source Han Sans SC',
+                'WenQuanYi Micro Hei', sans-serif;
 }
 
 /* ---------- Palette (names kept stable: the article iframe
@@ -70,9 +59,9 @@
     --warning-color: #b07d10;   /* ochre */
     --shadow: 0 2px 10px rgba(60, 48, 32, 0.10);
     --shadow-lg: 0 12px 40px rgba(60, 48, 32, 0.22);
-    --font-display: 'Fraunces', 'Iowan Old Style', Georgia, serif;
-    --font-body: 'Newsreader', Georgia, 'Times New Roman', serif;
-    --font-ui: 'Public Sans', 'Avenir Next', 'Segoe UI', sans-serif;
+    --font-display: 'Monaspace Radon', var(--cjk-sans);
+    --font-body: 'Monaspace Radon', var(--cjk-sans);
+    --font-ui: 'Public Sans', var(--cjk-sans);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -227,7 +216,7 @@ body::after {
     font-size: 1.45rem;
     font-weight: 600;
     font-style: italic;
-    letter-spacing: -0.01em;
+    letter-spacing: 0;
     line-height: 1.1;
     margin-bottom: 0.7rem;
 }
@@ -451,7 +440,7 @@ body::after {
     font-optical-sizing: auto;
     font-size: 1.25rem;
     font-weight: 600;
-    letter-spacing: -0.01em;
+    letter-spacing: 0;
 }
 
 .header-actions {
@@ -862,9 +851,9 @@ body::after {
 .detail-content h1 {
     font-family: var(--font-display);
     font-optical-sizing: auto;
-    font-size: 2.1rem;
+    font-size: 1.9rem;
     font-weight: 600;
-    letter-spacing: -0.015em;
+    letter-spacing: 0;
     line-height: 1.18;
     margin-bottom: 1.1rem;
 }
@@ -894,11 +883,14 @@ body::after {
 }
 
 /* ---------- Reading surface ---------- */
+/* Issue #4: no max-width cap — the markdown column fills the panel at any
+   window size (including maximized). Line comfort comes from line-height +
+   generous side padding instead of a fixed measure. */
 .detail-body {
     font-family: var(--font-body);
-    line-height: 1.75;
-    font-size: 1.08rem;
-    max-width: 70ch;
+    line-height: 1.8;
+    font-size: 1rem;
+    width: 100%;
 }
 
 .detail-body a {
@@ -927,7 +919,7 @@ body::after {
 .detail-body > p:first-of-type::first-letter {
     font-family: var(--font-display);
     font-weight: 600;
-    font-size: 3.4em;
+    font-size: 3em;
     float: left;
     line-height: 0.82;
     padding: 0.08em 0.12em 0 0;
@@ -996,7 +988,7 @@ body::after {
     font-family: var(--font-display);
     font-optical-sizing: auto;
     font-weight: 600;
-    letter-spacing: -0.01em;
+    letter-spacing: 0;
     line-height: 1.25;
     margin: 1.75rem 0 0.6rem;
 }
