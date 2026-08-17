@@ -121,7 +121,13 @@ async fn translate_streaming_inner(
         {
             Ok(translated_block) => {
                 completed += 1;
-                all_chunks.push(translated_block.clone());
+                // Strip images from the translated side BEFORE emitting: the
+                // frontend streams these chunks live, so the final
+                // strip_images_from_translated pass below is too late —
+                // raw chunks made images appear twice (original + echoed
+                // translation) while the stream was running.
+                let stripped = strip_images_from_translated(&translated_block);
+                all_chunks.push(stripped.clone());
 
                 let _ = app_handle.emit_to(
                     "main",
@@ -130,7 +136,7 @@ async fn translate_streaming_inner(
                         "item_id": item_id,
                         "total": total,
                         "completed": completed,
-                        "html_chunk": translated_block,
+                        "html_chunk": stripped,
                         "is_complete": false,
                         "cached": false
                     }),
@@ -316,8 +322,9 @@ fn strip_images_from_translated(html: &str) -> String {
         // Find the matching </div> using depth counting so nested divs work
         if let Some(end) = find_matching_div_close(&html[scan_from..]) {
             let inner = &html[scan_from..scan_from + end];
-            // Remove <img ...> tags inside this translated block
-            let stripped = strip_img_tags(inner);
+            // Remove HTML <img> AND markdown ![alt](url) images inside this
+            // translated block — either way the image must not be echoed.
+            let stripped = strip_markdown_images(&strip_img_tags(inner));
             out.push_str(&stripped);
             out.push_str("</div>");
             pos = scan_from + end + "</div>".len();
@@ -374,6 +381,46 @@ fn find_matching_div_close(html: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// Remove markdown image syntax `![alt](url)` from a string. Handles
+/// parentheses nested inside the URL (e.g. `![a](img(1).png)`) via depth
+/// counting. Case: `![` … `](` … `)`.
+fn strip_markdown_images(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let len = s.len();
+    let mut out = String::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        // Look for "!["
+        if bytes[i] == b'!' && i + 1 < len && bytes[i + 1] == b'[' {
+            // Find "](" following the alt text
+            let after = &s[i + 2..];
+            if let Some(close_bracket) = after.find("](") {
+                let url_start = i + 2 + close_bracket + 2;
+                // Depth-count parens to the closing ")"
+                let mut depth = 1usize;
+                let mut j = url_start;
+                while j < len && depth > 0 {
+                    if bytes[j] == b'(' {
+                        depth += 1;
+                    } else if bytes[j] == b')' {
+                        depth -= 1;
+                    }
+                    j += 1;
+                }
+                if depth == 0 {
+                    i = j; // skip the entire ![alt](url)
+                    continue;
+                }
+            }
+        }
+        let ch = s[i..].chars().next().unwrap_or(' ');
+        let n = ch.len_utf8();
+        out.push_str(&s[i..i + n]);
+        i += n;
+    }
+    out
 }
 
 /// Remove `<img ...>` tags from a string (case-insensitive).
@@ -471,6 +518,57 @@ mod tests {
         let html = r#"<div class="paragraph-translated">text <IMG SRC="x.jpg"></div>"#;
         let result = strip_images_from_translated(html);
         assert_eq!(result, r#"<div class="paragraph-translated">text </div>"#);
+    }
+
+    /// Regression: models echo the original's MARKDOWN images into the
+    /// translated side — `![alt](url)` must be stripped there too, or the
+    /// image displays twice in the bilingual pair.
+    #[test]
+    fn test_strip_markdown_images_basic() {
+        let html = r#"<div class="paragraph-translated">文本 ![alt](https://x.com/a.png) 之后</div>"#;
+        let result = strip_images_from_translated(html);
+        assert_eq!(
+            result,
+            r#"<div class="paragraph-translated">文本  之后</div>"#
+        );
+    }
+
+    #[test]
+    fn test_strip_markdown_images_nested_parens_in_url() {
+        let input = "before ![alt](https://x.com/img(1).png) after";
+        assert_eq!(strip_markdown_images(input), "before  after");
+    }
+
+    #[test]
+    fn test_strip_markdown_images_preserves_text_and_links() {
+        let input = "see ![fig](a.png) and [link](https://x.com) and **bold**";
+        let result = strip_markdown_images(input);
+        // markdown links and bold survive; only the image syntax goes
+        assert_eq!(result, "see  and [link](https://x.com) and **bold**");
+    }
+
+    #[test]
+    fn test_strip_markdown_images_no_image() {
+        let input = "plain text with (parens) but no ![";
+        assert_eq!(strip_markdown_images(input), input);
+    }
+
+    #[test]
+    fn test_strip_markdown_images_unclosed_kept() {
+        // Unclosed syntax is kept verbatim rather than eating the rest
+        let input = "text ![alt(https://x.com/a.png) tail";
+        let result = strip_markdown_images(input);
+        assert_eq!(result, "text ![alt(https://x.com/a.png) tail");
+    }
+
+    /// Streaming emits must be stripped per-chunk (not just at completion) —
+    /// this is enforced by the emit site in translate_streaming_inner, which
+    /// pipes every chunk through strip_images_from_translated.
+    #[test]
+    fn test_strip_images_markdown_inside_translated_div() {
+        let html = r#"<div class="paragraph-translated">翻译 ![alt](x.png) 完成</div>"#;
+        let result = strip_images_from_translated(html);
+        assert_eq!(result, r#"<div class="paragraph-translated">翻译  完成</div>"#);
     }
 
     /// Regression: nested <div> inside paragraph-translated used to be cut at

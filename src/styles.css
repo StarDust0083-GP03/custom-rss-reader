@@ -1833,3 +1833,12 @@ body::after {
 .paragraph-original pre {
     font-size: 0.85em;
 }
+
+/* Translated side must NEVER render an image — the original side of the
+   bilingual pair already shows it. Defense in depth alongside the backend
+   strip (covers malformed chunks that slip past the parser). */
+.paragraph-translated img,
+.paragraph-translated picture,
+.paragraph-translated svg {
+    display: none !important;
+}
