@@ -6,6 +6,11 @@
 
 let currentMenu: HTMLElement | null = null;
 
+/** Close any open overflow menu (used by the theme picker). */
+export function closeMenu(): void {
+  closeCurrentMenu();
+}
+
 function closeCurrentMenu() {
   if (currentMenu) {
     currentMenu.classList.remove("open");

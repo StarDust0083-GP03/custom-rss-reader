@@ -22,6 +22,12 @@ import {
 configureMarked();
 const S = state;
 
+// Inline icons for the subscription row actions (stroke = currentColor).
+const SPARKLE_ICON =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.7 5.7 1.9-5.7 1.9L12 18.2l-1.9-5.7-5.7-1.9 5.7-1.9z"/><path d="M18.5 15.5l.8 2.4 2.4.8-2.4.8-.8 2.4-.8-2.4-2.4-.8 2.4-.8z"/></svg>';
+const TRASH_ICON =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>';
+
 // Iframe manager — every load bumps a generation so stale loads are dropped.
 export const iframeManager = new IframeManager();
 
@@ -83,9 +89,11 @@ export function renderSubscriptions() {
     const autoBtn = document.createElement("button");
     autoBtn.className = "icon-btn toggle-auto-btn";
     autoBtn.dataset.id = sub.id.toString();
-    autoBtn.title = "Toggle auto-classify";
+    autoBtn.title = sub.auto_classify ? "Auto-classify on — click to disable" : "Auto-classify off — click to enable";
     autoBtn.dataset.auto = sub.auto_classify ? "true" : "false";
-    autoBtn.textContent = sub.auto_classify ? "AI" : "ai";
+    autoBtn.setAttribute("aria-label", "Toggle auto-classify");
+    // Sparkle icon — filled (accent) when auto-classify is on.
+    autoBtn.innerHTML = SPARKLE_ICON;
     autoBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       toggleAutoClassify(sub.id);
@@ -95,7 +103,8 @@ export function renderSubscriptions() {
     delBtn.className = "icon-btn delete-sub";
     delBtn.dataset.id = sub.id.toString();
     delBtn.title = "Delete";
-    delBtn.textContent = "×";
+    delBtn.setAttribute("aria-label", "Delete subscription");
+    delBtn.innerHTML = TRASH_ICON;
     delBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       deleteSubscription(sub.id);

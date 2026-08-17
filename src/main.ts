@@ -14,7 +14,7 @@ import {
   renderSubscriptions,
 } from "./ui/render";
 import { setFilter, showTagSelector, updateFilterTabs } from "./ui/filters";
-import { attachMenu } from "./ui/menu";
+import { attachMenu, closeMenu } from "./ui/menu";
 import { initColumnLayout } from "./ui/layout";
 import {
   loadSubscriptions,
@@ -74,6 +74,22 @@ async function init() {
 
   // 列宽恢复 + 折叠/拖动
   initColumnLayout(document.querySelector(".app-container") as HTMLElement);
+
+  // 主题恢复 + 色板切换
+  const currentTheme = localStorage.getItem("rss.theme") || "paper";
+  applyTheme(currentTheme);
+  document.querySelectorAll<HTMLButtonElement>(".theme-swatch").forEach((swatch) => {
+    if (swatch.dataset.theme === currentTheme) swatch.classList.add("active");
+    swatch.addEventListener("click", () => {
+      const theme = swatch.dataset.theme || "paper";
+      applyTheme(theme);
+      localStorage.setItem("rss.theme", theme);
+      document.querySelectorAll<HTMLButtonElement>(".theme-swatch").forEach(s =>
+        s.classList.toggle("active", s === swatch));
+      closeMenu();
+      toastSuccess(`Theme: ${theme}`);
+    });
+  });
 
   // 事件监听
   document.getElementById("add-feed-btn")?.addEventListener("click", openAddFeedModal);
@@ -439,3 +455,8 @@ function addZoomHintToImages(): void {
 }
 
 window.addEventListener("DOMContentLoaded", init);
+
+/** Apply a color theme by setting html[data-theme]. */
+function applyTheme(theme: string): void {
+  document.documentElement.dataset.theme = theme;
+}
