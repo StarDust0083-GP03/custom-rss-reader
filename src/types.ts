@@ -67,6 +67,10 @@ export interface FeedItemSummary {
   category: string | null;
   translated_title: string | null;
   has_translation: boolean;
+  /** Subscription (source) title, joined in by list queries. */
+  source_title: string | null;
+  /** Subscription (source) URL — fallback when the feed has no title. */
+  source_url: string | null;
 }
 
 export interface AiClassificationResponse {

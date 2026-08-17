@@ -166,32 +166,16 @@ async function init() {
     const selectedItem = S.selectedItem;
     if (selectedItem) {
       const subId = selectedItem.subscription_id;
-
-      // When website content is cached, use local override (no backend toggle needed)
-      const hasCached = selectedItem.is_website_content && selectedItem.content_md !== null;
-      if (hasCached) {
-        if (S.webviewOverride.has(subId)) {
-          S.webviewOverride.delete(subId);
-        } else {
-          S.webviewOverride.add(subId);
-        }
-        // Button label updated inside renderItemDetail
-        renderItemDetail(selectedItem);
-        return;
-      }
-
       const subscription = S.subscriptions.find(s => s.id === subId);
-      const currentUseWebsite = subscription?.use_website ?? false;
+      const currentUseWebsite = S.webviewPerSubscription.get(subId) ?? subscription?.use_website ?? false;
 
       // 先立即切换前端状态
       S.useWebView = !currentUseWebsite;
       S.webviewPerSubscription.set(subId, S.useWebView);
 
-      // 更新按钮状态
+      // 更新按钮状态并重新渲染详情
       const btn = document.getElementById("toggle-webview-btn") as HTMLButtonElement;
       btn.textContent = S.useWebView ? "Text" : "Web View";
-
-      // 重新渲染详情
       renderItemDetail(selectedItem);
 
       // 然后在后台更新后端状态

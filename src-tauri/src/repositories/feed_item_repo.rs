@@ -15,10 +15,17 @@ const INDEX_TEXT_CHARS_SQL: i64 = 2000;
 
 /// Columns selected for summary (list-view) queries. Excludes the large text
 /// columns (`content`, `content_md`, `translated_content`, `guid`).
-const SUMMARY_COLS: &str = "id, subscription_id, title, link, description, author, \
-    published_at, fetched_at, is_website_content, is_read, is_favorite, is_read_later, \
-    is_ignored, tags, category, translated_title, \
-    (translated_content IS NOT NULL AND translated_content != '') AS has_translation";
+///
+/// NOTE: columns are prefixed with `f.` — every summary query joins
+/// `subscriptions s` to carry the source title/url (issue #3).
+const SUMMARY_COLS: &str = "f.id, f.subscription_id, f.title, f.link, f.description, f.author, \
+    f.published_at, f.fetched_at, f.is_website_content, f.is_read, f.is_favorite, f.is_read_later, \
+    f.is_ignored, f.tags, f.category, f.translated_title, \
+    (f.translated_content IS NOT NULL AND f.translated_content != '') AS has_translation, \
+    s.title AS source_title, s.url AS source_url";
+
+/// FROM clause shared by every summary query (see SUMMARY_COLS).
+const SUMMARY_FROM: &str = "feed_items f LEFT JOIN subscriptions s ON s.id = f.subscription_id";
 
 /// Private database row type mapping to the `feed_items` table.
 #[derive(sqlx::FromRow)]
@@ -66,6 +73,8 @@ struct FeedItemSummaryRow {
     pub category: Option<String>,
     pub translated_title: Option<String>,
     pub has_translation: bool,
+    pub source_title: Option<String>,
+    pub source_url: Option<String>,
 }
 
 impl From<FeedItemRow> for FeedItem {
@@ -144,6 +153,8 @@ impl From<FeedItemSummaryRow> for FeedItemSummary {
             category: r.category,
             translated_title: r.translated_title,
             has_translation: r.has_translation,
+            source_title: r.source_title,
+            source_url: r.source_url,
         }
     }
 }
@@ -177,8 +188,8 @@ impl SqliteFeedItemRepository {
         offset: i64,
     ) -> Result<Vec<FeedItemSummary>> {
         let sql = format!(
-            "SELECT {} FROM feed_items {} ORDER BY published_at DESC LIMIT $1 OFFSET $2",
-            SUMMARY_COLS, where_sql
+            "SELECT {} FROM {} {} ORDER BY f.published_at DESC LIMIT $1 OFFSET $2",
+            SUMMARY_COLS, SUMMARY_FROM, where_sql
         );
         let mut q = sqlx::query_as::<_, FeedItemSummaryRow>(&sql)
             .bind(limit)
@@ -419,7 +430,7 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         offset: i64,
     ) -> Result<Vec<FeedItemSummary>> {
         let where_sql = if subscription_id.is_some() {
-            "WHERE subscription_id = $3"
+            "WHERE f.subscription_id = $3"
         } else {
             ""
         };
@@ -429,10 +440,10 @@ impl FeedItemRepository for SqliteFeedItemRepository {
     async fn search(&self, query: &str, limit: i64) -> Result<Vec<FeedItemSummary>> {
         let pattern = format!("%{}%", escape_like(query));
         let sql = format!(
-            r#"SELECT {} FROM feed_items
-               WHERE (title LIKE $1 ESCAPE '\' OR description LIKE $1 ESCAPE '\' OR content LIKE $1 ESCAPE '\')
-               ORDER BY published_at DESC LIMIT $2"#,
-            SUMMARY_COLS
+            r#"SELECT {} FROM {}
+               WHERE (f.title LIKE $1 ESCAPE '\' OR f.description LIKE $1 ESCAPE '\' OR f.content LIKE $1 ESCAPE '\')
+               ORDER BY f.published_at DESC LIMIT $2"#,
+            SUMMARY_COLS, SUMMARY_FROM
         );
         let rows = sqlx::query_as::<_, FeedItemSummaryRow>(&sql)
             .bind(&pattern)
@@ -450,8 +461,8 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         // QueryBuilder is used (not format!) so the IN list is bound
         // parameters, keeping the query plan cacheable and injection-safe.
         let mut qb = sqlx::QueryBuilder::new(format!(
-            "SELECT {} FROM feed_items WHERE id IN (",
-            SUMMARY_COLS
+            "SELECT {} FROM {} WHERE f.id IN (",
+            SUMMARY_COLS, SUMMARY_FROM
         ));
         let mut separated = qb.separated(", ");
         for id in ids {
@@ -474,13 +485,13 @@ impl FeedItemRepository for SqliteFeedItemRepository {
     ) -> Result<Vec<FeedItemSummary>> {
         // Exact element match inside the tags JSON array
         let base = format!(
-            r#"SELECT {} FROM feed_items
-               WHERE EXISTS (SELECT 1 FROM json_each(feed_items.tags) WHERE value = $1)"#,
-            SUMMARY_COLS
+            r#"SELECT {} FROM {}
+               WHERE EXISTS (SELECT 1 FROM json_each(f.tags) WHERE value = $1)"#,
+            SUMMARY_COLS, SUMMARY_FROM
         );
         let rows = if let Some(sub_id) = subscription_id {
             sqlx::query_as::<_, FeedItemSummaryRow>(&format!(
-                "{} AND subscription_id = $2 ORDER BY published_at DESC LIMIT $3 OFFSET $4",
+                "{} AND f.subscription_id = $2 ORDER BY f.published_at DESC LIMIT $3 OFFSET $4",
                 base
             ))
             .bind(tag)
@@ -491,7 +502,7 @@ impl FeedItemRepository for SqliteFeedItemRepository {
             .await?
         } else {
             sqlx::query_as::<_, FeedItemSummaryRow>(&format!(
-                "{} ORDER BY published_at DESC LIMIT $2 OFFSET $3",
+                "{} ORDER BY f.published_at DESC LIMIT $2 OFFSET $3",
                 base
             ))
             .bind(tag)
@@ -577,11 +588,11 @@ impl FeedItemRepository for SqliteFeedItemRepository {
     }
 
     async fn get_favorites(&self, limit: i64, offset: i64) -> Result<Vec<FeedItemSummary>> {
-        self.fetch_summaries("WHERE is_favorite = 1", None, limit, offset).await
+        self.fetch_summaries("WHERE f.is_favorite = 1", None, limit, offset).await
     }
 
     async fn get_read_later(&self, limit: i64, offset: i64) -> Result<Vec<FeedItemSummary>> {
-        self.fetch_summaries("WHERE is_read_later = 1", None, limit, offset).await
+        self.fetch_summaries("WHERE f.is_read_later = 1", None, limit, offset).await
     }
 
     async fn get_unread(
@@ -591,9 +602,9 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         offset: i64,
     ) -> Result<Vec<FeedItemSummary>> {
         let where_sql = if subscription_id.is_some() {
-            "WHERE subscription_id = $3 AND is_read = 0"
+            "WHERE f.subscription_id = $3 AND f.is_read = 0"
         } else {
-            "WHERE is_read = 0"
+            "WHERE f.is_read = 0"
         };
         self.fetch_summaries(where_sql, subscription_id, limit, offset).await
     }
@@ -618,17 +629,17 @@ impl FeedItemRepository for SqliteFeedItemRepository {
             .unwrap_or_else(|| start_local.and_utc());
         let end_utc = start_utc + chrono::Duration::days(1);
 
-        let mut where_sql = String::from("WHERE published_at >= $1 AND published_at < $2");
+        let mut where_sql = String::from("WHERE f.published_at >= $1 AND f.published_at < $2");
         if subscription_id.is_some() {
-            where_sql.push_str(" AND subscription_id = $5");
+            where_sql.push_str(" AND f.subscription_id = $5");
         }
         if unread_only {
-            where_sql.push_str(" AND is_read = 0");
+            where_sql.push_str(" AND f.is_read = 0");
         }
 
         let sql = format!(
-            "SELECT {} FROM feed_items {} ORDER BY published_at DESC LIMIT $3 OFFSET $4",
-            SUMMARY_COLS, where_sql
+            "SELECT {} FROM {} {} ORDER BY f.published_at DESC LIMIT $3 OFFSET $4",
+            SUMMARY_COLS, SUMMARY_FROM, where_sql
         );
         let mut q = sqlx::query_as::<_, FeedItemSummaryRow>(&sql)
             .bind(start_utc)

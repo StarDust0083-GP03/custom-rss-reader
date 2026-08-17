@@ -5,7 +5,7 @@
  * also lives here because the result is rendered immediately.
  */
 
-import { items as itemsApi, feeds as feedsApi } from "../api";
+import { items as itemsApi } from "../api";
 import type { FeedItem, FeedItemSummary } from "../types";
 import { setSafeHtml, setText, htmlToPlainText } from "../sanitize";
 import { IframeManager } from "../iframe";
@@ -212,6 +212,18 @@ export function renderItems(preserveScroll = false) {
     }
     div.appendChild(header);
 
+    // Source line (issue #3) — small-caps kicker above the description so
+    // every card shows WHERE the article came from, matching the detail
+    // view's .detail-source. Skipped when the summary carries no source
+    // (e.g. synthesized semantic-search hits).
+    const sourceName = item.source_title || item.source_url;
+    if (sourceName) {
+      const src = document.createElement("div");
+      src.className = "item-source";
+      src.textContent = sourceName;
+      div.appendChild(src);
+    }
+
     if (item.description) {
       const desc = document.createElement("div");
       desc.className = "item-description";
@@ -314,8 +326,10 @@ export function renderItemDetail(item: FeedItem) {
   const subscription = S.subscriptions.find(s => s.id === item.subscription_id);
   const subName = subscription?.title || subscription?.url || "Unknown";
   const useWebViewForItem = S.webviewPerSubscription.get(item.subscription_id) ?? false;
-  const hasCachedContent = item.is_website_content && item.content_md !== null;
-  const showWebView = useWebViewForItem && item.link !== null && (!hasCachedContent || S.webviewOverride.has(item.subscription_id));
+  // Webview mode = show the REAL webpage whenever the subscription asks for
+  // it and the item has a link (issue #2). The old cached-content/override
+  // gymnastics made both modes render markdown — indistinguishable views.
+  const showWebView = useWebViewForItem && item.link !== null;
 
   // Toggle button label
   const toggleBtn = document.getElementById("toggle-webview-btn") as HTMLButtonElement | null;
@@ -424,13 +438,25 @@ export function renderItemDetail(item: FeedItem) {
   const ts = S.translationStateByItemId.get(item.id);
   const useTranslationForItem = ts?.useTranslation ?? false;
 
-  // Webview path — must come before the translation gate so cached content
-  // still falls back to the iframe when the user wants the live site.
-  //
-  // Both display paths (this iframe and the host DOM text branch) converge
-  // on the same backend pipeline: fetch website HTML → `html_to_markdown_pipeline`
-  // → Markdown → `marked` → `setSafeHtml`. The iframe exists for layout
-  // isolation only.
+  // Translation FIRST (issue #2): the webview branch below returns early, so
+  // when it came first an active translation was never rendered in webview
+  // mode — the user clicked Translate and nothing happened. With this order,
+  // an active bilingual view always displays; toggling "Show Original"
+  // returns to the webpage.
+  if (useTranslationForItem && item.translated_content) {
+    const badge = document.createElement("span");
+    badge.className = "translation-badge";
+    badge.textContent = "Bilingual View";
+    meta.appendChild(badge);
+    // The translation content comes from the LLM — untrusted. Sanitise.
+    setSafeHtml(body, item.translated_content);
+    return;
+  }
+
+  // Webview mode — load the actual website in a sandboxed iframe. Both
+  // display paths still converge on the same backend pipeline when the
+  // user switches to text: fetch website HTML → html_to_markdown_pipeline
+  // → Markdown → `marked` → `setSafeHtml`.
   if (showWebView && item.link) {
     detail.classList.add("webview-mode");
     const container = document.createElement("div");
@@ -441,60 +467,16 @@ export function renderItemDetail(item: FeedItem) {
     container.appendChild(loading);
     body.appendChild(container);
 
-    // Get header info for the iframe (title, source, meta)
-    const articleTitle = item.title;
-    const articleDate = item.published_at ? formatDate(item.published_at) : undefined;
-    const articleAuthor = item.author || undefined;
-    const articleLink = item.link || undefined;
-
-    // 1. If we already have `content_md` cached, reuse it (no extra fetch).
-    // 2. Otherwise fetch the website and let the backend run html2md; the
-    //    returned Markdown is what we render. The fetch also populates
-    //    `content_md` so subsequent text-mode renders stay consistent.
-    const renderWithMarkdown = (markdown: string) => {
-      iframeManager.load({
-        container,
-        markdown,
-        baseUrl: item.link || "",
-        sourceName: subName,
-        title: articleTitle,
-        date: articleDate,
-        author: articleAuthor,
-        articleLink: articleLink,
-        loadingEl: loading,
-        onError: (msg) => {
-          loading.textContent = "Failed to load: " + msg;
-        },
-      });
-    };
-
-    if (item.content_md && item.content_md.trim().length > 0) {
-      renderWithMarkdown(item.content_md);
-      return;
-    }
-
-    feedsApi
-      .fetchWebsiteContent(item.link, item.id)
-      .then((markdown) => {
-        renderWithMarkdown(markdown);
-        // Keep `selectedItem.content_md` in sync so a later toggle to
-        // text mode skips the same fetch.
-        item.content_md = markdown;
-      })
-      .catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : String(err);
+    iframeManager.load({
+      container,
+      markdown: "",
+      url: item.link,
+      baseUrl: item.link,
+      loadingEl: loading,
+      onError: (msg) => {
         loading.textContent = "Failed to load: " + msg;
-      });
-    return;
-  }
-
-  if (useTranslationForItem && item.translated_content) {
-    const badge = document.createElement("span");
-    badge.className = "translation-badge";
-    badge.textContent = "Bilingual View";
-    meta.appendChild(badge);
-    // The translation content comes from the LLM — untrusted. Sanitise.
-    setSafeHtml(body, item.translated_content);
+      },
+    });
     return;
   }
 

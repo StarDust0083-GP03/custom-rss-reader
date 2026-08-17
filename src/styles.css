@@ -1777,3 +1777,22 @@ body::after {
     background: var(--accent-soft);
     color: var(--accent-color);
 }
+
+/* ==================== Item source kicker (issue #3) ==================== */
+/* Small-caps source line on list cards — same grammar as .detail-source. */
+.item-source {
+    font-family: var(--font-ui);
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    margin: -0.15rem 0 0.3rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.item-card.active .item-source {
+    color: var(--accent-color);
+}

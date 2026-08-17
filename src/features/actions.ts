@@ -365,6 +365,8 @@ export async function searchItems(query: string) {
         category: null,
         translated_title: null,
         has_translation: false,
+        source_title: null,
+        source_url: null,
       } as unknown as FeedItemSummary));
       renderItems();
       clearLoadingStatus(true, `Found ${results.length} semantic results`);

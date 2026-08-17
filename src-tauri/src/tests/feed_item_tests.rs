@@ -468,3 +468,52 @@ async fn test_find_index_rows_by_ids() {
     assert_eq!(rows[0].id, id1);
     assert_eq!(rows[1].id, id2);
 }
+
+// ---------------------------------------------------------------------------
+// Summary source columns (issue #3: 列表页缺失来源信息)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_summaries_carry_source_title() {
+    let env = TestEnv::new().await;
+    let sub = env
+        .service
+        .add_subscription(NewSubscription {
+            url: "https://example.com/rss".into(),
+            title: Some("Example Feed".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("seed sub");
+    create_item(&env, sub.id, "article").await;
+
+    // Main list path
+    let items = env.feed_repo.find_all(Some(sub.id), 10, 0).await.unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].source_title.as_deref(), Some("Example Feed"));
+    assert_eq!(items[0].source_url.as_deref(), Some("https://example.com/rss"));
+
+    // Search path (different query shape, same join)
+    let hits = env.feed_repo.search("article", 10).await.unwrap();
+    assert_eq!(hits[0].source_title.as_deref(), Some("Example Feed"));
+
+    // Unread path
+    let unread = env.feed_repo.get_unread(None, 10, 0).await.unwrap();
+    assert_eq!(unread[0].source_title.as_deref(), Some("Example Feed"));
+
+    // Titleless subscription → source_url is the fallback display value
+    let sub2 = env
+        .service
+        .add_subscription(NewSubscription {
+            url: "https://bare.com/rss".into(),
+            title: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    create_item(&env, sub2.id, "bare article").await;
+    let all = env.feed_repo.find_all(None, 10, 0).await.unwrap();
+    let bare = all.iter().find(|i| i.subscription_id == sub2.id).unwrap();
+    assert_eq!(bare.source_title, None);
+    assert_eq!(bare.source_url.as_deref(), Some("https://bare.com/rss"));
+}

@@ -40,6 +40,11 @@ export interface IframeLoadRequest {
   container: HTMLElement;
   /** Article body in Markdown — produced by the backend `html2md` pipeline. */
   markdown: string;
+  /**
+   * Load the REAL website URL directly (webview mode, issue #2). When set,
+   * `markdown` is ignored and the iframe navigates to this address.
+   */
+  url?: string;
   /** Article URL; used to resolve any remaining relative URLs. */
   baseUrl: string;
   /** Feed source name (e.g., "Hacker News") */
@@ -81,9 +86,14 @@ export class IframeManager {
   }
 
   private renderIframe(request: IframeLoadRequest, gen: number): void {
-    const { container, markdown, baseUrl, sourceName, title, date, author, articleLink, loadingEl, onComplete, onError } = request;
+    const { container, markdown, baseUrl, sourceName, title, date, author, articleLink, loadingEl, onComplete, onError, url } = request;
     if (gen !== this.generation) return; // superseded
     if (!container.isConnected) return;
+
+    if (url) {
+      this.renderDirectUrl(request, url, gen);
+      return;
+    }
 
     // Build the document: minimal head, then the sanitized article body.
     // Pass CSS variables so the iframe matches the parent page styles (including dark mode).
@@ -146,6 +156,64 @@ export class IframeManager {
       if (placeholder?.isConnected) placeholder.remove();
       if (onComplete) onComplete();
     }, 250);
+  }
+
+  /**
+   * Webview mode (issue #2): load the actual website in the iframe.
+   *
+   * The sandbox keeps the page isolated from the host app (opaque origin,
+   * no top-level navigation) while allowing the scripts, forms and popups
+   * real sites need to render. X-Frame-Options-refusing sites can't be
+   * framed by any browser — for those the placeholder turns into a hint
+   * pointing at the "Open in browser" link in the article header.
+   */
+  private renderDirectUrl(request: IframeLoadRequest, url: string, gen: number): void {
+    const { container, loadingEl, onComplete, onError } = request;
+    const placeholder = loadingEl ?? null;
+    container.replaceChildren();
+    if (placeholder) {
+      placeholder.dataset.gen = String(gen);
+      placeholder.textContent = "Loading webpage...";
+      container.appendChild(placeholder);
+    }
+
+    const iframe = document.createElement("iframe");
+    iframe.className = "rss-reader-iframe";
+    iframe.setAttribute(
+      "sandbox",
+      "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-same-origin",
+    );
+    iframe.setAttribute("referrerpolicy", "no-referrer");
+    iframe.setAttribute("data-gen", String(gen));
+    iframe.src = url;
+
+    const finishError = (msg: string) => {
+      if (gen !== this.generation) return;
+      if (placeholder?.isConnected) {
+        placeholder.textContent = `Failed to load: ${msg}`;
+      }
+      if (onError) onError(msg);
+    };
+    iframe.addEventListener("error", () => finishError("iframe load failed"));
+    iframe.addEventListener("load", () => {
+      if (gen !== this.generation) return;
+      if (placeholder?.isConnected) placeholder.remove();
+      if (onComplete) onComplete();
+    });
+
+    container.appendChild(iframe);
+
+    // XFO/CSP-refusing sites often fire `load` with an empty/error document
+    // or never fire anything. Either way, retire the placeholder after a
+    // grace period and hint at the header's "Open in browser" link instead
+    // of spinning forever.
+    window.setTimeout(() => {
+      if (gen !== this.generation) return;
+      if (placeholder?.isConnected) {
+        placeholder.textContent =
+          "Still loading — this site may refuse embedding. Use “Open in browser →” in the article header if it stays blank.";
+      }
+    }, 6000);
   }
 }
 

@@ -40,8 +40,6 @@ export interface AppState {
   chromaEnabled: boolean;
   /** Per-subscription webview on/off preference. */
   webviewPerSubscription: Map<number, boolean>;
-  /** Per-subscription explicit override (set when user toggles). */
-  webviewOverride: Set<number>;
   /** Per-item translation progress, keyed by item id. */
   translationStateByItemId: Map<number, TranslationState>;
   /** Last item click timestamp for the "ignored" timer. */
@@ -60,7 +58,6 @@ export const state: AppState = {
   searchMode: "text",
   chromaEnabled: false,
   webviewPerSubscription: new Map(),
-  webviewOverride: new Set(),
   translationStateByItemId: new Map(),
   lastSelectedAt: 0,
 };

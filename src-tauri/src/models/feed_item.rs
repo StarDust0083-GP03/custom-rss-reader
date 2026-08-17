@@ -56,6 +56,10 @@ pub struct FeedItemSummary {
     pub translated_title: Option<String>,
     /// Whether a translated content exists (without transferring it).
     pub has_translation: bool,
+    /// Source (subscription) title, joined in for list views (issue #3).
+    pub source_title: Option<String>,
+    /// Source (subscription) URL — fallback display when the feed has no title.
+    pub source_url: Option<String>,
 }
 
 /// Input for creating a new feed item.
