@@ -187,12 +187,37 @@ body::after {
 }
 
 /* ---------- App frame ---------- */
+/* Column widths are CSS variables so the resizers can drag them and the
+   widths persist across sessions (see src/ui/layout.ts). The two 8px
+   tracks are the drag handles. */
 .app-container {
     display: grid;
-    grid-template-columns: 280px 380px 1fr;
+    grid-template-columns: var(--col-sidebar, 280px) 8px var(--col-items, 380px) 8px minmax(0, 1fr);
     flex: 1;
     overflow: hidden;
     padding-bottom: 32px;
+}
+
+/* Column drag handles — the 8px grid tracks. Hover shows a hairline; the
+   handle stays grabbable even when its column is collapsed to 0. */
+.col-resizer {
+    cursor: col-resize;
+    position: relative;
+    background: transparent;
+}
+
+.col-resizer::after {
+    content: "";
+    position: absolute;
+    inset: 0 3px;
+    background: var(--accent-color);
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.col-resizer:hover::after,
+.col-resizer.active::after {
+    opacity: 0.55;
 }
 
 /* 左栏：订阅列表 */
@@ -1630,6 +1655,11 @@ body::after {
         grid-template-columns: 250px 1fr;
     }
 
+    /* Resizers only make sense in the 3-column desktop layout */
+    .col-resizer {
+        display: none;
+    }
+
     .detail-panel {
         display: none;
         position: fixed;
@@ -1738,6 +1768,79 @@ body::after {
     font-size: 0.92rem;
     line-height: 1.5;
     color: var(--text-secondary);
+}
+
+/* ==================== Overflow menus (⋯) ==================== */
+/* Ghost "⋯" button — same grammar as the shared header buttons. */
+.menu-btn {
+    font-size: 1rem !important;
+    padding: 0.3rem 0.55rem !important;
+    letter-spacing: 0 !important;
+}
+
+.dropdown-menu {
+    display: none;
+    position: fixed;
+    z-index: 300;
+    min-width: 180px;
+    max-width: 240px;
+    padding: 4px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-top: 2px solid var(--accent-color);
+    border-radius: 4px;
+    box-shadow: var(--shadow-lg);
+}
+
+.dropdown-menu.open {
+    display: block;
+}
+
+.dropdown-item {
+    display: block;
+    width: 100%;
+    padding: 0.42rem 0.65rem;
+    border: none;
+    border-radius: 2px;
+    background: none;
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 0.82rem;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+}
+
+.dropdown-item:hover:not(:disabled) {
+    background: var(--accent-soft);
+    color: var(--accent-color);
+}
+
+.dropdown-item:disabled {
+    color: var(--muted-color);
+    cursor: default;
+    opacity: 0.6;
+}
+
+/* Item action icons (read / favorite / later / open) */
+.detail-item-actions button,
+.detail-item-actions a {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.95rem;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.detail-item-actions button.active,
+.detail-item-actions button.active:hover {
+    background: var(--accent-soft);
+    color: var(--accent-color);
+    border-color: var(--accent-color);
 }
 
 /* ==================== Tag filter menu ==================== */

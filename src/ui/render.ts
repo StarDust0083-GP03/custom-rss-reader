@@ -353,7 +353,7 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
   const openLinkBtn = document.getElementById("open-link-btn") as HTMLAnchorElement | null;
   const translateBtn = document.getElementById("translate-btn");
   if (markReadBtn) {
-    markReadBtn.textContent = item.is_read ? "Unread" : "Read";
+    // Icon-only button (✓) — the active state carries the read styling.
     markReadBtn.classList.toggle("active", item.is_read);
   }
   if (favoriteBtn) favoriteBtn.classList.toggle("active", item.is_favorite);

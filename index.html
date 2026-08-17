@@ -16,17 +16,14 @@
                 <div class="sidebar-header">
                     <h1>RSS Reader</h1>
                     <div class="sidebar-actions">
-                        <button id="add-feed-btn" title="Add Feed">+</button>
-                        <button id="import-opml-btn" title="Import OPML">
-                            Import
-                        </button>
-                        <button id="export-opml-btn" title="Export OPML">
-                            Export
-                        </button>
-                        <button id="refresh-all-btn" title="Refresh All">
-                            ↻
-                        </button>
-                    </div>
+                    <button id="add-feed-btn" title="Add Feed">+</button>
+                    <button id="refresh-all-btn" title="Refresh All">↻</button>
+                    <button id="sidebar-menu-btn" class="menu-btn" title="More">⋯</button>
+                </div>
+                <div id="sidebar-menu" class="dropdown-menu">
+                    <button type="button" class="dropdown-item" data-action="import-opml">Import OPML</button>
+                    <button type="button" class="dropdown-item" data-action="export-opml">Export OPML</button>
+                </div>
                 </div>
 
                 <div class="sidebar-content">
@@ -44,14 +41,20 @@
                 </div>
             </aside>
 
+            <!-- 列宽调节柄：拖动调宽，双击折叠/展开 -->
+            <div class="col-resizer" id="resizer-sidebar" title="拖动调宽，双击折叠/展开"></div>
+
             <!-- 中栏：内容列表 -->
             <section class="items-panel">
                 <div class="items-header">
                     <h2 id="current-feed-title">All Items</h2>
                     <div class="header-actions">
                         <button id="recommend-btn" title="AI Recommended Reads">★ Picks</button>
-                        <button id="mark-all-read-btn" title="Mark All as Read">Mark All Read</button>
-                        <button id="chroma-settings-btn" title="ChromaDB Settings">Semantic DB</button>
+                        <button id="items-menu-btn" class="menu-btn" title="More">⋯</button>
+                    </div>
+                    <div id="items-menu" class="dropdown-menu">
+                        <button type="button" class="dropdown-item" data-action="mark-all-read">Mark All Read</button>
+                        <button type="button" class="dropdown-item" data-action="chroma-settings">Semantic DB…</button>
                     </div>
                     <div class="search-box">
                         <button id="search-mode-btn" class="search-mode-btn" title="Toggle search mode">Text</button>
@@ -63,21 +66,27 @@
                 </div>
             </section>
 
+            <!-- 列宽调节柄：拖动调宽，双击折叠/展开 -->
+            <div class="col-resizer" id="resizer-items" title="拖动调宽，双击折叠/展开"></div>
+
             <!-- 右栏：内容详情 -->
             <section class="detail-panel">
                 <div class="detail-header">
                     <div class="detail-actions">
                         <button id="toggle-webview-btn" title="Toggle Web View">Web View</button>
                         <button id="translate-btn" title="Translate">Translate</button>
-                        <button id="classify-btn" title="Classify">Tags</button>
-                        <button id="similar-btn" title="Find Similar Articles" style="display:none">Similar</button>
-                        <button id="ai-settings-btn" title="AI Settings">AI</button>
+                        <button id="detail-menu-btn" class="menu-btn" title="More">⋯</button>
+                    </div>
+                    <div id="detail-menu" class="dropdown-menu">
+                        <button type="button" class="dropdown-item" data-action="classify">Classify Tags</button>
+                        <button type="button" class="dropdown-item" data-action="similar" id="similar-menu-item">Find Similar</button>
+                        <button type="button" class="dropdown-item" data-action="ai-settings">AI Settings…</button>
                     </div>
                     <div class="detail-item-actions">
-                        <button id="mark-read-btn" title="Mark as Read/Unread">Read</button>
-                        <button id="favorite-btn" title="Favorite">Favorite</button>
-                        <button id="read-later-btn" title="Read Later">Later</button>
-                        <a id="open-link-btn" href="#" target="_blank" title="Open in Browser">Open</a>
+                        <button id="mark-read-btn" title="Toggle read state">✓</button>
+                        <button id="favorite-btn" title="Favorite">★</button>
+                        <button id="read-later-btn" title="Read later">◷</button>
+                        <a id="open-link-btn" href="#" target="_blank" title="Open in Browser">↗</a>
                     </div>
                 </div>
                 <div class="detail-content" id="detail-content">

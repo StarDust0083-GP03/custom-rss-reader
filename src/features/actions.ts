@@ -150,7 +150,6 @@ export async function markAsRead(itemId: number, isRead: boolean) {
     S.selectedItem.is_read = isRead;
     const markReadBtn = document.getElementById("mark-read-btn");
     if (markReadBtn) {
-      markReadBtn.textContent = isRead ? "Unread" : "Read";
       markReadBtn.classList.toggle("active", isRead);
     }
   }
