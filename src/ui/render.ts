@@ -314,7 +314,18 @@ export function formatDate(dateString: string): string {
 // Check if text contains markdown syntax that marked can render.
 // Untrusted fields use textContent; only known-safe HTML is inserted via
 // setSafeHtml (which sanitises via src/sanitize.ts).
-export function renderItemDetail(item: FeedItem) {
+/** Optional rendering context for streaming translations. */
+export interface RenderDetailOptions {
+  /**
+   * Untranslated remainder of the source markdown during streaming. When
+   * set, the bilingual view renders the completed paragraphs AND this tail
+   * below them — untranslated content must stay visible while streaming,
+   * with each finished paragraph substituting its original in place.
+   */
+  untranslatedTail?: string;
+}
+
+export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {}) {
   cancelIgnoreTimerLocal();
   const detail = document.getElementById("detail-content");
   if (!detail) return;
@@ -449,7 +460,21 @@ export function renderItemDetail(item: FeedItem) {
     badge.textContent = "Bilingual View";
     meta.appendChild(badge);
     // The translation content comes from the LLM — untrusted. Sanitise.
-    setSafeHtml(body, item.translated_content);
+    const bilingualEl = document.createElement("div");
+    bilingualEl.className = "bilingual-content";
+    setSafeHtml(bilingualEl, item.translated_content);
+    body.appendChild(bilingualEl);
+
+    // Streaming: keep the untranslated remainder visible below the
+    // finished paragraphs. Completed paragraphs substitute their originals
+    // (the bilingual pairs above); the rest of the article is NOT removed.
+    if (opts.untranslatedTail && opts.untranslatedTail.trim()) {
+      const tailEl = document.createElement("div");
+      tailEl.className = "untranslated-tail";
+      const html = marked.parse(opts.untranslatedTail, { gfm: true }) as string;
+      setSafeHtml(tailEl, html);
+      body.appendChild(tailEl);
+    }
     return;
   }
 

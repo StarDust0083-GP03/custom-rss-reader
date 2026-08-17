@@ -1796,3 +1796,13 @@ body::after {
 .item-card.active .item-source {
     color: var(--accent-color);
 }
+
+/* ==================== Streaming untranslated tail ==================== */
+/* While a translation streams in, the finished bilingual pairs render first
+   and the not-yet-translated remainder continues below — separated by a
+   hairline so the substitution point is visible. */
+.untranslated-tail {
+    margin-top: 1.25rem;
+    padding-top: 1.25rem;
+    border-top: 1px dashed var(--border-color);
+}

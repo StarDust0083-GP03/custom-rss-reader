@@ -205,9 +205,16 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
             // streaming display identical in both modes; an error mid-stream
             // resets it to false and falls back to the original view.
             currentState.useTranslation = true;
-            // 只有当前选中的文章才渲染
+            // 只有当前选中的文章才渲染 — pass the untranslated remainder so
+            // the body shows [finished bilingual pairs] + [original tail];
+            // nothing is hidden while the stream is in flight.
             if (S.selectedItem?.id === item.id) {
-              renderItemDetail({ ...item, translated_content: currentState.inProgressContent });
+              const source = item.content_md ?? item.description ?? "";
+              const tail = untranslatedTail(source, currentState.inProgressContent ?? "");
+              renderItemDetail(
+                { ...item, translated_content: currentState.inProgressContent },
+                { untranslatedTail: tail },
+              );
             }
           }
         }
@@ -432,4 +439,44 @@ function renderRecommendations(recs: Recommendation[]) {
     });
     list.appendChild(row);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Streaming tail computation
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute the untranslated remainder of `source` given the bilingual HTML
+ * accumulated so far.
+ *
+ * Each completed chunk carries its ORIGINAL text inside a
+ * `.paragraph-original` div (the LLM is instructed to preserve it verbatim).
+ * We walk the originals in document order and sequentially cut each one out
+ * of the source; whatever remains after the last completed original is the
+ * untranslated tail that must stay visible while streaming.
+ *
+ * An original that the LLM paraphrased (verbatim match not found) is simply
+ * skipped — worst case one paragraph appears both translated and in the
+ * tail, which is far better than hiding untranslated content.
+ */
+function untranslatedTail(source: string, bilingualHtml: string): string {
+  if (!source.trim() || !bilingualHtml.trim()) {
+    return "";
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = bilingualHtml;
+  const originals = Array.from(
+    template.content.querySelectorAll(".paragraph-original"),
+  );
+
+  let remaining = source;
+  for (const el of originals) {
+    const needle = (el.textContent ?? "").trim();
+    if (!needle) continue;
+    const idx = remaining.indexOf(needle);
+    if (idx === -1) continue; // paraphrased — skip rather than mis-cut
+    remaining = remaining.slice(idx + needle.length);
+  }
+  return remaining.trim();
 }
