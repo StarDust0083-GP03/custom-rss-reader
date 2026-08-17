@@ -30,6 +30,25 @@ const SAFE_ATTRS: Record<string, Set<string>> = {
   td: new Set(["colspan", "rowspan"]),
 };
 
+/**
+ * Class tokens allowed to survive sanitisation. Only the translation
+ * pipeline's known wrapper classes — anything else (attacker-chosen
+ * utility/hook classes) is dropped. Without this the bilingual view lost
+ * every `paragraph-original` / `paragraph-translated` class, so neither the
+ * styling nor the markdown re-rendering below could find its targets.
+ */
+const SAFE_CLASSES = new Set([
+  "bilingual-content",
+  "translation-paragraph",
+  "paragraph-block",
+  "paragraph-original",
+  "paragraph-translated",
+  "translation-segment",
+  "original-content",
+  "translated-content",
+  "translation-badge",
+]);
+
 const ALLOWED_URL_SCHEMES = ["http:", "https:", "mailto:"];
 
 /** Replace every HTML-special character with its entity. */
@@ -144,6 +163,18 @@ function sanitizeAttributes(el: Element): void {
     const name = attr.name.toLowerCase();
     if (name.startsWith("on")) {
       el.removeAttributeNode(attr);
+      continue;
+    }
+    if (name === "class") {
+      // Keep only known translation-pipeline classes.
+      const safe = attr.value
+        .split(/\s+/)
+        .filter((c) => SAFE_CLASSES.has(c));
+      if (safe.length > 0) {
+        el.setAttribute("class", safe.join(" "));
+      } else {
+        el.removeAttributeNode(attr);
+      }
       continue;
     }
     if (!allowedSet.has(name)) {

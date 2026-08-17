@@ -1806,3 +1806,30 @@ body::after {
     padding-top: 1.25rem;
     border-top: 1px dashed var(--border-color);
 }
+
+/* Original side of a bilingual pair renders markdown — keep its headers
+   modest so they don't compete with the article headline, and make the
+   formatting visually secondary to the translated voice below. */
+.paragraph-original h1,
+.paragraph-original h2,
+.paragraph-original h3,
+.paragraph-original h4,
+.paragraph-original h5,
+.paragraph-original h6 {
+    font-size: 1.05rem;
+    line-height: 1.35;
+    margin: 0.1rem 0;
+    color: inherit;
+}
+
+.paragraph-original a {
+    color: inherit;
+    text-decoration: underline;
+    text-decoration-color: var(--border-color);
+    text-underline-offset: 2px;
+}
+
+.paragraph-original code,
+.paragraph-original pre {
+    font-size: 0.85em;
+}

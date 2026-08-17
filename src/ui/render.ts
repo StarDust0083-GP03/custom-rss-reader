@@ -463,6 +463,16 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
     const bilingualEl = document.createElement("div");
     bilingualEl.className = "bilingual-content";
     setSafeHtml(bilingualEl, item.translated_content);
+    // The original side carries the article's MARKDOWN (the translation
+    // source is content_md). Render it through marked so `**bold**`,
+    // `[links](…)`, `# headers` etc. display as formatting instead of
+    // literal syntax; sanitise again because the markdown is untrusted.
+    bilingualEl.querySelectorAll(".paragraph-original").forEach((el) => {
+      const raw = el.textContent ?? "";
+      if (!raw.trim()) return;
+      const html = marked.parse(raw, { gfm: true }) as string;
+      setSafeHtml(el, html);
+    });
     body.appendChild(bilingualEl);
 
     // Streaming: keep the untranslated remainder visible below the
