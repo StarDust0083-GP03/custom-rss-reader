@@ -2233,15 +2233,19 @@ html[data-theme="vscode-dark"] {
     --danger-color: #f14c4c; --success-color: #89d185; --warning-color: #cca700;
 }
 
-/* Peek reveal — source label clicked, row flashed without selecting */
-.subscription-item.reveal {
+/* Peek reveal — source label clicked: only the TITLE TEXT area flashes,
+   the row line itself stays untouched */
+.subscription-item.reveal .subscription-title {
     background: var(--accent-soft);
-    border-left-color: var(--accent-color);
+    color: var(--accent-color);
+    border-radius: 4px;
+    padding: 0.1em 0.45em;
+    margin-left: -0.45em;
     animation: reveal-pulse 1.6s ease;
 }
 
 @keyframes reveal-pulse {
-    0% { background: var(--accent-soft); border-left-color: var(--accent-color); }
-    70% { background: var(--accent-soft); border-left-color: var(--accent-color); }
-    100% { background: transparent; }
+    0% { background: var(--accent-soft); color: var(--accent-color); }
+    70% { background: var(--accent-soft); color: var(--accent-color); }
+    100% { background: transparent; color: inherit; }
 }
