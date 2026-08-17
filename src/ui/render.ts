@@ -479,6 +479,20 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
       const html = marked.parse(raw, { gfm: true }) as string;
       setSafeHtml(el, html);
     });
+
+    // Translated side: models echo markdown links (and bare URLs) despite
+    // the "clean text" instruction. Rendered as raw HTML those show as
+    // literal `[text](url)` — re-render them so links actually work, the
+    // same treatment the original side gets. Only element-free text that
+    // actually contains link-ish syntax is touched, to avoid mangling
+    // clean translated prose.
+    bilingualEl.querySelectorAll(".paragraph-translated").forEach((el) => {
+      if (el.children.length > 0) return; // real HTML — keep as-is
+      const raw = el.textContent ?? "";
+      if (!raw.trim() || !/\[[^\]]*\]\(|https?:\/\//.test(raw)) return; // no links
+      const html = marked.parse(raw, { gfm: true }) as string;
+      setSafeHtml(el, html);
+    });
     body.appendChild(bilingualEl);
 
     // Streaming: keep the untranslated remainder visible below the
