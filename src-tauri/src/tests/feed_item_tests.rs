@@ -517,3 +517,48 @@ async fn test_summaries_carry_source_title() {
     assert_eq!(bare.source_title, None);
     assert_eq!(bare.source_url.as_deref(), Some("https://bare.com/rss"));
 }
+
+// ---------------------------------------------------------------------------
+// Bulk flags: mark all unread / favorite (menu bulk actions)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_mark_all_unread_and_favorite() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+    let a = create_item(&env, sub_id, "a").await;
+    let b = create_item(&env, sub_id, "b").await;
+
+    // Seed: a read + favorited, b unread
+    env.feed_repo.mark_read(a, true).await.unwrap();
+    env.feed_repo.mark_all_favorite(None, true).await.unwrap();
+    assert!(env.feed_repo.find_by_id(a).await.unwrap().is_read);
+    assert!(env.feed_repo.find_by_id(a).await.unwrap().is_favorite);
+
+    // Mark all unread (whole DB)
+    env.feed_repo.mark_all_unread(None).await.unwrap();
+    assert!(!env.feed_repo.find_by_id(a).await.unwrap().is_read);
+    assert!(!env.feed_repo.find_by_id(b).await.unwrap().is_read);
+
+    // Unfavorite all
+    env.feed_repo.mark_all_favorite(None, false).await.unwrap();
+    assert!(!env.feed_repo.find_by_id(a).await.unwrap().is_favorite);
+    assert!(!env.feed_repo.find_by_id(b).await.unwrap().is_favorite);
+
+    // Scoped: only subscription sub_id is affected
+    let sub2 = env
+        .service
+        .add_subscription(NewSubscription {
+            url: "https://other.com/rss".into(),
+            title: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let c = create_item(&env, sub2.id, "c").await;
+    env.feed_repo.mark_read(c, true).await.unwrap();
+    env.feed_repo.mark_all_unread(Some(sub_id)).await.unwrap();
+    assert!(env.feed_repo.find_by_id(c).await.unwrap().is_read, "other sub untouched");
+    env.feed_repo.mark_all_favorite(Some(sub_id), true).await.unwrap();
+    assert!(!env.feed_repo.find_by_id(c).await.unwrap().is_favorite, "other sub untouched");
+}

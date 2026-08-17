@@ -112,6 +112,8 @@ pub fn run() {
             get_all_tags,
             mark_item_read,
             mark_all_read,
+            mark_all_unread,
+            mark_all_favorite,
             toggle_favorite,
             toggle_read_later,
             toggle_ignored,

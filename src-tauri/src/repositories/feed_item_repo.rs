@@ -575,6 +575,52 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         Ok(())
     }
 
+    async fn mark_all_unread(&self, subscription_id: Option<i64>) -> Result<()> {
+        match subscription_id {
+            Some(id) => {
+                sqlx::query(
+                    "UPDATE feed_items SET is_read = 0 WHERE subscription_id = $1 AND is_read = 1",
+                )
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            }
+            None => {
+                sqlx::query("UPDATE feed_items SET is_read = 0 WHERE is_read = 1")
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn mark_all_favorite(
+        &self,
+        subscription_id: Option<i64>,
+        is_favorite: bool,
+    ) -> Result<()> {
+        match subscription_id {
+            Some(id) => {
+                sqlx::query(&format!(
+                    "UPDATE feed_items SET is_favorite = {v} WHERE subscription_id = $1 AND is_favorite != {v}",
+                    v = if is_favorite { 1 } else { 0 }
+                ))
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            }
+            None => {
+                sqlx::query(&format!(
+                    "UPDATE feed_items SET is_favorite = {v} WHERE is_favorite != {v}",
+                    v = if is_favorite { 1 } else { 0 }
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn toggle_favorite(&self, id: i64) -> Result<bool> {
         self.toggle_flag(id, "is_favorite").await
     }

@@ -147,6 +147,10 @@ export const items = {
     call<FeedItem>("mark_item_read", { itemId: id, isRead }, "items.markRead"),
   markAllRead: (subscriptionId?: number | null) =>
     call<void>("mark_all_read", { subscriptionId: subscriptionId ?? null }, "items.markAllRead"),
+  markAllUnread: (subscriptionId?: number | null) =>
+    call<void>("mark_all_unread", { subscriptionId: subscriptionId ?? null }, "items.markAllUnread"),
+  markAllFavorite: (subscriptionId: number | null, isFavorite: boolean) =>
+    call<void>("mark_all_favorite", { subscriptionId, isFavorite }, "items.markAllFavorite"),
   toggleFavorite: (id: number) => call<boolean>("toggle_favorite", { itemId: id }, "items.toggleFavorite"),
   toggleReadLater: (id: number) =>
     call<boolean>("toggle_read_later", { itemId: id }, "items.toggleReadLater"),
