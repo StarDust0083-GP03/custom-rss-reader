@@ -2076,29 +2076,53 @@ html[data-theme="noir"] {
 
 .theme-swatches {
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
-    gap: 0.45rem;
-    align-items: center;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.4rem;
+    align-items: stretch;
 }
 
+/* Theme card: color chip + name, in a 2-column matrix */
 .theme-swatch {
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    border: 2px solid var(--border-color);
-    background: var(--swatch, var(--bg-primary));
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.32rem 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 0.7rem;
     cursor: pointer;
-    padding: 0;
-    transition: transform 0.12s ease, border-color 0.12s ease;
+    text-align: left;
+    transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+}
+
+.theme-chip {
+    width: 20px;
+    height: 20px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    border: 1px solid var(--border-color);
+    background: linear-gradient(135deg, var(--chip-bg, var(--bg-primary)) 55%, var(--chip-accent, var(--accent-color)) 55%);
+}
+
+.theme-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .theme-swatch:hover {
-    transform: scale(1.15);
+    background: var(--bg-tertiary);
+    border-color: var(--muted-color);
+    transform: translateY(-1px);
 }
 
 .theme-swatch.active {
     border-color: var(--accent-color);
-    box-shadow: 0 0 0 2px var(--accent-soft);
+    background: var(--accent-soft);
+    font-weight: 600;
 }
 html[data-theme="onedark"] {
     --bg-primary: #282c34; --bg-secondary: #21252b; --bg-tertiary: #2c313a;
