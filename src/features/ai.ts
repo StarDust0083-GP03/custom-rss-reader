@@ -197,6 +197,14 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
               }
               currentState.inProgressContent += `\n${normalizedChunk}`;
             }
+            // Show the streaming partial LIVE. Without this, `useTranslation`
+            // stays false until completion and the bilingual view never
+            // renders mid-stream — in webview mode the pane kept showing the
+            // webpage and in text mode the original markdown, so translation
+            // looked broken/idle until the very end. Flipping it here makes
+            // streaming display identical in both modes; an error mid-stream
+            // resets it to false and falls back to the original view.
+            currentState.useTranslation = true;
             // 只有当前选中的文章才渲染
             if (S.selectedItem?.id === item.id) {
               renderItemDetail({ ...item, translated_content: currentState.inProgressContent });

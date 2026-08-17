@@ -34,7 +34,7 @@ export function updateToggleButtonStates() {
   const webviewBtn = document.getElementById("toggle-webview-btn") as HTMLButtonElement;
 
   if (webviewBtn) {
-    webviewBtn.textContent = S.useWebView ? "Text" : "Web View";
+    webviewBtn.textContent = S.useWebView ? "Markdown" : "Web View";
   }
 }
 
@@ -333,7 +333,7 @@ export function renderItemDetail(item: FeedItem) {
 
   // Toggle button label
   const toggleBtn = document.getElementById("toggle-webview-btn") as HTMLButtonElement | null;
-  if (toggleBtn) toggleBtn.textContent = showWebView ? "Text" : "Web View";
+  if (toggleBtn) toggleBtn.textContent = showWebView ? "Markdown" : "Web View";
 
   // Top action buttons (read / favorite / read-later / open)
   const markReadBtn = document.getElementById("mark-read-btn");

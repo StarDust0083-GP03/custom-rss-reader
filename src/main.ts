@@ -175,7 +175,7 @@ async function init() {
 
       // 更新按钮状态并重新渲染详情
       const btn = document.getElementById("toggle-webview-btn") as HTMLButtonElement;
-      btn.textContent = S.useWebView ? "Text" : "Web View";
+      btn.textContent = S.useWebView ? "Markdown" : "Web View";
       renderItemDetail(selectedItem);
 
       // 然后在后台更新后端状态

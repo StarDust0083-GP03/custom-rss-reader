@@ -45,20 +45,23 @@ pub async fn translate_item_bilingual_streaming(
     state: State<'_, AppState>,
     item_id: i64,
 ) -> Result<String> {
-    let item = state.feed_repo.find_by_id(item_id).await?;
-    let content = if item.is_website_content {
-        item.content_md
-            .as_ref()
-            .or(item.content.as_ref())
-            .or(item.description.as_ref())
-    } else {
-        item.content
-            .as_ref()
-            .or(item.content_md.as_ref())
-            .or(item.description.as_ref())
-    }
-    .ok_or_else(|| AppError::OperationFailed("No content to translate".into()))?
-    .clone();
+    // Lazily fill content_md first, then ALWAYS prefer it as the translation
+    // source: text mode renders exactly this markdown, so the bilingual
+    // original side matches the displayed article paragraph for paragraph —
+    // identical output regardless of webview/text mode. (Previously RSS
+    // items translated raw `content` HTML while the pane showed markdown,
+    // so originals and display diverged.)
+    let item =
+        crate::services::feed_service::ensure_content_md_for_item(&state.feed_repo, item_id)
+            .await?;
+    let content = item
+        .content_md
+        .as_ref()
+        .filter(|md| !md.trim().is_empty())
+        .or(item.content.as_ref())
+        .or(item.description.as_ref())
+        .ok_or_else(|| AppError::OperationFailed("No content to translate".into()))?
+        .clone();
     translate_streaming_inner(&app_handle, &state, item_id, TranslateRequest { content }).await
 }
 

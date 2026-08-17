@@ -551,12 +551,7 @@ pub fn extract_blocks(content: &str, max_chars: usize) -> Vec<String> {
     }
 
     if blocks.is_empty() {
-        for para in content.split("\n\n") {
-            let trimmed = para.trim();
-            if !trimmed.is_empty() && trimmed.len() > 5 {
-                blocks.push(trimmed.to_string());
-            }
-        }
+        blocks = split_markdown_blocks(content);
     }
 
     if blocks.is_empty() {
@@ -567,6 +562,75 @@ pub fn extract_blocks(content: &str, max_chars: usize) -> Vec<String> {
     }
 
     merge_small_blocks(blocks, max_chars)
+}
+
+/// Is this line an ATX markdown header (`#` … `######` + text)?
+fn is_atx_header(line: &str) -> bool {
+    let t = line.trim_start();
+    let hashes = t.chars().take_while(|&c| c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return false;
+    }
+    // A space after the hashes is required (or a bare `#` empty header).
+    t.as_bytes().get(hashes) == Some(&b' ') || t.len() == hashes
+}
+
+/// Is this BLOCK a standalone header translation unit? True for single-line
+/// ATX markdown headers and single `<h1>`–`<h6>` HTML blocks — both render
+/// as standalone headings, so both must stay individual paragraphs in the
+/// bilingual output.
+fn is_header_block(block: &str) -> bool {
+    let mut lines = block.lines();
+    let Some(first) = lines.next() else { return false };
+    if lines.next().is_some() {
+        return false; // multi-line → a paragraph, not a bare header
+    }
+    if is_atx_header(first) {
+        return true;
+    }
+    let lower = first.trim_start().to_ascii_lowercase();
+    (1..=6).any(|n| {
+        lower.starts_with(&format!("<h{}>", n)) || lower.starts_with(&format!("<h{} ", n))
+    })
+}
+
+/// Split markdown / plain-text content into paragraph blocks.
+///
+/// Blank lines separate paragraphs. ATX headers (`# Title`) are ALWAYS
+/// individual blocks — even without a blank line after them — because they
+/// render as standalone headings and must also be standalone translation
+/// units (otherwise the header merges with its body into one bilingual
+/// paragraph and the display order breaks).
+fn split_markdown_blocks(content: &str) -> Vec<String> {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    fn flush(current: &mut String, blocks: &mut Vec<String>) {
+        let trimmed = current.trim().to_string();
+        // Preserve the original >5-char filter for plain paragraphs so tiny
+        // fragments ("ok.", "—") stay out of the translation pipeline.
+        if trimmed.len() > 5 {
+            blocks.push(trimmed);
+        }
+        current.clear();
+    }
+
+    for line in content.lines() {
+        if is_atx_header(line) {
+            flush(&mut current, &mut blocks);
+            // Headers are exempt from the length filter — even `# News`.
+            blocks.push(line.trim().to_string());
+        } else if line.trim().is_empty() {
+            flush(&mut current, &mut blocks);
+        } else {
+            if !current.is_empty() {
+                current.push('\n');
+            }
+            current.push_str(line.trim_end());
+        }
+    }
+    flush(&mut current, &mut blocks);
+    blocks
 }
 
 /// Extract blocks from HTML content in document order.
@@ -717,6 +781,19 @@ pub fn merge_small_blocks(blocks: Vec<String>, max_chars: usize) -> Vec<String> 
 
     for block in &blocks {
         let block_len = block.len();
+
+        // Headers are standalone translation units — never merged with
+        // neighbouring paragraphs. A merged "# Title + body" block renders
+        // as ONE bilingual paragraph and breaks the heading/body pairing.
+        if is_header_block(block) {
+            if !current.is_empty() {
+                merged.push(current.clone());
+                current.clear();
+                current_len = 0;
+            }
+            merged.push(block.clone());
+            continue;
+        }
 
         if block_len > max_chars {
             if !current.is_empty() {
@@ -1138,6 +1215,62 @@ mod tests {
         assert!(blocks.len() >= 4);
         // The first block should contain "Title"
         assert!(blocks[0].contains("Title"));
+    }
+
+    // -----------------------------------------------------------------------
+    // headers as individual translation paragraphs
+    // -----------------------------------------------------------------------
+
+    /// Regression (issue #2 follow-up): a markdown header used to merge with
+    /// the following paragraph in `merge_small_blocks`, so the bilingual
+    /// output showed "# Title + body" as ONE paragraph.
+    #[test]
+    fn test_extract_blocks_header_is_individual_paragraph() {
+        let md = "# Chapter One\n\nThis is the first body paragraph of the chapter.";
+        let blocks = extract_blocks(md, MAX_CHARS_PER_SEGMENT);
+        assert!(blocks.len() >= 2, "header must not merge with body, got {:?}", blocks);
+        assert_eq!(blocks[0], "# Chapter One");
+        assert!(blocks[1].contains("first body paragraph"));
+    }
+
+    /// Header directly followed by body text (no blank line) must still be
+    /// its own block — the old `split("\n\n")` kept them glued together.
+    #[test]
+    fn test_extract_blocks_header_without_blank_line() {
+        let md = "## Section Title\nBody starts right here without a blank line.";
+        let blocks = extract_blocks(md, MAX_CHARS_PER_SEGMENT);
+        assert!(blocks.len() >= 2, "got {:?}", blocks);
+        assert_eq!(blocks[0], "## Section Title");
+        assert!(blocks[1].contains("without a blank line"));
+    }
+
+    /// Short headers translate too — exempt from the >5-char paragraph filter.
+    #[test]
+    fn test_extract_blocks_short_header_kept() {
+        let blocks = extract_blocks("# News\n\nA longer body paragraph follows here.", MAX_CHARS_PER_SEGMENT);
+        assert!(blocks.iter().any(|b| b == "# News"), "got {:?}", blocks);
+    }
+
+    /// Header levels 1-6 and setext-lookalikes are classified correctly.
+    #[test]
+    fn test_is_atx_header() {
+        assert!(is_atx_header("# Top"));
+        assert!(is_atx_header("###### Six"));
+        assert!(is_atx_header("  ## Indented"));
+        assert!(!is_atx_header("####### Seven")); // 7 hashes = not a header
+        assert!(!is_atx_header("#NoSpace"));      // requires space
+        assert!(!is_atx_header("Plain text"));
+        assert!(!is_atx_header("C# code"));
+    }
+
+    /// HTML headers stay individual too (same display rule as markdown).
+    #[test]
+    fn test_extract_blocks_html_header_not_merged() {
+        let html = "<h2>Heading</h2><p>Body paragraph content here.</p>";
+        let blocks = extract_blocks(html, MAX_CHARS_PER_SEGMENT);
+        assert!(blocks.len() >= 2, "got {:?}", blocks);
+        assert!(blocks[0].contains("<h2>"));
+        assert!(blocks[1].contains("<p>"));
     }
 
     #[test]
