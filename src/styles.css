@@ -1940,6 +1940,23 @@ body::after {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    cursor: pointer;
+    transition: color 0.15s ease;
+}
+
+.item-source:hover {
+    color: var(--accent-color);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.detail-source {
+    cursor: pointer;
+}
+
+.detail-source:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
 }
 
 .item-card.active .item-source {
@@ -2214,4 +2231,17 @@ html[data-theme="vscode-dark"] {
     --border-color: #3c3c3c; --accent-color: #007acc; --accent-hover: #1a8fd1;
     --accent-soft: rgba(0, 122, 204, 0.15);
     --danger-color: #f14c4c; --success-color: #89d185; --warning-color: #cca700;
+}
+
+/* Peek reveal — source label clicked, row flashed without selecting */
+.subscription-item.reveal {
+    background: var(--accent-soft);
+    border-left-color: var(--accent-color);
+    animation: reveal-pulse 1.6s ease;
+}
+
+@keyframes reveal-pulse {
+    0% { background: var(--accent-soft); border-left-color: var(--accent-color); }
+    70% { background: var(--accent-soft); border-left-color: var(--accent-color); }
+    100% { background: transparent; }
 }

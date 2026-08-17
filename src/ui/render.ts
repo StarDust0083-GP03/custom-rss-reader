@@ -138,6 +138,21 @@ export function selectSubscription(id: number | null) {
   loadItems();
 }
 
+// Peek navigation: scroll the sidebar to a subscription row and flash-
+// highlight it WITHOUT selecting it (no filter change, no item reload).
+// Triggered by clicking a source label in the article list / detail panel.
+export function revealSubscription(subscriptionId: number) {
+  const list = document.getElementById("subscription-list");
+  const row = list?.querySelector<HTMLElement>(
+    `.subscription-item[data-id="${subscriptionId}"]`,
+  );
+  if (!row) return;
+
+  row.scrollIntoView({ block: "center", behavior: "smooth" });
+  row.classList.add("reveal");
+  window.setTimeout(() => row.classList.remove("reveal"), 1600);
+}
+
 // 加载内容
 export async function loadItems() {
   const seq = ++loadItemsSeq;
@@ -230,6 +245,13 @@ export function renderItems(preserveScroll = false) {
       const src = document.createElement("div");
       src.className = "item-source";
       src.textContent = sourceName;
+      src.title = "Go to source";
+      // Peek navigation: scroll + highlight the source in the sidebar
+      // WITHOUT selecting it (and without selecting this article).
+      src.addEventListener("click", (e) => {
+        e.stopPropagation();
+        revealSubscription(item.subscription_id);
+      });
       div.appendChild(src);
     }
 
@@ -402,6 +424,12 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
   const source = document.createElement("div");
   source.className = "detail-source";
   source.textContent = subName + (item.category ? ` • ${item.category}` : "");
+  source.title = "Go to source";
+  // Peek navigation (same rule as the list kicker): scroll + highlight the
+  // source in the sidebar, but do NOT select it.
+  source.addEventListener("click", () => {
+    revealSubscription(item.subscription_id);
+  });
   detail.appendChild(source);
 
   // ---- Title ----
