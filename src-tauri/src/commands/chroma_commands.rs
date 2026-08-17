@@ -123,8 +123,16 @@ pub async fn chroma_sync(state: State<'_, AppState>) -> Result<String> {
 
 #[tauri::command]
 pub async fn chroma_health_check(state: State<'_, AppState>) -> Result<bool> {
-    match &state.chroma_service {
-        Some(service) => service.health_check().await,
+    match state.chroma_service.get().await {
+        Some(service) => {
+            let ok = service.health_check().await?;
+            if !ok {
+                // Server went away — drop the stale handle so the next
+                // check/search reconnects instead of failing forever.
+                state.chroma_service.invalidate().await;
+            }
+            Ok(ok)
+        }
         None => Ok(false),
     }
 }
@@ -140,8 +148,9 @@ fn clamp_limit(limit: Option<i64>, default: i64, max: i64) -> i64 {
 async fn get_chroma_service(state: &AppState) -> Result<Arc<ChromaService>> {
     state
         .chroma_service
-        .clone()
+        .get()
+        .await
         .ok_or_else(|| crate::error::AppError::OperationFailed(
-            "ChromaDB is not configured. Please set up ChromaDB configuration first.".into(),
+            "ChromaDB is not reachable. Check the server and the Semantic DB settings.".into(),
         ))
 }

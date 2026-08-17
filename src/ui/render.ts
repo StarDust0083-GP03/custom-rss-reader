@@ -22,6 +22,12 @@ import {
 configureMarked();
 const S = state;
 
+// Inline icons for the subscription row actions (stroke = currentColor).
+const SPARKLE_ICON =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.7 5.7 1.9-5.7 1.9L12 18.2l-1.9-5.7-5.7-1.9 5.7-1.9z"/><path d="M18.5 15.5l.8 2.4 2.4.8-2.4.8-.8 2.4-.8-2.4-2.4-.8 2.4-.8z"/></svg>';
+const TRASH_ICON =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>';
+
 // Iframe manager — every load bumps a generation so stale loads are dropped.
 export const iframeManager = new IframeManager();
 
@@ -83,9 +89,11 @@ export function renderSubscriptions() {
     const autoBtn = document.createElement("button");
     autoBtn.className = "icon-btn toggle-auto-btn";
     autoBtn.dataset.id = sub.id.toString();
-    autoBtn.title = "Toggle auto-classify";
+    autoBtn.title = sub.auto_classify ? "Auto-classify on — click to disable" : "Auto-classify off — click to enable";
     autoBtn.dataset.auto = sub.auto_classify ? "true" : "false";
-    autoBtn.textContent = sub.auto_classify ? "AI" : "ai";
+    autoBtn.setAttribute("aria-label", "Toggle auto-classify");
+    // Sparkle icon — filled (accent) when auto-classify is on.
+    autoBtn.innerHTML = SPARKLE_ICON;
     autoBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       toggleAutoClassify(sub.id);
@@ -95,7 +103,8 @@ export function renderSubscriptions() {
     delBtn.className = "icon-btn delete-sub";
     delBtn.dataset.id = sub.id.toString();
     delBtn.title = "Delete";
-    delBtn.textContent = "×";
+    delBtn.setAttribute("aria-label", "Delete subscription");
+    delBtn.innerHTML = TRASH_ICON;
     delBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       deleteSubscription(sub.id);
@@ -127,6 +136,21 @@ export function selectSubscription(id: number | null) {
   // When selecting "All Items" (id === null), keep current filter to allow "unread" for all subscriptions
   renderSubscriptions();
   loadItems();
+}
+
+// Peek navigation: scroll the sidebar to a subscription row and flash-
+// highlight it WITHOUT selecting it (no filter change, no item reload).
+// Triggered by clicking a source label in the article list / detail panel.
+export function revealSubscription(subscriptionId: number) {
+  const list = document.getElementById("subscription-list");
+  const row = list?.querySelector<HTMLElement>(
+    `.subscription-item[data-id="${subscriptionId}"]`,
+  );
+  if (!row) return;
+
+  row.scrollIntoView({ block: "center", behavior: "smooth" });
+  row.classList.add("reveal");
+  window.setTimeout(() => row.classList.remove("reveal"), 1600);
 }
 
 // 加载内容
@@ -221,6 +245,13 @@ export function renderItems(preserveScroll = false) {
       const src = document.createElement("div");
       src.className = "item-source";
       src.textContent = sourceName;
+      src.title = "Go to source";
+      // Peek navigation: scroll + highlight the source in the sidebar
+      // WITHOUT selecting it (and without selecting this article).
+      src.addEventListener("click", (e) => {
+        e.stopPropagation();
+        revealSubscription(item.subscription_id);
+      });
       div.appendChild(src);
     }
 
@@ -353,7 +384,7 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
   const openLinkBtn = document.getElementById("open-link-btn") as HTMLAnchorElement | null;
   const translateBtn = document.getElementById("translate-btn");
   if (markReadBtn) {
-    markReadBtn.textContent = item.is_read ? "Unread" : "Read";
+    // Icon-only button (✓) — the active state carries the read styling.
     markReadBtn.classList.toggle("active", item.is_read);
   }
   if (favoriteBtn) favoriteBtn.classList.toggle("active", item.is_favorite);
@@ -393,6 +424,12 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
   const source = document.createElement("div");
   source.className = "detail-source";
   source.textContent = subName + (item.category ? ` • ${item.category}` : "");
+  source.title = "Go to source";
+  // Peek navigation (same rule as the list kicker): scroll + highlight the
+  // source in the sidebar, but do NOT select it.
+  source.addEventListener("click", () => {
+    revealSubscription(item.subscription_id);
+  });
   detail.appendChild(source);
 
   // ---- Title ----

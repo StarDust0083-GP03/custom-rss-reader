@@ -67,24 +67,24 @@ export function updateFilterTabs() {
     const tabFilter = tab.getAttribute("data-filter");
     if (S.currentFilter === "tag" && S.currentTagFilter && tabFilter === "tag") {
       tab.classList.add("active");
-      tab.textContent = `#${S.currentTagFilter}`;
+      tab.querySelector(".filter-label")!.textContent = `#${S.currentTagFilter}`;
     } else if (tabFilter === "today" && S.unreadFilterEnabled) {
       // Show "Today + Unread" when both filters are active
       tab.classList.add("active");
-      tab.textContent = "Today + Unread";
+      tab.querySelector(".filter-label")!.textContent = "Today + Unread";
     } else if (tabFilter === S.currentFilter && S.currentFilter !== "tag") {
       tab.classList.add("active");
       // Reset text to default
       if (tabFilter === "today") {
-        tab.textContent = "Today";
+        tab.querySelector(".filter-label")!.textContent = "Today";
       }
     } else {
       tab.classList.remove("active");
       if (tabFilter === "tag") {
-        tab.textContent = "Tags";
+        tab.querySelector(".filter-label")!.textContent = "Tags";
       }
       if (tabFilter === "today") {
-        tab.textContent = "Today";
+        tab.querySelector(".filter-label")!.textContent = "Today";
       }
     }
   });

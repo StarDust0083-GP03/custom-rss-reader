@@ -25,7 +25,8 @@ pub async fn fetch_all_feeds(state: State<'_, AppState>) -> Result<crate::servic
     // Catch-up sync: picks up anything the fetch-time indexing missed
     // (ChromaDB briefly down, item raced the collection creation, ...).
     // Fire-and-forget — the user's refresh must not wait on ChromaDB.
-    if state.chroma_service.is_some() {
+    // The holder lazy-connects, so this is a no-op when ChromaDB is off.
+    {
         let repo = state.feed_repo.clone();
         let chroma = state.chroma_service.clone();
         tauri::async_runtime::spawn(async move {

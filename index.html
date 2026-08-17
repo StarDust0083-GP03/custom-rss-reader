@@ -16,27 +16,42 @@
                 <div class="sidebar-header">
                     <h1>RSS Reader</h1>
                     <div class="sidebar-actions">
-                        <button id="add-feed-btn" title="Add Feed">+</button>
-                        <button id="import-opml-btn" title="Import OPML">
-                            Import
-                        </button>
-                        <button id="export-opml-btn" title="Export OPML">
-                            Export
-                        </button>
-                        <button id="refresh-all-btn" title="Refresh All">
-                            ↻
-                        </button>
-                    </div>
+                    <button id="add-feed-btn" title="Add Feed">+</button>
+                    <button id="refresh-all-btn" title="Refresh All">↻</button>
+                    <button id="sidebar-menu-btn" class="menu-btn" title="More">⋯</button>
+                </div>
+                <div id="sidebar-menu" class="dropdown-menu">
+                    <button type="button" class="dropdown-item" data-action="import-opml">Import OPML</button>
+                    <button type="button" class="dropdown-item" data-action="export-opml">Export OPML</button>
+                </div>
                 </div>
 
                 <div class="sidebar-content">
                     <div class="filter-tabs">
-                        <button class="filter-tab active" data-filter="all">All</button>
-                        <button class="filter-tab" data-filter="unread">Unread</button>
-                        <button class="filter-tab" data-filter="favorites">Favorites</button>
-                        <button class="filter-tab" data-filter="read-later">Read Later</button>
-                        <button class="filter-tab" data-filter="today">Today</button>
-                        <button class="filter-tab" data-filter="tag">Tags</button>
+                        <button class="filter-tab active" data-filter="all">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+                            <span class="filter-label">All</span>
+                        </button>
+                        <button class="filter-tab" data-filter="unread">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg>
+                            <span class="filter-label">Unread</span>
+                        </button>
+                        <button class="filter-tab" data-filter="favorites">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/></svg>
+                            <span class="filter-label">Favorites</span>
+                        </button>
+                        <button class="filter-tab" data-filter="read-later">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></svg>
+                            <span class="filter-label">Read Later</span>
+                        </button>
+                        <button class="filter-tab" data-filter="today">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+                            <span class="filter-label">Today</span>
+                        </button>
+                        <button class="filter-tab" data-filter="tag">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/></svg>
+                            <span class="filter-label">Tags</span>
+                        </button>
                     </div>
                     <div class="subscription-list" id="subscription-list">
                         <!-- Subscriptions will be rendered here -->
@@ -44,14 +59,20 @@
                 </div>
             </aside>
 
+            <!-- 列宽调节柄：拖动调宽，双击折叠/展开 -->
+            <div class="col-resizer" id="resizer-sidebar" title="拖动调宽，双击折叠/展开"></div>
+
             <!-- 中栏：内容列表 -->
             <section class="items-panel">
                 <div class="items-header">
                     <h2 id="current-feed-title">All Items</h2>
                     <div class="header-actions">
                         <button id="recommend-btn" title="AI Recommended Reads">★ Picks</button>
-                        <button id="mark-all-read-btn" title="Mark All as Read">Mark All Read</button>
-                        <button id="chroma-settings-btn" title="ChromaDB Settings">Semantic DB</button>
+                        <button id="items-menu-btn" class="menu-btn" title="More">⋯</button>
+                    </div>
+                    <div id="items-menu" class="dropdown-menu">
+                        <button type="button" class="dropdown-item" data-action="mark-all-read">Mark All Read</button>
+                        <button type="button" class="dropdown-item" data-action="chroma-settings">Semantic DB…</button>
                     </div>
                     <div class="search-box">
                         <button id="search-mode-btn" class="search-mode-btn" title="Toggle search mode">Text</button>
@@ -63,21 +84,50 @@
                 </div>
             </section>
 
+            <!-- 列宽调节柄：拖动调宽，双击折叠/展开 -->
+            <div class="col-resizer" id="resizer-items" title="拖动调宽，双击折叠/展开"></div>
+
             <!-- 右栏：内容详情 -->
             <section class="detail-panel">
                 <div class="detail-header">
                     <div class="detail-actions">
                         <button id="toggle-webview-btn" title="Toggle Web View">Web View</button>
                         <button id="translate-btn" title="Translate">Translate</button>
-                        <button id="classify-btn" title="Classify">Tags</button>
-                        <button id="similar-btn" title="Find Similar Articles" style="display:none">Similar</button>
-                        <button id="ai-settings-btn" title="AI Settings">AI</button>
+                        <button id="detail-menu-btn" class="menu-btn" title="More">⋯</button>
+                    </div>
+                    <div id="detail-menu" class="dropdown-menu">
+                        <button type="button" class="dropdown-item" data-action="classify">Classify Tags</button>
+                        <button type="button" class="dropdown-item" data-action="similar" id="similar-menu-item">Find Similar</button>
+                        <button type="button" class="dropdown-item" data-action="ai-settings">AI Settings…</button>
+                        <div class="theme-section">
+                            <span class="theme-label">Theme</span>
+                            <div class="theme-swatches">
+                                <button type="button" class="theme-swatch" data-theme="paper" title="Paper" style="--chip-bg:#f7f2e9;--chip-accent:#bc3f2c"><span class="theme-chip"></span><span class="theme-name">Paper</span></button>
+                                <button type="button" class="theme-swatch" data-theme="sepia" title="Sepia" style="--chip-bg:#f3ead8;--chip-accent:#9a5b2e"><span class="theme-chip"></span><span class="theme-name">Sepia</span></button>
+                                <button type="button" class="theme-swatch" data-theme="forest" title="Forest" style="--chip-bg:#f2f5ee;--chip-accent:#3f6b3f"><span class="theme-chip"></span><span class="theme-name">Forest</span></button>
+                                <button type="button" class="theme-swatch" data-theme="ocean" title="Ocean" style="--chip-bg:#eef3f6;--chip-accent:#2c6e8f"><span class="theme-chip"></span><span class="theme-name">Ocean</span></button>
+                                <button type="button" class="theme-swatch" data-theme="noir" title="Noir" style="--chip-bg:#f4f4f2;--chip-accent:#b0392a"><span class="theme-chip"></span><span class="theme-name">Noir</span></button>
+                                <button type="button" class="theme-swatch" data-theme="onedark" title="One Dark" style="--chip-bg:#282c34;--chip-accent:#61afef"><span class="theme-chip"></span><span class="theme-name">One Dark</span></button>
+                                <button type="button" class="theme-swatch" data-theme="dracula" title="Dracula" style="--chip-bg:#282a36;--chip-accent:#bd93f9"><span class="theme-chip"></span><span class="theme-name">Dracula</span></button>
+                                <button type="button" class="theme-swatch" data-theme="monokai" title="Monokai" style="--chip-bg:#272822;--chip-accent:#a6e22e"><span class="theme-chip"></span><span class="theme-name">Monokai</span></button>
+                                <button type="button" class="theme-swatch" data-theme="nord" title="Nord" style="--chip-bg:#2e3440;--chip-accent:#88c0d0"><span class="theme-chip"></span><span class="theme-name">Nord</span></button>
+                                <button type="button" class="theme-swatch" data-theme="solarized-dark" title="Solarized D" style="--chip-bg:#002b36;--chip-accent:#268bd2"><span class="theme-chip"></span><span class="theme-name">Solarized D</span></button>
+                                <button type="button" class="theme-swatch" data-theme="solarized-light" title="Solarized L" style="--chip-bg:#fdf6e3;--chip-accent:#268bd2"><span class="theme-chip"></span><span class="theme-name">Solarized L</span></button>
+                                <button type="button" class="theme-swatch" data-theme="gruvbox-dark" title="Gruvbox D" style="--chip-bg:#282828;--chip-accent:#d79921"><span class="theme-chip"></span><span class="theme-name">Gruvbox D</span></button>
+                                <button type="button" class="theme-swatch" data-theme="gruvbox-light" title="Gruvbox L" style="--chip-bg:#fbf1c7;--chip-accent:#b57614"><span class="theme-chip"></span><span class="theme-name">Gruvbox L</span></button>
+                                <button type="button" class="theme-swatch" data-theme="tokyonight" title="Tokyo Night" style="--chip-bg:#1a1b26;--chip-accent:#7aa2f7"><span class="theme-chip"></span><span class="theme-name">Tokyo Night</span></button>
+                                <button type="button" class="theme-swatch" data-theme="catppuccin" title="Catppuccin" style="--chip-bg:#1e1e2e;--chip-accent:#89b4fa"><span class="theme-chip"></span><span class="theme-name">Catppuccin</span></button>
+                                <button type="button" class="theme-swatch" data-theme="github-dark" title="GitHub D" style="--chip-bg:#0d1117;--chip-accent:#58a6ff"><span class="theme-chip"></span><span class="theme-name">GitHub D</span></button>
+                                <button type="button" class="theme-swatch" data-theme="github-light" title="GitHub L" style="--chip-bg:#ffffff;--chip-accent:#0969da"><span class="theme-chip"></span><span class="theme-name">GitHub L</span></button>
+                                <button type="button" class="theme-swatch" data-theme="vscode-dark" title="VS Code" style="--chip-bg:#1e1e1e;--chip-accent:#007acc"><span class="theme-chip"></span><span class="theme-name">VS Code</span></button>
+                            </div>
+                        </div>
                     </div>
                     <div class="detail-item-actions">
-                        <button id="mark-read-btn" title="Mark as Read/Unread">Read</button>
-                        <button id="favorite-btn" title="Favorite">Favorite</button>
-                        <button id="read-later-btn" title="Read Later">Later</button>
-                        <a id="open-link-btn" href="#" target="_blank" title="Open in Browser">Open</a>
+                        <button id="mark-read-btn" title="Toggle read state">✓</button>
+                        <button id="favorite-btn" title="Favorite">★</button>
+                        <button id="read-later-btn" title="Read later">◷</button>
+                        <a id="open-link-btn" href="#" target="_blank" title="Open in Browser">↗</a>
                     </div>
                 </div>
                 <div class="detail-content" id="detail-content">

@@ -38,9 +38,9 @@ export function updateSearchModeBtn() {
   } else {
     btn.style.display = "none";
   }
-  // The "Similar" button is only useful when ChromaDB is enabled
-  const similarBtn = document.getElementById("similar-btn");
-  if (similarBtn) similarBtn.style.display = S.chromaEnabled ? "" : "none";
+  // "Find Similar" lives in the detail ⋯ menu — only useful with Chroma
+  const similarItem = document.getElementById("similar-menu-item") as HTMLButtonElement | null;
+  if (similarItem) similarItem.disabled = !S.chromaEnabled;
 }
 
 /// Replace the item list with articles semantically similar to the

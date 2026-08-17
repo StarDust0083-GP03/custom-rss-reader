@@ -81,6 +81,7 @@ pub trait FeedItemRepository: Send + Sync {
     /// Used to validate the Chroma sync watermark after a DB reset.
     async fn max_item_id(&self) -> Result<i64>;
 
+
     /// Update the Markdown-cached content for a feed item.
     ///
     /// `from_website` distinguishes the two paths the cache can be filled

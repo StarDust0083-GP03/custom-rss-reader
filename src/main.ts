@@ -14,6 +14,8 @@ import {
   renderSubscriptions,
 } from "./ui/render";
 import { setFilter, showTagSelector, updateFilterTabs } from "./ui/filters";
+import { attachMenu, closeMenu } from "./ui/menu";
+import { initColumnLayout } from "./ui/layout";
 import {
   loadSubscriptions,
   refreshAllFeeds,
@@ -70,10 +72,46 @@ async function init() {
     misc.openUrl(href);
   });
 
+  // 列宽恢复 + 折叠/拖动
+  initColumnLayout(document.querySelector(".app-container") as HTMLElement);
+
+  // 主题恢复 + 色板切换
+  const currentTheme = localStorage.getItem("rss.theme") || "paper";
+  applyTheme(currentTheme);
+  document.querySelectorAll<HTMLButtonElement>(".theme-swatch").forEach((swatch) => {
+    if (swatch.dataset.theme === currentTheme) swatch.classList.add("active");
+    swatch.addEventListener("click", () => {
+      const theme = swatch.dataset.theme || "paper";
+      applyTheme(theme);
+      localStorage.setItem("rss.theme", theme);
+      document.querySelectorAll<HTMLButtonElement>(".theme-swatch").forEach(s =>
+        s.classList.toggle("active", s === swatch));
+      closeMenu();
+      toastSuccess(`Theme: ${theme}`);
+    });
+  });
+
   // 事件监听
   document.getElementById("add-feed-btn")?.addEventListener("click", openAddFeedModal);
-  document.getElementById("import-opml-btn")?.addEventListener("click", importOpml);
-  document.getElementById("export-opml-btn")?.addEventListener("click", exportOpml);
+
+  // 溢出菜单(⋯)——把不常用的操作收进去
+  const menuActionHandlers: Record<string, () => void> = {
+    "import-opml": () => importOpml(),
+    "export-opml": () => exportOpml(),
+    "mark-all-read": () => markAllAsRead(),
+    "chroma-settings": () => openChromaSettingsModal(),
+    "classify": () => { if (S.selectedItem) classifyItem(S.selectedItem); },
+    "similar": () => findSimilarArticles(),
+    "ai-settings": () => openAiSettingsModal(),
+  };
+  const attach = (btnId: string, menuId: string) => {
+    const btn = document.getElementById(btnId);
+    const menu = document.getElementById(menuId);
+    if (btn && menu) attachMenu({ button: btn, menu, onAction: (a) => menuActionHandlers[a]?.() });
+  };
+  attach("sidebar-menu-btn", "sidebar-menu");
+  attach("items-menu-btn", "items-menu");
+  attach("detail-menu-btn", "detail-menu");
 
   // 刷新所有订阅 - 防抖由 refreshAllFeeds 内部 in-progress 标志处理
   document.getElementById("refresh-all-btn")?.addEventListener("click", () => {
@@ -97,9 +135,6 @@ async function init() {
       }
     });
   });
-
-  // 标记所有已读
-  document.getElementById("mark-all-read-btn")?.addEventListener("click", markAllAsRead);
 
   // AI 推荐阅读(手动触发)
   document.getElementById("recommend-btn")?.addEventListener("click", openRecommendations);
@@ -141,7 +176,6 @@ async function init() {
   aiModal?.querySelector(".cancel-btn")?.addEventListener("click", closeAiSettingsModal);
 
   // ChromaDB settings
-  document.getElementById("chroma-settings-btn")?.addEventListener("click", openChromaSettingsModal);
   const chromaModal = document.getElementById("chroma-settings-modal");
   chromaModal?.querySelector(".close-modal")?.addEventListener("click", closeChromaSettingsModal);
   chromaModal?.querySelector(".cancel-btn")?.addEventListener("click", closeChromaSettingsModal);
@@ -278,15 +312,6 @@ async function init() {
     // WebView 模式：优先使用 content_md；RSS 模式：优先使用 content
     await translateItem(S.selectedItem, undefined);
   });
-
-  document.getElementById("classify-btn")?.addEventListener("click", async () => {
-    if (!S.selectedItem) return;
-    await classifyItem(S.selectedItem);
-  });
-
-  document.getElementById("similar-btn")?.addEventListener("click", findSimilarArticles);
-
-  document.getElementById("ai-settings-btn")?.addEventListener("click", openAiSettingsModal);
 
   // 测试 AI 连接按钮 - 测试连接并保存
   document.getElementById("test-ai-btn")?.addEventListener("click", async () => {
@@ -430,3 +455,8 @@ function addZoomHintToImages(): void {
 }
 
 window.addEventListener("DOMContentLoaded", init);
+
+/** Apply a color theme by setting html[data-theme]. */
+function applyTheme(theme: string): void {
+  document.documentElement.dataset.theme = theme;
+}

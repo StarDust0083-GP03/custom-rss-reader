@@ -517,3 +517,4 @@ async fn test_summaries_carry_source_title() {
     assert_eq!(bare.source_title, None);
     assert_eq!(bare.source_url.as_deref(), Some("https://bare.com/rss"));
 }
+

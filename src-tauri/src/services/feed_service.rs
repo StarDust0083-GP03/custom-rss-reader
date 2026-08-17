@@ -4,7 +4,7 @@ use tokio::sync::Semaphore;
 
 use serde::Serialize;
 
-use crate::chroma::service::ChromaService;
+use crate::chroma::ChromaHolder;
 use crate::error::{AppError, Result};
 use crate::feed::parser::parse_feed;
 use crate::feed::FeedFetcher;
@@ -37,7 +37,7 @@ pub struct FeedService {
     sub_repo: Option<Arc<dyn SubscriptionRepository>>,
     fetcher: Option<Arc<FeedFetcher>>,
     ai_service: Option<Arc<dyn crate::ai::service::AiService>>,
-    chroma_service: Option<Arc<ChromaService>>,
+    chroma_service: ChromaHolder,
 }
 
 impl FeedService {
@@ -49,7 +49,7 @@ impl FeedService {
             sub_repo: None,
             fetcher: None,
             ai_service: None,
-            chroma_service: None,
+            chroma_service: ChromaHolder::default(),
         }
     }
 
@@ -65,8 +65,8 @@ impl FeedService {
         self
     }
 
-    /// Attach a ChromaDB service (enables semantic search indexing).
-    pub fn with_chroma_service(mut self, chroma: Option<Arc<ChromaService>>) -> Self {
+    /// Attach the ChromaDB holder (enables semantic search indexing).
+    pub fn with_chroma_service(mut self, chroma: ChromaHolder) -> Self {
         self.chroma_service = chroma;
         self
     }
@@ -295,7 +295,7 @@ async fn fetch_parse_and_save(
     repo: &Arc<dyn FeedItemRepository>,
     fetcher: &Arc<FeedFetcher>,
     ai_service: Option<&Arc<dyn crate::ai::service::AiService>>,
-    chroma_service: &Option<Arc<ChromaService>>,
+    chroma_service: &ChromaHolder,
     subscription: &Subscription,
 ) -> Result<Vec<FeedItem>> {
     let feed_url = subscription
@@ -337,10 +337,10 @@ async fn fetch_parse_and_save(
             Err(e) => return Err(e),
         };
 
-        // Index into ChromaDB if available. A failure here must NOT lose
-        // the item from the semantic index forever — queue it for the next
-        // incremental sync (watermark + pending-upsert retry).
-        if let Some(ref chroma) = chroma_service {
+        // Index into ChromaDB if available (lazy-connects). A failure here
+        // must NOT lose the item from the semantic index forever — queue it
+        // for the next incremental sync (watermark + pending-upsert retry).
+        if let Some(chroma) = chroma_service.get().await {
             if let Err(e) = chroma.index_item(&feed_item).await {
                 eprintln!("ChromaDB indexing failed for item {}: {}", feed_item.id, e);
                 crate::chroma::sync::SyncState::queue_upsert(feed_item.id);

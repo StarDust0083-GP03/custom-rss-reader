@@ -60,7 +60,7 @@ pub async fn remove_subscription(
     // Best-effort: a Chroma outage must not fail the subscription removal.
     // Failed vector deletes are queued in the sync state so the next
     // incremental sync retries them (instead of leaking orphans forever).
-    if let Some(chroma) = &state.chroma_service {
+    if let Some(chroma) = state.chroma_service.get().await {
         if let Err(e) = chroma.delete_items(&item_ids).await {
             eprintln!("ChromaDB cleanup for subscription {} failed: {}", id, e);
             for item_id in &item_ids {
