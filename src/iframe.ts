@@ -15,7 +15,7 @@
  * the user navigates to a different article while a load is in flight.
  */
 
-import { setSafeHtml, escapeHtml } from "./sanitize";
+import { setSafeHtml, escapeHtml, dedupeImages } from "./sanitize";
 import { configureMarked, renderMarkdown } from "./markdown";
 
 configureMarked();
@@ -244,6 +244,8 @@ function renderMarkdownBody(markdown: string, baseUrl: string): string {
   // 3. Sanitise via the shared helper (drops scripts, event handlers, etc.)
   const wrapper = document.createElement("div");
   setSafeHtml(wrapper, html);
+  // 4. Same image policy as the host DOM path: one occurrence per URL.
+  dedupeImages(wrapper);
   return wrapper.innerHTML;
 }
 

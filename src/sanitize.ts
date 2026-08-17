@@ -205,3 +205,27 @@ function isSafeUrl(url: string): boolean {
     return false;
   }
 }
+
+/**
+ * Remove duplicate images by `src` — only the FIRST occurrence of each
+ * image URL is kept. Articles (and bilingual pairs + streaming tail) often
+ * carry the same image twice (hero + inline, or the same figure echoed);
+ * rendering it once is the expected reading experience.
+ *
+ * `skipSelector`: images inside matching subtrees are ignored entirely —
+ * they neither count as occurrences nor get removed (e.g. the hidden
+ * `.paragraph-translated` side must not claim a URL for itself).
+ */
+export function dedupeImages(root: Element, skipSelector?: string): void {
+  const seen = new Set<string>();
+  root.querySelectorAll("img").forEach((img) => {
+    if (skipSelector && img.closest(skipSelector)) return;
+    const src = (img.getAttribute("src") ?? "").trim();
+    if (!src) return;
+    if (seen.has(src)) {
+      img.remove();
+      return;
+    }
+    seen.add(src);
+  });
+}

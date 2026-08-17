@@ -89,5 +89,48 @@ export function stripOrphanLinkFragments(md: string): string {
  * so no path can ever display a dangling `](url)`.
  */
 export function renderMarkdown(md: string): string {
-  return marked.parse(stripOrphanLinkFragments(md), { gfm: true }) as string;
+  return marked.parse(cleanMarkdownSource(md), { gfm: true }) as string;
+}
+
+/**
+ * Pre-parse cleanup applied before every markdown render.
+ */
+function cleanMarkdownSource(md: string): string {
+  return encodeSpaceyImageUrls(stripOrphanLinkFragments(md));
+}
+
+/**
+ * Percent-encode spaces inside image URLs. A space in `![](a b.png)` is
+ * invalid markdown — marked refuses the link and renders the literal
+ * `![](<a>url</a> b.png)` garbage, displaying the image URL as text.
+ * Spaces can only be fixed by encoding them (`%20`).
+ */
+function encodeSpaceyImageUrls(md: string): string {
+  let out = "";
+  let i = 0;
+  const n = md.length;
+  while (i < n) {
+    if (md[i] === "!" && md[i + 1] === "[") {
+      const after = md.indexOf("](", i + 2);
+      if (after !== -1) {
+        const urlStart = after + 2;
+        let depth = 1;
+        let j = urlStart;
+        while (j < n && depth > 0) {
+          if (md[j] === "(") depth++;
+          else if (md[j] === ")") depth--;
+          j++;
+        }
+        if (depth === 0) {
+          out += md.slice(i, urlStart);
+          out += md.slice(urlStart, j - 1).replace(/ /g, "%20") + ")";
+          i = j;
+          continue;
+        }
+      }
+    }
+    out += md[i];
+    i++;
+  }
+  return out;
 }

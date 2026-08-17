@@ -7,7 +7,7 @@
 
 import { items as itemsApi } from "../api";
 import type { FeedItem, FeedItemSummary } from "../types";
-import { setSafeHtml, setText, htmlToPlainText } from "../sanitize";
+import { setSafeHtml, setText, htmlToPlainText, dedupeImages } from "../sanitize";
 import { IframeManager } from "../iframe";
 import { configureMarked, renderMarkdown } from "../markdown";
 import { state } from "../state";
@@ -480,16 +480,16 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
       setSafeHtml(el, html);
     });
 
-    // Translated side: models echo markdown links (and bare URLs) despite
-    // the "clean text" instruction. Rendered as raw HTML those show as
-    // literal `[text](url)` — re-render them so links actually work, the
-    // same treatment the original side gets. Only element-free text that
-    // actually contains link-ish syntax is touched, to avoid mangling
-    // clean translated prose.
+    // Translated side: models echo markdown links, bare URLs AND simple
+    // formatting (**bold**, `code`, …) despite the "clean text" instruction
+    // — rendered as raw HTML those show as literal syntax. Re-render them
+    // with the SAME markdown-format trigger as the original side so echoed
+    // formats display properly. Images stay hidden via CSS (original side
+    // already shows them) and element-bearing text is left untouched.
     bilingualEl.querySelectorAll(".paragraph-translated").forEach((el) => {
       if (el.children.length > 0) return; // real HTML — keep as-is
       const raw = el.textContent ?? "";
-      if (!raw.trim() || !/\[[^\]]*\]\(|https?:\/\//.test(raw)) return; // no links
+      if (!raw.trim() || !/[\\*\[\]#`_>|~-]/.test(raw)) return; // plain text
       const html = renderMarkdown(raw);
       setSafeHtml(el, html);
     });
@@ -505,6 +505,12 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
       setSafeHtml(tailEl, html);
       body.appendChild(tailEl);
     }
+
+    // One image per URL across the whole bilingual view: the same figure
+    // often appears in several translated pairs and again in the
+    // untranslated tail — keep only the first occurrence. The hidden
+    // translated side never claims a URL.
+    dedupeImages(body, ".paragraph-translated");
     return;
   }
 
@@ -544,6 +550,9 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
     // sanitiser to drop event handlers and dangerous schemes.
     const html = renderMarkdown(item.content_md);
     setSafeHtml(body, html);
+    // The same image often appears twice in one article (hero + inline) —
+    // render it once.
+    dedupeImages(body);
   } else if (item.description) {
     // Same untrusted-HTML handling as the list-item summary above.
     setText(body, htmlToPlainText(item.description));
