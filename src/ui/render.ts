@@ -9,7 +9,7 @@ import { items as itemsApi } from "../api";
 import type { FeedItem, FeedItemSummary } from "../types";
 import { setSafeHtml, setText, htmlToPlainText } from "../sanitize";
 import { IframeManager } from "../iframe";
-import { configureMarked } from "../markdown";
+import { configureMarked, renderMarkdown } from "../markdown";
 import { state } from "../state";
 // Selection / subscription actions are defined in features/actions.ts and
 // invoked from click handlers below. This is a function-level module cycle:
@@ -19,7 +19,7 @@ import {
   deleteSubscription,
 } from "../features/actions";
 
-const marked = configureMarked();
+configureMarked();
 const S = state;
 
 // Iframe manager — every load bumps a generation so stale loads are dropped.
@@ -476,7 +476,7 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
       if (el.children.length > 0) return; // real HTML (e.g. <img>) — keep
       const raw = el.textContent ?? "";
       if (!raw.trim() || !/[\\*\[\]#`_>|~-]/.test(raw)) return; // plain text
-      const html = marked.parse(raw, { gfm: true }) as string;
+      const html = renderMarkdown(raw);
       setSafeHtml(el, html);
     });
 
@@ -490,7 +490,7 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
       if (el.children.length > 0) return; // real HTML — keep as-is
       const raw = el.textContent ?? "";
       if (!raw.trim() || !/\[[^\]]*\]\(|https?:\/\//.test(raw)) return; // no links
-      const html = marked.parse(raw, { gfm: true }) as string;
+      const html = renderMarkdown(raw);
       setSafeHtml(el, html);
     });
     body.appendChild(bilingualEl);
@@ -501,7 +501,7 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
     if (opts.untranslatedTail && opts.untranslatedTail.trim()) {
       const tailEl = document.createElement("div");
       tailEl.className = "untranslated-tail";
-      const html = marked.parse(opts.untranslatedTail, { gfm: true }) as string;
+      const html = renderMarkdown(opts.untranslatedTail);
       setSafeHtml(tailEl, html);
       body.appendChild(tailEl);
     }
@@ -542,7 +542,7 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
   if (item.content_md) {
     // marked returns sanitised-ish HTML, but we still pass it through our
     // sanitiser to drop event handlers and dangerous schemes.
-    const html = marked.parse(item.content_md, { gfm: true }) as string;
+    const html = renderMarkdown(item.content_md);
     setSafeHtml(body, html);
   } else if (item.description) {
     // Same untrusted-HTML handling as the list-item summary above.

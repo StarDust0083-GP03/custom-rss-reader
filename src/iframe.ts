@@ -16,9 +16,9 @@
  */
 
 import { setSafeHtml, escapeHtml } from "./sanitize";
-import { configureMarked } from "./markdown";
+import { configureMarked, renderMarkdown } from "./markdown";
 
-const marked = configureMarked();
+configureMarked();
 
 const IFRAME_STYLE_ID = "rss-reader-iframe-style";
 function ensureIframeCss(): void {
@@ -229,7 +229,7 @@ function renderMarkdownBody(markdown: string, baseUrl: string): string {
   if (!markdown.trim()) return "";
 
   // 1. Markdown -> HTML (gfm on, same as the host DOM path)
-  let html = marked.parse(markdown, { gfm: true }) as string;
+  let html = renderMarkdown(markdown);
 
   // 2. Resolve relative URLs (markdown keeps them as-is; the iframe is
   //    loaded from a `data:` URL so relative hrefs would otherwise 404)
