@@ -2,6 +2,7 @@ pub mod service;
 pub mod sync;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +12,52 @@ use crate::error::{AppError, Result};
 const DEFAULT_CHROMA_HOST: &str = "http://localhost";
 const DEFAULT_CHROMA_PORT: u16 = 8000;
 const DEFAULT_COLLECTION_NAME: &str = "rss_articles";
+
+/// Lazily-created, auto-reconnecting ChromaDB service holder.
+///
+/// The previous design connected ONCE at app startup: if the server wasn't
+/// up at that moment, every later health check / search returned false
+/// forever ("ChromaDB is not reachable") until the app was restarted —
+/// even after the server came back. This holder creates the connection on
+/// first use, caches it, and drops it when the server dies so the next
+/// call reconnects.
+#[derive(Clone, Default)]
+pub struct ChromaHolder {
+    inner: Arc<tokio::sync::Mutex<Option<Arc<service::ChromaService>>>>,
+}
+
+impl ChromaHolder {
+    /// Return the cached service, or create one on demand when enabled and
+    /// reachable. Never fails the caller — returns `None` when disabled or
+    /// unreachable (callers decide how to surface that).
+    pub async fn get(&self) -> Option<Arc<service::ChromaService>> {
+        let mut guard = self.inner.lock().await;
+        if let Some(svc) = guard.as_ref() {
+            return Some(svc.clone());
+        }
+        let config = ChromaConfig::load();
+        if !config.enabled {
+            return None;
+        }
+        match service::ChromaService::new(&config).await {
+            Ok(svc) => {
+                let arc = Arc::new(svc);
+                *guard = Some(arc.clone());
+                Some(arc)
+            }
+            Err(e) => {
+                eprintln!("[chroma] lazy connect failed: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Drop the cached connection (e.g. after a failed health check) so the
+    /// next `get()` reconnects instead of staying stuck on a dead handle.
+    pub async fn invalidate(&self) {
+        *self.inner.lock().await = None;
+    }
+}
 
 /// ChromaDB configuration, stored in ~/.rss-reader/chroma_config.json.
 #[derive(Debug, Clone, Serialize, Deserialize)]

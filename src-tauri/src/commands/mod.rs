@@ -25,7 +25,6 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 
 use crate::ai::service::AiService;
-use crate::chroma::service::ChromaService;
 use crate::feed::FeedFetcher;
 use crate::repositories::FeedItemRepository;
 use crate::{FeedService, SubscriptionService};
@@ -41,7 +40,8 @@ pub struct AppState {
     pub feed_repo: Arc<dyn FeedItemRepository>,
     pub fetcher: Arc<FeedFetcher>,
     pub ai_service: Option<Arc<dyn AiService>>,
-    pub chroma_service: Option<Arc<ChromaService>>,
+    /// Lazily-connected ChromaDB service (auto-reconnects).
+    pub chroma_service: crate::chroma::ChromaHolder,
     /// SQLite pool — still exposed because the streaming translation
     /// commands cache hot writes via direct SQL. New code should prefer
     /// `feed_repo.update_translation(...)` over touching this directly.

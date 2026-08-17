@@ -53,14 +53,15 @@ pub fn run() {
                     Box::new(e) as Box<dyn std::error::Error>
                 })?;
             let fetcher = Arc::new(fetcher);
-            let chroma_service = load_chroma_service();
+            // ChromaDB connects lazily on first use (health check, search,
+            // sync) and auto-reconnects — the app must not stay broken just
+            // because the server was down when it launched.
+            let chroma_service = crate::chroma::ChromaHolder::default();
             let feed_service = FeedService::new(feed_repo.clone())
                 .with_subscription_repo(sub_repo.clone())
                 .with_fetcher(fetcher.clone())
                 .with_chroma_service(chroma_service.clone());
 
-            // Clone before the Arcs are moved into AppState — the startup
-            // sync task below needs them too.
             let sync_chroma = chroma_service.clone();
             let sync_repo = feed_repo.clone();
 
@@ -78,12 +79,11 @@ pub fn run() {
 
             // Incremental ChromaDB sync at startup: indexes everything since
             // the persisted watermark (e.g. items fetched while ChromaDB was
-            // disabled or unreachable) and drains the pending queues.
-            if let Some(chroma) = sync_chroma {
-                tauri::async_runtime::spawn(async move {
-                    crate::chroma::sync::run_background_sync(sync_repo, Some(chroma)).await;
-                });
-            }
+            // disabled or unreachable) and drains the pending queues. The
+            // holder is a no-op when ChromaDB is disabled or unreachable.
+            tauri::async_runtime::spawn(async move {
+                crate::chroma::sync::run_background_sync(sync_repo, sync_chroma).await;
+            });
 
             Ok(())
         })
@@ -147,17 +147,3 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-/// Load ChromaDB service if enabled in config.
-fn load_chroma_service() -> Option<std::sync::Arc<crate::chroma::service::ChromaService>> {
-    let config = crate::chroma::ChromaConfig::load();
-    if !config.enabled {
-        return None;
-    }
-    match tauri::async_runtime::block_on(crate::chroma::service::ChromaService::new(&config)) {
-        Ok(service) => Some(Arc::new(service)),
-        Err(e) => {
-            eprintln!("ChromaDB init failed (app continues without it): {}", e);
-            None
-        }
-    }
-}

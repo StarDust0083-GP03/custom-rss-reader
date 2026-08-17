@@ -213,12 +213,13 @@ pub async fn full_resync(
 }
 
 /// Convenience wrapper used by fire-and-forget call sites (startup, post-
-/// fetch). Failures are logged, never surfaced as command errors.
+/// fetch). Lazy-connects through the holder; failures are logged, never
+/// surfaced as command errors.
 pub async fn run_background_sync(
     repo: Arc<dyn FeedItemRepository>,
-    chroma: Option<Arc<ChromaService>>,
+    holder: crate::chroma::ChromaHolder,
 ) {
-    let Some(chroma) = chroma else { return };
+    let Some(chroma) = holder.get().await else { return };
     match incremental_sync(&repo, &chroma).await {
         Ok(report) if report.indexed > 0 || report.deleted > 0 => {
             println!(
