@@ -32,13 +32,19 @@ pub struct NewSubscription {
 }
 
 /// Input for updating an existing subscription.
-/// `None` fields are left unchanged by the repository.
+///
+/// Optional fields use double-option semantics:
+/// - `None` (field absent in the request) → leave unchanged
+/// - `Some(None)` (explicit `null`) → clear the column to NULL
+/// - `Some(Some(v))` → set to `v`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSubscription {
     pub title: Option<String>,
-    pub website_url: Option<String>,
+    #[serde(default, deserialize_with = "crate::models::de_double_option")]
+    pub website_url: Option<Option<String>>,
     pub use_website: Option<bool>,
-    pub rsshub_url: Option<String>,
+    #[serde(default, deserialize_with = "crate::models::de_double_option")]
+    pub rsshub_url: Option<Option<String>>,
 }
 
 impl Default for NewSubscription {
@@ -59,14 +65,18 @@ impl NewSubscription {
     /// Validate required fields and constraints.
     /// Called by the repository before inserting.
     pub fn validate(&self) -> Result<()> {
-        if self.url.trim().is_empty() {
+        let url = self.url.trim();
+        if url.is_empty() {
             return Err(AppError::Validation("URL cannot be empty".into()));
         }
-        if !self.url.starts_with("http://") && !self.url.starts_with("https://") {
-            return Err(AppError::Validation(
-                "URL must start with http:// or https://".into(),
-            ));
+        let host = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"));
+        match host {
+            Some(h) if !h.trim().is_empty() => Ok(()),
+            _ => Err(AppError::Validation(
+                "URL must be a valid http(s) URL with a host".into(),
+            )),
         }
-        Ok(())
     }
 }

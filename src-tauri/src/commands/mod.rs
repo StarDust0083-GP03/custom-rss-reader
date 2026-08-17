@@ -1,24 +1,31 @@
 pub mod ai_commands;
-pub mod debug;
+pub mod chroma_commands;
 pub mod feed_commands;
 pub mod item_commands;
 pub mod streaming;
 pub mod subscription_commands;
 pub mod webview;
 
+#[cfg(debug_assertions)]
+pub mod debug;
+
 pub use ai_commands::*;
-pub use debug::*;
+pub use chroma_commands::*;
 pub use feed_commands::*;
 pub use item_commands::*;
 pub use streaming::*;
 pub use subscription_commands::*;
 pub use webview::*;
 
+#[cfg(debug_assertions)]
+pub use debug::*;
+
 use std::sync::Arc;
 
 use sqlx::SqlitePool;
 
 use crate::ai::service::AiService;
+use crate::chroma::service::ChromaService;
 use crate::feed::FeedFetcher;
 use crate::repositories::FeedItemRepository;
 use crate::{FeedService, SubscriptionService};
@@ -34,5 +41,9 @@ pub struct AppState {
     pub feed_repo: Arc<dyn FeedItemRepository>,
     pub fetcher: Arc<FeedFetcher>,
     pub ai_service: Option<Arc<dyn AiService>>,
+    pub chroma_service: Option<Arc<ChromaService>>,
+    /// SQLite pool — still exposed because the streaming translation
+    /// commands cache hot writes via direct SQL. New code should prefer
+    /// `feed_repo.update_translation(...)` over touching this directly.
     pub pool: SqlitePool,
 }

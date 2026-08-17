@@ -3,6 +3,7 @@
 
 // Core modules
 mod ai;
+mod chroma;
 mod content_processor;
 mod database;
 mod error;
@@ -46,10 +47,22 @@ pub fn run() {
             let feed_repo = Arc::new(SqliteFeedItemRepository::new(pool.clone()));
             let sub_repo = Arc::new(SqliteSubscriptionRepository::new(pool.clone()));
             let subscription_service = SubscriptionService::new(sub_repo.clone());
-            let fetcher = Arc::new(FeedFetcher::new());
+            let fetcher = FeedFetcher::new()
+                .map_err(|e| {
+                    eprintln!("Failed to build HTTP client: {}", e);
+                    Box::new(e) as Box<dyn std::error::Error>
+                })?;
+            let fetcher = Arc::new(fetcher);
+            let chroma_service = load_chroma_service();
             let feed_service = FeedService::new(feed_repo.clone())
                 .with_subscription_repo(sub_repo.clone())
-                .with_fetcher(fetcher.clone());
+                .with_fetcher(fetcher.clone())
+                .with_chroma_service(chroma_service.clone());
+
+            // Clone before the Arcs are moved into AppState — the startup
+            // sync task below needs them too.
+            let sync_chroma = chroma_service.clone();
+            let sync_repo = feed_repo.clone();
 
             let app_state = commands::AppState {
                 subscription_service,
@@ -57,11 +70,20 @@ pub fn run() {
                 feed_repo,
                 fetcher,
                 ai_service: None,
+                chroma_service,
                 pool: pool.clone(),
             };
 
-            app.manage(pool);
             app.manage(app_state);
+
+            // Incremental ChromaDB sync at startup: indexes everything since
+            // the persisted watermark (e.g. items fetched while ChromaDB was
+            // disabled or unreachable) and drains the pending queues.
+            if let Some(chroma) = sync_chroma {
+                tauri::async_runtime::spawn(async move {
+                    crate::chroma::sync::run_background_sync(sync_repo, Some(chroma)).await;
+                });
+            }
 
             Ok(())
         })
@@ -78,7 +100,7 @@ pub fn run() {
             fetch_feed,
             fetch_all_feeds,
             refresh_subscriptions,
-            fetch_website_content,
+            fetch_website_markdown,
             import_opml,
             export_opml,
             // Item commands
@@ -106,11 +128,36 @@ pub fn run() {
             translate_item_bilingual_streaming,
             translate_html_content_streaming,
             classify_item,
+            recommend_reads,
             set_ai_config,
             get_ai_config,
-            // Debug commands
+            // ChromaDB commands
+            set_chroma_config,
+            get_chroma_config,
+            semantic_search,
+            find_similar_items,
+            reindex_chromadb,
+            chroma_sync,
+            chroma_health_check,
+            // Debug commands (dev builds only)
+            #[cfg(debug_assertions)]
             test_html2md,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Load ChromaDB service if enabled in config.
+fn load_chroma_service() -> Option<std::sync::Arc<crate::chroma::service::ChromaService>> {
+    let config = crate::chroma::ChromaConfig::load();
+    if !config.enabled {
+        return None;
+    }
+    match tauri::async_runtime::block_on(crate::chroma::service::ChromaService::new(&config)) {
+        Ok(service) => Some(Arc::new(service)),
+        Err(e) => {
+            eprintln!("ChromaDB init failed (app continues without it): {}", e);
+            None
+        }
+    }
 }

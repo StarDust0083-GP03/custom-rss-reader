@@ -3,6 +3,7 @@ use std::sync::Arc;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 
+use crate::database::migrations::run_migrations;
 use crate::models::{NewSubscription, Subscription};
 use crate::repositories::feed_item_repo::SqliteFeedItemRepository;
 use crate::repositories::{FeedItemRepository, SubscriptionRepository};
@@ -21,8 +22,11 @@ pub struct TestEnv {
 }
 
 impl TestEnv {
-    /// Create a fresh in-memory SQLite database, apply migrations,
-    /// and build the full repository + service stack.
+    /// Create a fresh in-memory SQLite database, run the production
+    /// migrations against it, and build the full repository + service
+    /// stack. Using the real migrations keeps the test DDL in sync with
+    /// the app — a missing column in the helper is impossible by
+    /// construction.
     pub async fn new() -> Self {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -30,59 +34,9 @@ impl TestEnv {
             .await
             .expect("Failed to create in-memory SQLite database");
 
-        // Create the subscriptions table (same DDL as the real app).
-        sqlx::query(
-            r#"
-            CREATE TABLE subscriptions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                url TEXT NOT NULL UNIQUE,
-                title TEXT,
-                website_url TEXT,
-                rsshub_url TEXT,
-                use_website BOOLEAN DEFAULT 0,
-                auto_classify BOOLEAN DEFAULT 1,
-                opml_attributes TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .expect("Failed to create subscriptions table");
-
-        // Create the feed_items table (same DDL as the real app, plus content_md).
-        sqlx::query(
-            r#"
-            CREATE TABLE feed_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                subscription_id INTEGER NOT NULL,
-                guid TEXT,
-                title TEXT NOT NULL,
-                link TEXT,
-                content TEXT,
-                content_md TEXT,
-                description TEXT,
-                author TEXT,
-                published_at DATETIME,
-                fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                is_website_content BOOLEAN DEFAULT 0,
-                is_read BOOLEAN DEFAULT 0,
-                is_favorite BOOLEAN DEFAULT 0,
-                is_read_later BOOLEAN DEFAULT 0,
-                is_ignored BOOLEAN DEFAULT 0,
-                tags TEXT,
-                category TEXT,
-                translated_title TEXT,
-                translated_content TEXT,
-                translated_at DATETIME,
-                FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .expect("Failed to create feed_items table");
+        run_migrations(&pool)
+            .await
+            .expect("Failed to run migrations on test database");
 
         let sub_repo: Arc<dyn SubscriptionRepository> =
             Arc::new(SqliteSubscriptionRepository::new(pool.clone()));

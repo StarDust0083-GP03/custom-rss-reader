@@ -51,7 +51,24 @@ pub async fn remove_subscription(
     state: State<'_, AppState>,
     id: i64,
 ) -> Result<()> {
-    state.subscription_service.remove_subscription(id).await
+    // Collect item ids BEFORE the cascade delete so the ChromaDB index can
+    // be cleaned up too; otherwise deleted articles stay searchable forever.
+    let item_ids = state.feed_repo.find_ids_by_subscription(id).await.unwrap_or_default();
+
+    state.subscription_service.remove_subscription(id).await?;
+
+    // Best-effort: a Chroma outage must not fail the subscription removal.
+    // Failed vector deletes are queued in the sync state so the next
+    // incremental sync retries them (instead of leaking orphans forever).
+    if let Some(chroma) = &state.chroma_service {
+        if let Err(e) = chroma.delete_items(&item_ids).await {
+            eprintln!("ChromaDB cleanup for subscription {} failed: {}", id, e);
+            for item_id in &item_ids {
+                crate::chroma::sync::SyncState::queue_delete(*item_id);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -59,9 +76,11 @@ pub async fn update_subscription(
     state: State<'_, AppState>,
     id: i64,
     title: Option<String>,
-    website_url: Option<String>,
+    // `Some(Some(""))` clears the column, `None` leaves it unchanged.
+    // (Tauri serializes JS `null` / absent as `Option::None`.)
+    website_url: Option<Option<String>>,
     use_website: Option<bool>,
-    rsshub_url: Option<String>,
+    rsshub_url: Option<Option<String>>,
 ) -> Result<Subscription> {
     let input = UpdateSubscription {
         title,

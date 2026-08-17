@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::models::{NewSubscription, Subscription, UpdateSubscription};
 use crate::repositories::SubscriptionRepository;
 
@@ -15,6 +15,51 @@ pub struct SubscriptionService {
     repo: Arc<dyn SubscriptionRepository>,
 }
 
+/// Validate an http(s) URL, rejecting bare schemes and whitespace.
+fn validate_http_url(url: &str, field_name: &str) -> Result<()> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    match rest {
+        Some(host) if !host.trim().is_empty() => Ok(()),
+        _ => Err(AppError::Validation(format!(
+            "{} must be a valid http(s) URL with a host",
+            field_name
+        ))),
+    }
+}
+
+/// Normalize a clearable URL field: empty string means "clear to NULL",
+/// otherwise validate and trim in place.
+fn normalize_clearable_url(field: &mut Option<Option<String>>, field_name: &str) -> Result<()> {
+    if let Some(Some(url)) = field {
+        let trimmed = url.trim().to_string();
+        if trimmed.is_empty() {
+            *field = Some(None); // empty input clears the column
+        } else {
+            validate_http_url(&trimmed, field_name)?;
+            *url = trimmed;
+        }
+    }
+    Ok(())
+}
+
+/// Normalize a plain optional URL on the add path: trim, empty → None,
+/// otherwise validate. (`normalize_clearable_url` handles the double-option
+/// used by the update path.)
+fn normalize_optional_url(field: &mut Option<String>, field_name: &str) -> Result<()> {
+    if let Some(url) = field {
+        let trimmed = url.trim().to_string();
+        if trimmed.is_empty() {
+            *field = None;
+        } else {
+            validate_http_url(&trimmed, field_name)?;
+            *url = trimmed;
+        }
+    }
+    Ok(())
+}
+
 impl SubscriptionService {
     pub fn new(repo: Arc<dyn SubscriptionRepository>) -> Self {
         Self { repo }
@@ -22,13 +67,27 @@ impl SubscriptionService {
 
     /// Add a new subscription.
     /// Checks for duplicates before delegating to the repository.
-    pub async fn add_subscription(&self, input: NewSubscription) -> Result<Subscription> {
+    pub async fn add_subscription(&self, mut input: NewSubscription) -> Result<Subscription> {
+        // Normalize the URL BEFORE validate/dedup/insert: trim whitespace and
+        // assume https:// when the scheme is entirely missing (users commonly
+        // paste bare "example.com/rss.xml"). A non-http scheme like
+        // "ftp://..." is preserved so validate() can reject it. Previously
+        // validation checked a trimmed copy while the raw string was stored
+        // — a URL with stray whitespace passed validation but then failed
+        // to fetch.
+        input.url = input.url.trim().to_string();
+        if !input.url.is_empty() && !input.url.contains("://") {
+            input.url = format!("https://{}", input.url);
+        }
+        normalize_optional_url(&mut input.website_url, "website_url")?;
+        normalize_optional_url(&mut input.rsshub_url, "rsshub_url")?;
+
         // Validate input
         input.validate()?;
 
         // Business rule: prevent duplicate URLs
         if self.repo.exists_by_url(&input.url).await? {
-            return Err(crate::error::AppError::Duplicate(format!(
+            return Err(AppError::Duplicate(format!(
                 "Subscription with URL '{}' already exists",
                 input.url
             )));
@@ -51,23 +110,10 @@ impl SubscriptionService {
     pub async fn update_subscription(
         &self,
         id: i64,
-        input: UpdateSubscription,
+        mut input: UpdateSubscription,
     ) -> Result<Subscription> {
-        // Business rule: website_url must be a valid URL if provided
-        if let Some(ref url) = input.website_url {
-            if !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://") {
-                return Err(crate::error::AppError::Validation(
-                    "website_url must start with http:// or https://".into(),
-                ));
-            }
-        }
-        if let Some(ref url) = input.rsshub_url {
-            if !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://") {
-                return Err(crate::error::AppError::Validation(
-                    "rsshub_url must start with http:// or https://".into(),
-                ));
-            }
-        }
+        normalize_clearable_url(&mut input.website_url, "website_url")?;
+        normalize_clearable_url(&mut input.rsshub_url, "rsshub_url")?;
 
         self.repo.update(id, input).await
     }

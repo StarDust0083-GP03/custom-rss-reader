@@ -85,10 +85,12 @@ async fn test_create_subscription_duplicate_fails() {
 async fn test_create_subscription_empty_url_fails() {
     let env = TestEnv::new().await;
 
+    // Empty string is the one URL the normalizer can't rescue — after trim
+    // it's still empty (no scheme to inject) and validate rejects it.
     let result = env
         .service
         .add_subscription(NewSubscription {
-            url: "".into(),
+            url: " ".into(),
             ..Default::default()
         })
         .await;
@@ -289,7 +291,7 @@ async fn test_update_subscription_invalid_website_url_fails() {
             sub.id,
             UpdateSubscription {
                 title: None,
-                website_url: Some("not-a-url".into()),
+                website_url: Some(Some("not-a-url".into())),
                 use_website: None,
                 rsshub_url: None,
             },
@@ -401,4 +403,79 @@ async fn test_exists_by_url() {
         .unwrap();
 
     assert!(env.repo.exists_by_url("https://example.com/rss").await.unwrap());
+}
+
+// ---------------------------------------------------------------------------
+// URL NORMALIZATION ON ADD
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_add_subscription_trims_url() {
+    let env = TestEnv::new().await;
+
+    let sub = env
+        .service
+        .add_subscription(new_sub("  https://example.com/trimmed.xml  "))
+        .await
+        .expect("padded URL should be accepted");
+
+    // The stored URL must be the normalized one, not the raw input —
+    // otherwise the later fetch would fail and dedup would be bypassed.
+    assert_eq!(sub.url, "https://example.com/trimmed.xml");
+}
+
+#[tokio::test]
+async fn test_add_subscription_adds_missing_scheme() {
+    let env = TestEnv::new().await;
+
+    let sub = env
+        .service
+        .add_subscription(new_sub("example.com/rss.xml"))
+        .await
+        .expect("scheme-less URL should be accepted");
+
+    assert_eq!(sub.url, "https://example.com/rss.xml");
+}
+
+#[tokio::test]
+async fn test_add_subscription_dedup_after_normalization() {
+    let env = TestEnv::new().await;
+
+    env.service
+        .add_subscription(new_sub("https://example.com/dup.xml"))
+        .await
+        .unwrap();
+
+    // Same feed, padded + scheme-less spelling — must still be a duplicate.
+    let result = env
+        .service
+        .add_subscription(new_sub("  example.com/dup.xml "))
+        .await;
+    match result {
+        Err(AppError::Duplicate(_)) => {}
+        other => panic!("Expected Duplicate after normalization, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_add_subscription_validates_optional_urls() {
+    let env = TestEnv::new().await;
+
+    let mut input = new_sub("https://example.com/feed.xml");
+    input.website_url = Some("not-a-url".into());
+    let result = env.service.add_subscription(input).await;
+    match result {
+        Err(AppError::Validation(msg)) => assert!(msg.contains("website_url")),
+        other => panic!("Expected Validation error, got {:?}", other),
+    }
+
+    // Empty optional URL normalizes to None instead of failing.
+    let mut input = new_sub("https://example.com/feed.xml");
+    input.website_url = Some("   ".into());
+    let sub = env
+        .service
+        .add_subscription(input)
+        .await
+        .expect("blank website_url should become None");
+    assert_eq!(sub.website_url, None);
 }

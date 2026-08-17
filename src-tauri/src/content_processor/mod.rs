@@ -1,48 +1,4 @@
 use crate::error::{AppError, Result};
-use scraper::{Html, Selector};
-
-/// Extract the main content from HTML using CSS selectors, ordered by specificity.
-pub fn extract_main_content(html: &str) -> Result<String> {
-    let document = Html::parse_document(html);
-
-    let selectors = vec![
-        "article",
-        "[role='main']",
-        "main",
-        ".post-content",
-        ".entry-content",
-        ".article-content",
-        ".content",
-        "#content",
-        ".post",
-        ".entry",
-    ];
-
-    for selector_str in &selectors {
-        if let Ok(selector) = Selector::parse(selector_str) {
-            if let Some(element) = document.select(&selector).next() {
-                let content = element.html();
-                if content.len() > 200 {
-                    return Ok(content);
-                }
-            }
-        }
-    }
-
-    // Fallback to <body>
-    if let Ok(body_sel) = Selector::parse("body") {
-        if let Some(element) = document.select(&body_sel).next() {
-            let content = element.html();
-            if content.len() > 200 {
-                return Ok(content);
-            }
-        }
-    }
-
-    Err(AppError::OperationFailed(
-        "No main content found in HTML".into(),
-    ))
-}
 
 /// Convert HTML to Markdown using the html2md crate.
 pub fn html_to_markdown(html: &str) -> Result<String> {
@@ -50,14 +6,27 @@ pub fn html_to_markdown(html: &str) -> Result<String> {
         return Err(AppError::Validation("Empty HTML content".into()));
     }
 
-    let md = html2md::parse_html(html);
-    Ok(md)
+    Ok(html2md::parse_html(html))
 }
 
 /// Strip non-content elements, extract main content, then convert to Markdown.
+///
+/// The WeChat-aware main-content extraction in `FeedFetcher::extract_main_content`
+/// covers the common article selectors (`article`, `main`, `data-content`, etc.)
+/// plus a WeChat-specific fallback. We delegate to it here so the two code
+/// paths don't drift apart.
 pub fn html_to_markdown_pipeline(html: &str) -> Result<String> {
+    if html.trim().is_empty() {
+        return Err(AppError::Validation("Empty HTML content".into()));
+    }
     let cleaned = clean_html_for_markdown(html);
-    let main_content = extract_main_content(&cleaned)?;
+    // Require main-content extraction to succeed; an empty body or a
+    // document that only contains nav/footer should NOT silently fall
+    // through to a near-empty markdown result.
+    let main_content = crate::feed::fetcher::FeedFetcher::extract_main_content(&cleaned)?;
+    if main_content.trim().is_empty() {
+        return Err(AppError::OperationFailed("No main content found".into()));
+    }
     let md = html_to_markdown(&main_content)?;
     let md = clean_markdown(&md);
     Ok(collapse_empty_lines(&md))
@@ -175,21 +144,21 @@ fn collapse_empty_lines(s: &str) -> String {
     result
 }
 
-/// Clean up markdown output by removing non-content patterns:
+/// Clean up markdown output by removing non-content patterns.
 ///
-/// - Empty links `[](url)` (from icon-only `<a>` tags)
-/// - Links whose URL contains non-content patterns like `/signin`, `/vote/`, etc.
+/// Removed: empty `[](url)` / `![](url)` links; URL-path fragments like
+/// `/signin`, `/vote/`, `/bookmark/`, `/share/` that come from Medium-style
+/// action bars. **Path-only** matches are used so genuine content URLs that
+/// happen to contain a substring like `clap` or `source=` are preserved.
 pub fn clean_markdown(md: &str) -> String {
     let mut result = String::with_capacity(md.len());
     let bytes = md.as_bytes();
     let len = md.len();
     let mut i = 0;
 
-    let non_content_patterns = [
-        "/signin", "/vote/", "/bookmark/", "/share/",
-        "clap", "actionUrl=", "source=", "post_",
-        "bookmark_", "clap_footer",
-    ];
+    // Path-segment-style patterns: must be preceded by `/` (or be at the
+    // start of the URL) so we don't match innocuous substrings.
+    let path_patterns = ["/signin", "/vote/", "/bookmark/", "/share/", "/clap"];
 
     while i < len {
         // Empty markdown link: [](
@@ -206,6 +175,14 @@ pub fn clean_markdown(md: &str) -> String {
         }
 
         // Empty image: ![](
+        // Empty alt is the NORM for content images (html2md emits `![]`
+        // whenever the source <img> has no alt attribute) — so keep the
+        // image unless its URL matches the non-content patterns (UI chrome
+        // like vote/signin/share icons). Stripping all of them removed
+        // real article images from the bilingual translation view.
+        // The WHOLE `![](...)` span is consumed here either way — copying
+        // just the `!` would let the empty-link `[](` branch below strip
+        // the rest.
         if i + 3 < len && &bytes[i..i + 4] == b"![](" {
             let mut depth = 1;
             let mut j = i + 4;
@@ -213,6 +190,11 @@ pub fn clean_markdown(md: &str) -> String {
                 if bytes[j] == b'(' { depth += 1; }
                 else if bytes[j] == b')' { depth -= 1; }
                 j += 1;
+            }
+            let url = &md[i + 4..j.saturating_sub(1).max(i + 4)];
+            if !is_non_content_url(url, &path_patterns) {
+                // Content image — copy the whole `![](...)` through.
+                result.push_str(&md[i..j]);
             }
             i = j;
             continue;
@@ -235,7 +217,7 @@ pub fn clean_markdown(md: &str) -> String {
                         j += 1;
                     }
                     let url = &md[url_start..j - 1];
-                    if non_content_patterns.iter().any(|p| url.contains(p)) {
+                    if is_non_content_url(url, &path_patterns) {
                         i = j; // skip the entire [text](url)
                         continue;
                     }
@@ -252,81 +234,47 @@ pub fn clean_markdown(md: &str) -> String {
     result
 }
 
+/// Decide whether a markdown link URL is a non-content UI fragment.
+fn is_non_content_url(url: &str, path_patterns: &[&str]) -> bool {
+    if url.is_empty() {
+        return true;
+    }
+    // Strip leading scheme://host so the path-segment match works.
+    let after_scheme = url
+        .find("://")
+        .map(|i| i + 3)
+        .and_then(|i| url[i..].find('/').map(|j| i + j))
+        .unwrap_or(0);
+    let path_and_rest = &url[after_scheme..];
+    for pattern in path_patterns {
+        for (start, _) in path_and_rest.match_indices(pattern) {
+            // Require the pattern to be a complete path segment — i.e. the
+            // character after it must be '/' (more path) or '?' (query) or
+            // '#' (fragment) or end-of-string. Otherwise we match inside
+            // a longer path token (e.g. /clap inside /clapton-live-2024).
+            let after_idx = start + pattern.len();
+            let next = path_and_rest[after_idx..].chars().next();
+            let is_boundary = match next {
+                None => true, // end of string
+                Some('/') | Some('?') | Some('#') => true,
+                _ => false,
+            };
+            if is_boundary {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Generate a long paragraph to exceed the 200-char threshold.
     fn long_para(text: &str) -> String {
-        // Repeat the text to exceed 200 chars
         let repeat = (210 / text.len()).max(2);
         (0..repeat).map(|_| text).collect::<Vec<_>>().join(" ")
-    }
-
-    // -----------------------------------------------------------------------
-    // extract_main_content
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_extract_main_content_article() {
-        let html = format!(
-            r#"
-        <html><body>
-            <nav>Nav stuff</nav>
-            <article>
-                <h1>Article Title</h1>
-                <p>{}</p>
-                <p>More paragraphs here.</p>
-            </article>
-            <footer>Footer stuff</footer>
-        </body></html>
-        "#,
-            long_para("This is the main content of the article.")
-        );
-        let result = extract_main_content(&html).unwrap();
-        assert!(result.contains("Article Title"));
-        assert!(result.contains("main content of the article"));
-        assert!(!result.contains("Nav stuff"));
-        assert!(!result.contains("Footer stuff"));
-    }
-
-    #[test]
-    fn test_extract_main_content_role_main() {
-        let html = format!(
-            r#"
-        <html><body>
-            <div role="main">
-                <h1>Main Content</h1>
-                <p>{}</p>
-            </div>
-        </body></html>
-        "#,
-            long_para("Content here, enough to pass the threshold check.")
-        );
-        let result = extract_main_content(&html).unwrap();
-        assert!(result.contains("Main Content"));
-    }
-
-    #[test]
-    fn test_extract_main_content_empty_html() {
-        let result = extract_main_content("<html><body></body></html>");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_extract_main_content_fallback_body() {
-        let html = format!(
-            r#"
-        <html><body>
-            <p>{}</p>
-            <p>{}</p>
-        </body></html>
-        "#,
-            long_para("Just a paragraph without any semantic container."),
-            long_para("Another paragraph that makes the body content long enough to extract.")
-        );
-        let result = extract_main_content(&html).unwrap();
-        assert!(result.contains("Just a paragraph"));
     }
 
     // -----------------------------------------------------------------------
@@ -337,11 +285,9 @@ mod tests {
     fn test_html_to_markdown_heading() {
         let html = "<h1>Title</h1><h2>Subtitle</h2><h3>Section</h3>";
         let md = html_to_markdown(html).unwrap();
-        // html2md uses Setext-style for h1/h2, ATX with closing for h3+
         assert!(md.contains("Title"));
         assert!(md.contains("Subtitle"));
         assert!(md.contains("Section"));
-        // h3 uses ### Section ### format
         assert!(md.contains("###"));
     }
 
@@ -365,7 +311,6 @@ mod tests {
     fn test_html_to_markdown_list() {
         let html = "<ul><li>Item 1</li><li>Item 2</li><li>Item 3</li></ul>";
         let md = html_to_markdown(html).unwrap();
-        // html2md uses asterisk for unordered lists
         assert!(md.contains("Item 1"));
         assert!(md.contains("Item 2"));
         assert!(md.contains("Item 3"));
@@ -403,10 +348,8 @@ mod tests {
 
     #[test]
     fn test_html_to_markdown_linked_image() {
-        // Image wrapped in a link — common RSS pattern
         let html = r#"<a href="https://example.com"><img src="https://example.com/img.jpg" alt="Photo"/></a>"#;
         let md = html_to_markdown(html).unwrap();
-        // Should produce markdown link containing markdown image
         assert!(md.contains("[![Photo]"));
         assert!(md.contains("(https://example.com/img.jpg)"));
         assert!(md.contains("](https://example.com)"));
@@ -416,7 +359,6 @@ mod tests {
     fn test_html_to_markdown_image_no_alt() {
         let html = r#"<img src="https://example.com/img.png"/>"#;
         let md = html_to_markdown(html).unwrap();
-        // Should produce image with empty alt text
         assert!(md.contains("![]"));
         assert!(md.contains("(https://example.com/img.png)"));
     }
@@ -425,8 +367,6 @@ mod tests {
     fn test_html_to_markdown_link_with_title() {
         let html = r#"<a href="https://example.com" title="Example Site">Click here</a>"#;
         let md = html_to_markdown(html).unwrap();
-        // html2md may or may not preserve title attribute in markdown,
-        // but at minimum the link text and URL must be present
         assert!(md.contains("[Click here]"));
         assert!(md.contains("(https://example.com)"));
     }
@@ -463,16 +403,12 @@ mod tests {
             long_para("Additional text to ensure we exceed the 200-character minimum threshold for extraction.")
         );
         let md = html_to_markdown_pipeline(&html).unwrap();
-        // Article heading preserved
         assert!(md.contains("News Title"));
-        // Content preserved
         assert!(md.contains("First paragraph"));
         assert!(md.contains("important"));
         assert!(md.contains("Second paragraph"));
-        // Link converted
         assert!(md.contains("[a link]"));
         assert!(md.contains("(https://example.com)"));
-        // Nav and footer stripped
         assert!(!md.contains("Ads and nav"));
         assert!(!md.contains("Copyright"));
     }
@@ -481,6 +417,45 @@ mod tests {
     fn test_html_to_markdown_pipeline_empty() {
         let result = html_to_markdown_pipeline("<html><body></body></html>");
         assert!(result.is_err());
+    }
+
+    /// Regression: this is the contract that `fetch_website_markdown` relies on.
+    /// Both the host-DOM text path and the iframe webview path consume this
+    /// Markdown and re-render it through `marked`. If a `<script>` tag or its
+    /// body survives the pipeline, the markdown→HTML step would re-introduce
+    /// an execution surface. This test pins that down.
+    ///
+    /// Note: `<iframe>` is NOT stripped by the pipeline — it is stripped
+    /// downstream by `setSafeHtml` (which has `iframe` in `BLOCKED_TAGS`)
+    /// when the markdown is re-rendered. The pipeline's job is just to keep
+    /// raw script bodies out of the markdown text.
+    #[test]
+    fn test_html_to_markdown_pipeline_strips_execution_surfaces() {
+        let html = format!(
+            r#"
+        <html><body>
+            <article>
+                <h1>Safe Article</h1>
+                <p>Body text. {}</p>
+                <p><a href="https://example.com" onclick="alert(1)">link</a></p>
+                <script>alert('xss')</script>
+            </article>
+        </body></html>
+        "#,
+            long_para("Padding so the article clears the 200-char extraction threshold."),
+        );
+        let md = html_to_markdown_pipeline(&html).expect("pipeline should succeed");
+
+        // No leftover script execution surface.
+        assert!(!md.contains("<script"), "script tag must be stripped");
+        assert!(!md.contains("</script"), "closing script tag must be stripped");
+        assert!(!md.contains("alert("), "script body must not survive");
+
+        // Real content is preserved as Markdown (not raw HTML).
+        assert!(md.contains("Safe Article"));
+        assert!(md.contains("Body text"));
+        assert!(md.contains("[link]"));
+        assert!(md.contains("(https://example.com)"));
     }
 
     // -----------------------------------------------------------------------
@@ -562,7 +537,7 @@ mod tests {
 
     #[test]
     fn test_clean_markdown_non_content_link() {
-        let md = r#"click [clap](/m/signin?actionUrl=...) here"#;
+        let md = r#"click [clap](https://medium.com/m/signin?actionUrl=...) here"#;
         let cleaned = clean_markdown(md);
         assert_eq!(cleaned, "click  here");
     }
@@ -574,9 +549,55 @@ mod tests {
         assert_eq!(cleaned, "read [article](https://example.com/article) ok");
     }
 
+    /// Regression for the "clap" substring bug: a real article URL that
+    /// merely contains the letters "clap" used to be deleted by the old
+    /// substring matcher. Path-segment matching must NOT trigger here.
     #[test]
-    fn test_clean_markdown_empty_image() {
+    fn test_clean_markdown_preserves_link_with_clap_in_host() {
+        let md = "see [bio](https://example.com/clapton-live-2024) ok";
+        let cleaned = clean_markdown(md);
+        assert_eq!(
+            cleaned,
+            "see [bio](https://example.com/clapton-live-2024) ok"
+        );
+    }
+
+    /// Regression for the "source=" substring bug: UTM-style `?source=...`
+    /// query params must NOT trigger the path-only blacklist.
+    #[test]
+    fn test_clean_markdown_preserves_link_with_source_query() {
+        let md = "see [ref](https://example.com/article?utm_source=feed) ok";
+        let cleaned = clean_markdown(md);
+        assert_eq!(
+            cleaned,
+            "see [ref](https://example.com/article?utm_source=feed) ok"
+        );
+    }
+
+    /// Regression for the "post_" substring bug: real path fragments like
+    /// `/posts/...` used to be matched as non-content. Path-segment
+    /// matching with a leading `/` boundary avoids the false positive.
+    #[test]
+    fn test_clean_markdown_preserves_post_path() {
+        let md = "read [post](https://example.com/posts/1234) ok";
+        let cleaned = clean_markdown(md);
+        assert_eq!(cleaned, "read [post](https://example.com/posts/1234) ok");
+    }
+
+    /// Empty-alt images are the norm for content images (html2md emits `![]`
+    /// when the source <img> has no alt) — they must be PRESERVED, or real
+    /// article images vanish from the bilingual translation view.
+    #[test]
+    fn test_clean_markdown_preserves_empty_alt_content_image() {
         let md = "text ![](https://example.com/img.png) more";
+        let cleaned = clean_markdown(md);
+        assert_eq!(cleaned, md);
+    }
+
+    /// Non-content URLs (vote/signin/share chrome) are stripped even as images.
+    #[test]
+    fn test_clean_markdown_strips_non_content_image() {
+        let md = "text ![](https://medium.com/m/signin) more";
         let cleaned = clean_markdown(md);
         assert_eq!(cleaned, "text  more");
     }
@@ -611,7 +632,6 @@ mod tests {
 
     #[test]
     fn test_clean_markdown_preserves_image_with_alt() {
-        // Image with alt text should NOT be removed
         let md = "Look at ![photo](/img/photo.jpg) here";
         let cleaned = clean_markdown(md);
         assert_eq!(cleaned, "Look at ![photo](/img/photo.jpg) here");

@@ -25,12 +25,8 @@ dist-ssr
 
 # Rust / Tauri
 src-tauri/target
-src-tauri/Cargo.lock
 
 # Database
 *.db
 *.db-shm
 *.db-wal
-
-# Reference / scratch
-backend-ref/

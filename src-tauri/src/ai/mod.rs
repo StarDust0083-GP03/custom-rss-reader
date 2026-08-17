@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppError;
 
 /// AI configuration for LLM API calls.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AiConfig {
     pub api_key: String,
     pub base_url: String,
@@ -26,6 +26,19 @@ impl AiConfig {
         }
         Ok(())
     }
+
+    /// Construct a default config without an API key (for "not yet configured"
+    /// responses, where the key must remain empty).
+    pub fn default_for(base_url: &str, model: &str) -> Self {
+        Self {
+            api_key: String::new(),
+            base_url: base_url.to_string(),
+            model: model.to_string(),
+            max_tokens: None,
+            temperature: None,
+            max_chars_per_segment: None,
+        }
+    }
 }
 
 /// Request payload for AI classification.
@@ -45,9 +58,40 @@ pub struct ClassificationResponse {
     pub category: Option<String>,
 }
 
+/// One entry in a batch classification request.
+///
+/// Title only — batch auto-classify runs on every freshly fetched item, so
+/// payload size directly drives both token cost and rate-limit pressure.
+/// Neither the description nor `content` is sent.
+#[derive(Debug, Clone)]
+pub struct BatchClassifyEntry {
+    /// Position of this entry in the batch (echoed by the LLM response).
+    pub index: usize,
+    pub title: String,
+}
+
+/// One candidate for the read-recommendation feature.
+#[derive(Debug, Clone)]
+pub struct RecommendCandidate {
+    pub item_id: i64,
+    /// Pre-formatted context line (source, title, snippet) built by the caller.
+    pub context: String,
+}
+
+/// A single recommendation picked by the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Recommendation {
+    pub item_id: i64,
+    pub reason: String,
+}
+
 /// Max characters per translation segment.
 pub const MAX_CHARS_PER_SEGMENT: usize = 3000;
 /// Max retry attempts for LLM calls.
 pub const MAX_RETRIES: usize = 2;
+/// Max articles per batch classification call.
+pub const CLASSIFY_BATCH_SIZE: usize = 20;
+/// Number of picks the recommendation prompt asks for.
+pub const RECOMMEND_PICK_COUNT: usize = 5;
 
 pub mod service;
