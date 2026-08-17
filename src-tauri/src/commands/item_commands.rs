@@ -114,23 +114,6 @@ pub async fn mark_all_read(
 }
 
 #[tauri::command]
-pub async fn mark_all_unread(
-    state: State<'_, AppState>,
-    subscription_id: Option<i64>,
-) -> Result<()> {
-    state.feed_repo.mark_all_unread(subscription_id).await
-}
-
-#[tauri::command]
-pub async fn mark_all_favorite(
-    state: State<'_, AppState>,
-    subscription_id: Option<i64>,
-    is_favorite: bool,
-) -> Result<()> {
-    state.feed_repo.mark_all_favorite(subscription_id, is_favorite).await
-}
-
-#[tauri::command]
 pub async fn toggle_favorite(
     state: State<'_, AppState>,
     item_id: i64,

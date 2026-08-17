@@ -206,39 +206,13 @@ export async function toggleReadLater(itemId: number) {
 // 批量标记已读
 export async function markAllAsRead() {
   try {
-    await itemsApi.markAllRead(S.currentSubscriptionId);
+    await invoke("mark_all_read", { subscriptionId: S.currentSubscriptionId });
     S.currentItems.forEach(item => item.is_read = true);
     renderItems();
     toastSuccess("All items marked as read");
   } catch (error) {
     console.error("Failed to mark all as read:", error);
     toastError("Failed to mark all as read");
-  }
-}
-
-// 批量标记未读
-export async function markAllAsUnread() {
-  try {
-    await itemsApi.markAllUnread(S.currentSubscriptionId);
-    S.currentItems.forEach(item => item.is_read = false);
-    renderItems();
-    toastSuccess("All items marked as unread");
-  } catch (error) {
-    console.error("Failed to mark all as unread:", error);
-    toastError("Failed to mark all as unread");
-  }
-}
-
-// 批量收藏 / 取消收藏(当前筛选范围内)
-export async function markAllFavorite(isFavorite: boolean) {
-  try {
-    await itemsApi.markAllFavorite(S.currentSubscriptionId, isFavorite);
-    S.currentItems.forEach(item => item.is_favorite = isFavorite);
-    renderItems();
-    toastSuccess(isFavorite ? "All items favorited" : "All items unfavorited");
-  } catch (error) {
-    console.error("Failed to update favorites:", error);
-    toastError("Failed to update favorites");
   }
 }
 

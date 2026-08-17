@@ -139,17 +139,6 @@ pub trait FeedItemRepository: Send + Sync {
     /// Mark all unread items as read, optionally scoped to a subscription.
     async fn mark_all_read(&self, subscription_id: Option<i64>) -> Result<()>;
 
-    /// Mark every item as unread, optionally scoped to a subscription.
-    async fn mark_all_unread(&self, subscription_id: Option<i64>) -> Result<()>;
-
-    /// Set the favorite flag on every item, optionally scoped to a
-    /// subscription (bulk "favorite all" / "unfavorite all").
-    async fn mark_all_favorite(
-        &self,
-        subscription_id: Option<i64>,
-        is_favorite: bool,
-    ) -> Result<()>;
-
     /// Toggle the favorite flag atomically. Returns the new state.
     async fn toggle_favorite(&self, id: i64) -> Result<bool>;
 
