@@ -56,13 +56,12 @@ export async function selectItem(item: FeedItemSummary) {
 
   const subId = fullItem.subscription_id;
 
-  if (S.webviewPerSubscription.has(subId)) {
-    S.useWebView = S.webviewPerSubscription.get(subId)!;
-  } else {
-    const subscription = S.subscriptions.find(s => s.id === subId);
-    S.useWebView = subscription?.use_website ?? false;
-    S.webviewPerSubscription.set(subId, S.useWebView);
-  }
+  // Render mode is a transient, per-view preference that is DECOUPLED from
+  // the subscription's `use_website` fetch setting (issue #8). Webview
+  // always defaults to opening as rendered markdown; the in-memory map only
+  // remembers the mode the user explicitly chose for this subscription
+  // during the current session and is NEVER persisted to the backend.
+  S.useWebView = S.webviewPerSubscription.get(subId) ?? false;
 
   updateToggleButtonStates();
 
@@ -267,6 +266,29 @@ export async function deleteSubscription(id: number) {
     console.error("Failed to delete subscription:", error);
     clearLoadingStatus(false, "Delete failed");
     toastError("Failed to delete subscription");
+  }
+}
+
+// Toggle the subscription's persistent webview (use_website) setting.
+// This is DISTINCT from the transient render-mode toggle in the detail
+// view (issue #8): it changes whether content is fetched/cached from the
+// website instead of RSS, and it persists to the backend. The detail-view
+// Web View/Markdown button only switches how the current article is shown
+// and never writes to this setting.
+export async function toggleUseWebsite(id: number) {
+  try {
+    const updated = await invoke<Subscription>("toggle_use_website", { id });
+    const index = S.subscriptions.findIndex(s => s.id === id);
+    if (index !== -1) {
+      S.subscriptions[index] = updated;
+    }
+    renderSubscriptions();
+    toastSuccess(updated.use_website
+      ? "Website content enabled for this subscription"
+      : "Website content disabled for this subscription");
+  } catch (error) {
+    console.error("Failed to toggle use_website:", error);
+    toastError("Failed to update subscription");
   }
 }
 

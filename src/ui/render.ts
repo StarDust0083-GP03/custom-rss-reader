@@ -16,6 +16,7 @@ import { state } from "../state";
 // both sides use hoisted function declarations, so it resolves at call time.
 import {
   toggleAutoClassify,
+  toggleUseWebsite,
   deleteSubscription,
 } from "../features/actions";
 
@@ -27,6 +28,10 @@ const SPARKLE_ICON =
   '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.7 5.7 1.9-5.7 1.9L12 18.2l-1.9-5.7-5.7-1.9 5.7-1.9z"/><path d="M18.5 15.5l.8 2.4 2.4.8-2.4.8-.8 2.4-.8-2.4-2.4-.8 2.4-.8z"/></svg>';
 const TRASH_ICON =
   '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>';
+// Globe icon for the subscription's persistent website-content toggle
+// (issue #8) — filled with the accent color when use_website is on.
+const GLOBE_ICON =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z"/></svg>';
 
 // Iframe manager — every load bumps a generation so stale loads are dropped.
 export const iframeManager = new IframeManager();
@@ -99,6 +104,22 @@ export function renderSubscriptions() {
       toggleAutoClassify(sub.id);
     });
     actions.appendChild(autoBtn);
+    const webBtn = document.createElement("button");
+    webBtn.className = "icon-btn toggle-web-btn";
+    webBtn.dataset.id = sub.id.toString();
+    webBtn.title = sub.use_website
+      ? "Website content on — click to use RSS content"
+      : "Website content off — click to fetch content from the website";
+    webBtn.dataset.web = sub.use_website ? "true" : "false";
+    webBtn.setAttribute("aria-label", "Toggle website content");
+    // Globe icon — filled (accent) when website content is enabled.
+    webBtn.innerHTML = GLOBE_ICON;
+    webBtn.classList.toggle("filled", sub.use_website);
+    webBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleUseWebsite(sub.id);
+    });
+    actions.appendChild(webBtn);
     const delBtn = document.createElement("button");
     delBtn.className = "icon-btn delete-sub";
     delBtn.dataset.id = sub.id.toString();
@@ -114,7 +135,7 @@ export function renderSubscriptions() {
 
     item.addEventListener("click", (e) => {
       const target = e.target as HTMLElement;
-      if (target.closest(".delete-sub") || target.closest(".toggle-auto-btn")) return;
+      if (target.closest(".delete-sub") || target.closest(".toggle-auto-btn") || target.closest(".toggle-web-btn")) return;
       selectSubscription(sub.id);
     });
 

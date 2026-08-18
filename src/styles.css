@@ -487,6 +487,18 @@ body::after {
     border-color: transparent;
 }
 
+/* Website-content globe (issue #8): accent when website fetch is on */
+.icon-btn.toggle-web-btn[data-web="true"],
+.icon-btn.toggle-web-btn.filled {
+    color: var(--accent-color);
+    background: var(--accent-soft);
+}
+
+.icon-btn.toggle-web-btn[data-web="true"]:hover,
+.icon-btn.toggle-web-btn.filled:hover {
+    color: var(--accent-hover);
+}
+
 /* 中栏：内容列表 */
 .items-panel {
     background: var(--bg-primary);

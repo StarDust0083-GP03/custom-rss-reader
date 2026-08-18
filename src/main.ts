@@ -4,14 +4,12 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import type { Subscription } from "./types";
 import { state } from "./state";
 import { misc } from "./api";
 import {
   renderItems,
   renderItemDetail,
   loadItems,
-  renderSubscriptions,
 } from "./ui/render";
 import { setFilter, showTagSelector, updateFilterTabs } from "./ui/filters";
 import { attachMenu, closeMenu } from "./ui/menu";
@@ -196,40 +194,26 @@ async function init() {
   document.getElementById("search-mode-btn")?.addEventListener("click", toggleSearchMode);
 
   // 详情操作按钮
-  document.getElementById("toggle-webview-btn")?.addEventListener("click", async () => {
+  document.getElementById("toggle-webview-btn")?.addEventListener("click", () => {
     const selectedItem = S.selectedItem;
-    if (selectedItem) {
-      const subId = selectedItem.subscription_id;
-      const subscription = S.subscriptions.find(s => s.id === subId);
-      const currentUseWebsite = S.webviewPerSubscription.get(subId) ?? subscription?.use_website ?? false;
+    if (!selectedItem) return;
+    const subId = selectedItem.subscription_id;
+    const current = S.webviewPerSubscription.get(subId) ?? false;
 
-      // 先立即切换前端状态
-      S.useWebView = !currentUseWebsite;
-      S.webviewPerSubscription.set(subId, S.useWebView);
+    // Transient render-mode toggle (issue #8): switch how the current
+    // article is displayed — rendered markdown <-> live webpage. This is a
+    // per-view preference that is remembered only in memory for this
+    // session. It must NOT persist to the subscription's `use_website`
+    // setting — that webview state is configured independently through the
+    // add-feed form's "Fetch content from website instead of RSS" checkbox.
+    const next = !current;
+    S.useWebView = next;
+    S.webviewPerSubscription.set(subId, next);
 
-      // 更新按钮状态并重新渲染详情
-      const btn = document.getElementById("toggle-webview-btn") as HTMLButtonElement;
-      btn.textContent = S.useWebView ? "Markdown" : "Web View";
-      renderItemDetail(selectedItem);
-
-      // 然后在后台更新后端状态
-      try {
-        const updated = await invoke<Subscription>("toggle_use_website", { id: subId });
-        // 使用后端返回的新状态来确保一致性
-        S.useWebView = updated.use_website;
-        S.webviewPerSubscription.set(subId, updated.use_website);
-        // 更新本地订阅源列表
-        const index = S.subscriptions.findIndex(s => s.id === subId);
-        if (index !== -1) {
-          S.subscriptions[index] = updated;
-        }
-        renderSubscriptions();
-        // 如果后端返回的状态与本地不一致，需要重新渲染
-        if (S.selectedItem) renderItemDetail(S.selectedItem);
-      } catch (error) {
-        console.error("Failed to update subscription:", error);
-      }
-    }
+    // Update button label and re-render the detail view.
+    const btn = document.getElementById("toggle-webview-btn") as HTMLButtonElement;
+    btn.textContent = S.useWebView ? "Markdown" : "Web View";
+    renderItemDetail(selectedItem);
   });
 
   document.getElementById("mark-read-btn")?.addEventListener("click", () => {
