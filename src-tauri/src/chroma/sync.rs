@@ -30,7 +30,7 @@
 //! the state and runs the same loop — one mechanism, no special cases.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,44 @@ pub struct SyncReport {
     pub deleted: usize,
     pub pages: usize,
     pub duration_ms: u128,
+}
+
+/// Live progress of the current sync/reindex run, polled by the UI so a
+/// long re-index shows a running status instead of just a final toast.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct SyncProgress {
+    /// True while a sync/reindex is in flight.
+    pub running: bool,
+    /// Current stage: `""` (idle), `"deletes"`, `"upserts"`, `"walk"`.
+    pub phase: &'static str,
+    /// Approximate total items to scan (`max(feed_items.id)` at run start).
+    pub total: i64,
+    /// Rows processed so far (deleted + upserted + walked).
+    pub done: i64,
+    pub pages: usize,
+    pub elapsed_ms: u128,
+}
+
+/// Process-global progress tracker. Counters only — a plain `Mutex` is
+/// enough: updated synchronously in the sync loop, snapshotted by a command.
+static PROGRESS: Mutex<SyncProgress> = Mutex::new(SyncProgress {
+    running: false,
+    phase: "",
+    total: 0,
+    done: 0,
+    pages: 0,
+    elapsed_ms: 0,
+});
+
+/// Snapshot for the UI polling command.
+pub fn current_progress() -> SyncProgress {
+    *PROGRESS.lock().unwrap()
+}
+
+/// Mutate the shared progress state.
+fn update_progress(f: impl FnOnce(&mut SyncProgress)) {
+    let mut p = PROGRESS.lock().unwrap();
+    f(&mut p);
 }
 
 /// Persisted sync state. Stored as JSON next to the other app config files.
@@ -150,6 +188,15 @@ pub async fn incremental_sync(
     let mut state = SyncState::load();
     let mut report = SyncReport::default();
 
+    update_progress(|p| {
+        p.running = true;
+        p.phase = "";
+        p.total = 0;
+        p.done = 0;
+        p.pages = 0;
+        p.elapsed_ms = 0;
+    });
+
     // 1. Watermark validation — a database reset (ids restarting at 1) must
     //    not be treated as "everything already indexed".
     let max_id = repo.max_item_id().await?;
@@ -157,26 +204,39 @@ pub async fn incremental_sync(
         state.last_indexed_id = 0;
         state.save()?;
     }
+    // `total` approximates the number of items to scan (walk runs 0 → max id).
+    update_progress(|p| p.total = max_id);
+
+    let mut processed: i64 = 0;
 
     // 2. Pending deletes — deleting an id that isn't in the index is a
     //    no-op server-side, so blind batched deletes are safe.
     if !state.pending_deletes.is_empty() {
+        update_progress(|p| p.phase = "deletes");
         chroma.delete_items(&state.pending_deletes).await?;
         report.deleted = state.pending_deletes.len();
+        processed += report.deleted as i64;
         state.pending_deletes.clear();
         state.save()?;
     }
 
     // 3. Pending upserts (items whose fetch-time indexing failed).
     if !state.pending_upserts.is_empty() {
+        update_progress(|p| p.phase = "upserts");
         let rows = repo.find_index_rows_by_ids(&state.pending_upserts).await?;
         chroma.upsert_index_rows(&rows).await?;
         report.indexed += rows.len();
+        processed += rows.len() as i64;
         state.pending_upserts.clear();
         state.save()?;
     }
 
-    // 4. Keyset walk above the watermark.
+    // 4. Keyset walk above the watermark — the long haul (embedding page by
+    //    page), so this is where per-page progress is reported.
+    let pages_total = (max_id as usize + SYNC_PAGE_SIZE as usize - 1) / SYNC_PAGE_SIZE as usize;
+    if max_id > state.last_indexed_id {
+        update_progress(|p| p.phase = "walk");
+    }
     loop {
         let rows = repo.find_index_page(state.last_indexed_id, SYNC_PAGE_SIZE).await?;
         if rows.is_empty() {
@@ -186,13 +246,38 @@ pub async fn incremental_sync(
         chroma.upsert_index_rows(&rows).await?;
         report.indexed += rows.len();
         report.pages += 1;
+        processed += rows.len() as i64;
         // Advance + persist ONLY after a successful upsert — crash safety.
         state.last_indexed_id = last_id;
         state.save()?;
+
+        update_progress(|p| {
+            p.done = processed;
+            p.pages = report.pages;
+            p.elapsed_ms = started.elapsed().as_millis();
+        });
+        println!(
+            "[chroma-sync] page {}/~{}: +{} indexed ({} total), {:?} elapsed",
+            report.pages,
+            pages_total.max(1),
+            rows.len(),
+            report.indexed,
+            started.elapsed(),
+        );
+
         if (rows.len() as i64) < SYNC_PAGE_SIZE {
             break;
         }
     }
+
+    // Final snapshot: done, not running — the UI's last poll shows totals.
+    update_progress(|p| {
+        p.done = processed;
+        p.pages = report.pages;
+        p.running = false;
+        p.phase = "";
+        p.elapsed_ms = started.elapsed().as_millis();
+    });
 
     report.duration_ms = started.elapsed().as_millis();
     Ok(report)

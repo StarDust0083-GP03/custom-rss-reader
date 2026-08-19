@@ -144,6 +144,7 @@ pub fn run() {
             find_similar_items,
             reindex_chromadb,
             chroma_sync,
+            chroma_sync_progress,
             chroma_health_check,
             // Debug commands (dev builds only)
             #[cfg(debug_assertions)]
