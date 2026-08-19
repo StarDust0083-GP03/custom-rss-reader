@@ -103,6 +103,7 @@ export const items = {
       "items.list",
     ),
   get: (id: number) => call<FeedItem>("get_item", { id }, "items.get"),
+  resetContentMd: (id: number) => call<FeedItem>("reset_item_content_md", { id }, "items.resetContentMd"),
   search: (query: string, limit = 50) =>
     call<FeedItemSummary[]>("search_items", { query, limit }, "items.search"),
   byTag: (tag: string, subscriptionId?: number | null) =>

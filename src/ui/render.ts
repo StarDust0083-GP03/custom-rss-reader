@@ -16,6 +16,7 @@ import { state } from "../state";
 // both sides use hoisted function declarations, so it resolves at call time.
 import {
   toggleAutoClassify,
+  toggleUseWebsite,
   deleteSubscription,
 } from "../features/actions";
 
@@ -27,6 +28,10 @@ const SPARKLE_ICON =
   '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.7 5.7 1.9-5.7 1.9L12 18.2l-1.9-5.7-5.7-1.9 5.7-1.9z"/><path d="M18.5 15.5l.8 2.4 2.4.8-2.4.8-.8 2.4-.8-2.4-2.4-.8 2.4-.8z"/></svg>';
 const TRASH_ICON =
   '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>';
+// Globe icon for the subscription's persistent website-content toggle
+// (issue #8) — filled with the accent color when use_website is on.
+const GLOBE_ICON =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z"/></svg>';
 
 // Iframe manager — every load bumps a generation so stale loads are dropped.
 export const iframeManager = new IframeManager();
@@ -35,12 +40,53 @@ export const iframeManager = new IframeManager();
 // subscription A doesn't paint over the fresh results for subscription B.
 let loadItemsSeq = 0;
 
-// 更新切换按钮状态
+// Sync the Markdown / Web View buttons to the current render mode.
+//
+// Two separate buttons with distinct semantics (user clarification):
+//   - Web View button  -> toggles the SUBSCRIPTION's persistent webview
+//     mode (use_website): whether content is fetched from the website vs RSS
+//     text. Active state = the subscription's use_website value.
+//   - Markdown button  -> within webview mode, switches the transient render
+//     between Markdown and the live Web page. In text mode (use_website off)
+//     it's disabled because only text is shown.
 export function updateToggleButtonStates() {
-  const webviewBtn = document.getElementById("toggle-webview-btn") as HTMLButtonElement;
+  const markdownBtn = document.getElementById("markdown-btn") as HTMLButtonElement | null;
+  const webviewBtn = document.getElementById("webview-btn") as HTMLButtonElement | null;
+
+  const item = S.selectedItem;
+  const subId = item?.subscription_id;
+  const subscription = subId != null
+    ? S.subscriptions.find(s => s.id === subId)
+    : undefined;
+
+  // Persistent subscription webview mode — controlled by the Web View button.
+  const webviewMode = subscription?.use_website ?? false;
+  // Within webview mode, markdown <-> live web — controlled by the Markdown
+  // button, remembered in memory for this session only.
+  const wantLiveWeb = subId != null
+    ? (S.webviewPerSubscription.get(subId) ?? false)
+    : false;
+  // Live web only exists when the subscription is in webview mode AND the
+  // item has a link.
+  const canWeb = webviewMode && !!item?.link;
+  const showWeb = canWeb && wantLiveWeb;
 
   if (webviewBtn) {
-    webviewBtn.textContent = S.useWebView ? "Markdown" : "Web View";
+    webviewBtn.classList.toggle("active", webviewMode);
+    webviewBtn.disabled = false;
+    webviewBtn.title = webviewMode
+      ? "Webview mode on — click to switch to text (RSS)"
+      : "Webview mode off — click to fetch content from the website";
+  }
+  if (markdownBtn) {
+    // In text mode there's no markdown/web switch — only text is shown.
+    markdownBtn.disabled = !canWeb;
+    markdownBtn.classList.toggle("active", !showWeb);
+    markdownBtn.title = canWeb
+      ? (showWeb
+          ? "Viewing live Web — click for Markdown"
+          : "Showing Markdown — click for live Web")
+      : "Text mode — no live web view";
   }
 }
 
@@ -99,6 +145,22 @@ export function renderSubscriptions() {
       toggleAutoClassify(sub.id);
     });
     actions.appendChild(autoBtn);
+    const webBtn = document.createElement("button");
+    webBtn.className = "icon-btn toggle-web-btn";
+    webBtn.dataset.id = sub.id.toString();
+    webBtn.title = sub.use_website
+      ? "Website content on — click to use RSS content"
+      : "Website content off — click to fetch content from the website";
+    webBtn.dataset.web = sub.use_website ? "true" : "false";
+    webBtn.setAttribute("aria-label", "Toggle website content");
+    // Globe icon — filled (accent) when website content is enabled.
+    webBtn.innerHTML = GLOBE_ICON;
+    webBtn.classList.toggle("filled", sub.use_website);
+    webBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleUseWebsite(sub.id);
+    });
+    actions.appendChild(webBtn);
     const delBtn = document.createElement("button");
     delBtn.className = "icon-btn delete-sub";
     delBtn.dataset.id = sub.id.toString();
@@ -114,7 +176,7 @@ export function renderSubscriptions() {
 
     item.addEventListener("click", (e) => {
       const target = e.target as HTMLElement;
-      if (target.closest(".delete-sub") || target.closest(".toggle-auto-btn")) return;
+      if (target.closest(".delete-sub") || target.closest(".toggle-auto-btn") || target.closest(".toggle-web-btn")) return;
       selectSubscription(sub.id);
     });
 
@@ -236,25 +298,6 @@ export function renderItems(preserveScroll = false) {
     }
     div.appendChild(header);
 
-    // Source line (issue #3) — small-caps kicker above the description so
-    // every card shows WHERE the article came from, matching the detail
-    // view's .detail-source. Skipped when the summary carries no source
-    // (e.g. synthesized semantic-search hits).
-    const sourceName = item.source_title || item.source_url;
-    if (sourceName) {
-      const src = document.createElement("div");
-      src.className = "item-source";
-      src.textContent = sourceName;
-      src.title = "Go to source";
-      // Peek navigation: scroll + highlight the source in the sidebar
-      // WITHOUT selecting it (and without selecting this article).
-      src.addEventListener("click", (e) => {
-        e.stopPropagation();
-        revealSubscription(item.subscription_id);
-      });
-      div.appendChild(src);
-    }
-
     if (item.description) {
       const desc = document.createElement("div");
       desc.className = "item-description";
@@ -312,6 +355,24 @@ export function renderItems(preserveScroll = false) {
     }
     div.appendChild(meta);
 
+    // Source footer (issue #3) — small-caps kicker at the bottom of the
+    // card, matching the detail view's .detail-source. Skipped when the
+    // summary carries no source (e.g. synthesized semantic-search hits).
+    const sourceName = item.source_title || item.source_url;
+    if (sourceName) {
+      const src = document.createElement("div");
+      src.className = "item-source";
+      src.textContent = sourceName;
+      src.title = "Go to source";
+      // Peek navigation: scroll + highlight the source in the sidebar
+      // WITHOUT selecting it (and without selecting this article).
+      src.addEventListener("click", (e) => {
+        e.stopPropagation();
+        revealSubscription(item.subscription_id);
+      });
+      div.appendChild(src);
+    }
+
     div.addEventListener("click", () => selectItemLocal(item));
     list.appendChild(div);
   });
@@ -367,15 +428,16 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
 
   const subscription = S.subscriptions.find(s => s.id === item.subscription_id);
   const subName = subscription?.title || subscription?.url || "Unknown";
-  const useWebViewForItem = S.webviewPerSubscription.get(item.subscription_id) ?? false;
-  // Webview mode = show the REAL webpage whenever the subscription asks for
-  // it and the item has a link (issue #2). The old cached-content/override
-  // gymnastics made both modes render markdown — indistinguishable views.
-  const showWebView = useWebViewForItem && item.link !== null;
+  // Persistent subscription webview mode — controlled by the Web View button
+  // (use_website: content fetched from website vs RSS text). Within webview
+  // mode the Markdown button switches between rendered markdown and the live
+  // webpage; in text mode only text is shown.
+  const webviewMode = subscription?.use_website ?? false;
+  const wantLiveWeb = S.webviewPerSubscription.get(item.subscription_id) ?? false;
+  const showWebView = webviewMode && wantLiveWeb && item.link !== null;
 
-  // Toggle button label
-  const toggleBtn = document.getElementById("toggle-webview-btn") as HTMLButtonElement | null;
-  if (toggleBtn) toggleBtn.textContent = showWebView ? "Markdown" : "Web View";
+  // Sync the Markdown / Web View mode buttons to the rendered mode.
+  updateToggleButtonStates();
 
   // Top action buttons (read / favorite / read-later / open)
   const markReadBtn = document.getElementById("mark-read-btn");

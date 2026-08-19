@@ -107,6 +107,7 @@ pub fn run() {
             get_items,
             search_items,
             get_item,
+            reset_item_content_md,
             get_items_by_subscription,
             get_items_by_tag,
             get_all_tags,

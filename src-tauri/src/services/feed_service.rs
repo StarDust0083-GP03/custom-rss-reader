@@ -288,6 +288,27 @@ pub async fn ensure_content_md_for_item(
     repo.update_content_md(item_id, &md, false).await
 }
 
+/// Re-derive `content_md` from the item's raw RSS `content`, overwriting
+/// whatever is cached (e.g. website markdown) and clearing
+/// `is_website_content`. Used when a subscription leaves webview mode so the
+/// Markdown view reverts to the RSS text instead of the cached website
+/// content. When the item has no RSS content it just clears the website flag.
+pub async fn revert_to_rss_markdown(
+    repo: &Arc<dyn FeedItemRepository>,
+    item_id: i64,
+) -> Result<crate::models::FeedItem> {
+    let item = repo.find_by_id(item_id).await?;
+    let md = match item.content.clone() {
+        Some(html) => tokio::task::spawn_blocking(move || ensure_content_md(&html))
+            .await
+            .map_err(|e| {
+                crate::error::AppError::Internal(format!("markdown task failed: {}", e))
+            })?,
+        None => String::new(),
+    };
+    repo.reset_content_md(item_id, &md).await
+}
+
 /// Fetch one feed, parse, dedup against existing rows, insert new items and
 /// run per-item side effects (classification, Chroma indexing, website
 /// content pre-caching).

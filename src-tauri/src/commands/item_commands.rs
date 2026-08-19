@@ -50,6 +50,14 @@ pub async fn get_item(state: State<'_, AppState>, id: i64) -> Result<FeedItem> {
     crate::services::feed_service::ensure_content_md_for_item(&state.feed_repo, id).await
 }
 
+/// Revert an item's cached Markdown to its RSS `content`, clearing the
+/// `is_website_content` flag. Used when a subscription leaves webview mode so
+/// the Markdown view shows the RSS text instead of the cached website content.
+#[tauri::command]
+pub async fn reset_item_content_md(state: State<'_, AppState>, id: i64) -> Result<FeedItem> {
+    crate::services::feed_service::revert_to_rss_markdown(&state.feed_repo, id).await
+}
+
 #[tauri::command]
 pub async fn get_items_by_subscription(
     state: State<'_, AppState>,

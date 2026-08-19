@@ -95,6 +95,12 @@ pub trait FeedItemRepository: Send + Sync {
         from_website: bool,
     ) -> Result<FeedItem>;
 
+    /// Overwrite the Markdown cache back to the RSS content source: sets
+    /// `content_md` AND clears `is_website_content`. Used when a
+    /// subscription leaves webview mode so a cached website markdown is
+    /// replaced by its RSS text. Returns `AppError::NotFound` if missing.
+    async fn reset_content_md(&self, id: i64, content_md: &str) -> Result<FeedItem>;
+
     /// Persist (or overwrite) the translation of a feed item.
     async fn update_translation(
         &self,

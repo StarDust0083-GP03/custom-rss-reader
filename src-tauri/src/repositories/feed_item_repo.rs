@@ -397,6 +397,30 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         Ok(row.into())
     }
 
+    async fn reset_content_md(
+        &self,
+        id: i64,
+        content_md: &str,
+    ) -> Result<FeedItem> {
+        // Overwrite both content_md and the website marker — this always
+        // reverts to the RSS source, never the website.
+        let row = sqlx::query_as::<_, FeedItemRow>(
+            r#"
+            UPDATE feed_items
+            SET content_md = $2, is_website_content = 0
+            WHERE id = $1
+            RETURNING *
+            "#,
+        )
+        .bind(id)
+        .bind(content_md)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("FeedItem with id {} not found", id)))?;
+
+        Ok(row.into())
+    }
+
     async fn update_translation(
         &self,
         item_id: i64,
