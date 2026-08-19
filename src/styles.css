@@ -761,10 +761,22 @@ body::after {
     flex-wrap: wrap;
 }
 
+.detail-actions button.active,
 .detail-item-actions button.active {
     background: var(--accent-color);
     color: var(--bg-primary);
     border-color: var(--accent-color);
+}
+
+.detail-actions button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.detail-actions button:disabled:hover {
+    background: transparent;
+    color: var(--text-primary);
+    border-color: var(--border-color);
 }
 
 /* 翻译按钮状态 */
@@ -1940,7 +1952,8 @@ body::after {
 }
 
 /* ==================== Item source kicker (issue #3) ==================== */
-/* Small-caps source line on list cards — same grammar as .detail-source. */
+/* Small-caps source footer on list cards — same grammar as .detail-source.
+   Sits at the bottom of the card, under the meta row. */
 .item-source {
     font-family: var(--font-ui);
     font-size: 0.66rem;
@@ -1948,7 +1961,7 @@ body::after {
     letter-spacing: 0.11em;
     text-transform: uppercase;
     color: var(--text-secondary);
-    margin: -0.15rem 0 0.3rem;
+    margin: 0.4rem 0 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

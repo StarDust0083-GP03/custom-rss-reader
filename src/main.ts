@@ -5,11 +5,12 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { state } from "./state";
-import { misc } from "./api";
+import { items as itemsApi, misc } from "./api";
 import {
   renderItems,
   renderItemDetail,
   loadItems,
+  updateToggleButtonStates,
 } from "./ui/render";
 import { setFilter, showTagSelector, updateFilterTabs } from "./ui/filters";
 import { attachMenu, closeMenu } from "./ui/menu";
@@ -27,6 +28,7 @@ import {
   markAsRead,
   toggleFavorite,
   toggleReadLater,
+  toggleUseWebsite,
   cancelIgnoreTimer,
 } from "./features/actions";
 import {
@@ -193,27 +195,69 @@ async function init() {
   // Search mode toggle
   document.getElementById("search-mode-btn")?.addEventListener("click", toggleSearchMode);
 
-  // 详情操作按钮
-  document.getElementById("toggle-webview-btn")?.addEventListener("click", () => {
-    const selectedItem = S.selectedItem;
-    if (!selectedItem) return;
-    const subId = selectedItem.subscription_id;
-    const current = S.webviewPerSubscription.get(subId) ?? false;
+  // 详情操作按钮.
+  //
+  // - Web View button: toggles the SUBSCRIPTION's persistent webview mode
+  //   (use_website) — whether content is fetched from the website vs RSS
+  //   text. This is a persistent, backend setting; the active state mirrors
+  //   the subscription's use_website value.
+  // - Markdown button: within webview mode, switches the transient render
+  //   between Markdown and the live Web page (in-memory, per session only).
+  //   In text mode (use_website off) it is disabled — only text is shown.
+  document.getElementById("webview-btn")?.addEventListener("click", async () => {
+    const item = S.selectedItem;
+    if (!item) return;
+    const subId = item.subscription_id;
+    const wasOn = S.subscriptions.find(s => s.id === subId)?.use_website ?? false;
 
-    // Transient render-mode toggle (issue #8): switch how the current
-    // article is displayed — rendered markdown <-> live webpage. This is a
-    // per-view preference that is remembered only in memory for this
-    // session. It must NOT persist to the subscription's `use_website`
-    // setting — that webview state is configured independently through the
-    // add-feed form's "Fetch content from website instead of RSS" checkbox.
-    const next = !current;
+    await toggleUseWebsite(subId);
+    const sub = S.subscriptions.find(s => s.id === subId);
+    updateToggleButtonStates();
+    if (!sub) return;
+
+    const turningOn = !wasOn && sub.use_website;
+    const turningOff = wasOn && !sub.use_website;
+
+    try {
+      if (turningOn && item.link) {
+        // Enable webview mode: lazily fetch the website's content so the
+        // Markdown view reflects the actual article page rather than the
+        // RSS snippet. Mirrors the translate path — fetch_website_markdown
+        // persists the website markdown into content_md (and flips the
+        // is_website_content flag).
+        const md = await invoke<string>("fetch_website_markdown", {
+          url: item.link,
+          itemId: item.id,
+        });
+        item.content_md = md;
+        item.is_website_content = true;
+      } else if (turningOff) {
+        // Disable webview mode: revert the markdown back to the RSS
+        // content so we don't keep showing the previously cached website
+        // page. The backend re-derives content_md from the raw RSS
+        // `content` and clears is_website_content.
+        const updated = await itemsApi.resetContentMd(item.id);
+        item.content_md = updated.content_md;
+        item.is_website_content = updated.is_website_content;
+      }
+    } catch (error) {
+      console.error("Failed to update content source:", error);
+    }
+
+    renderItemDetail(item);
+  });
+
+  document.getElementById("markdown-btn")?.addEventListener("click", () => {
+    const item = S.selectedItem;
+    if (!item) return;
+    const subId = item.subscription_id;
+    const subscription = S.subscriptions.find(s => s.id === subId);
+    if (!subscription?.use_website) return; // text mode: nothing to toggle
+    const next = !(S.webviewPerSubscription.get(subId) ?? false);
     S.useWebView = next;
     S.webviewPerSubscription.set(subId, next);
-
-    // Update button label and re-render the detail view.
-    const btn = document.getElementById("toggle-webview-btn") as HTMLButtonElement;
-    btn.textContent = S.useWebView ? "Markdown" : "Web View";
-    renderItemDetail(selectedItem);
+    updateToggleButtonStates();
+    renderItemDetail(item);
   });
 
   document.getElementById("mark-read-btn")?.addEventListener("click", () => {
@@ -280,13 +324,16 @@ async function init() {
     }
 
     // 检查是否在 webview 模式下，如果是则先将网页内容保存为 content_md
-    const useWebViewForItem = S.webviewPerSubscription.get(S.selectedItem.subscription_id) ?? false;
+    // Webview mode = the subscription's persistent use_website setting.
+    const selItem = S.selectedItem;
+    if (!selItem) return;
+    const subWebView = S.subscriptions.find(s => s.id === selItem.subscription_id)?.use_website ?? false;
 
-    if (useWebViewForItem && S.selectedItem.link && !S.selectedItem.content_md) {
+    if (subWebView && selItem.link && !selItem.content_md) {
       // 只在 content_md 尚未缓存时获取网页内容（避免重复请求）
       try {
         console.log('[Translate] Fetching website markdown');
-        await invoke<string>("fetch_website_markdown", { url: S.selectedItem.link, itemId: S.selectedItem.id });
+        await invoke<string>("fetch_website_markdown", { url: selItem.link, itemId: selItem.id });
       } catch (error) {
         console.error('[Translate] Failed to fetch website content:', error);
       }
