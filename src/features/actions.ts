@@ -360,6 +360,8 @@ export async function searchItems(query: string) {
     loadItems();
     return;
   }
+  const searchT0 = performance.now();
+  console.log(`[search] start mode=${S.searchMode} query="${query}"`);
 
   if (S.searchMode === "semantic" && S.chromaEnabled) {
     setLoadingWithStatus("", `Semantic search: "${query}"`);
@@ -391,8 +393,14 @@ export async function searchItems(query: string) {
       } as unknown as FeedItemSummary));
       renderItems();
       clearLoadingStatus(true, `Found ${results.length} semantic results`);
+      console.log(
+        `[search] done semantic in ${Math.round(performance.now() - searchT0)}ms hits=${results.length} query="${query}"`,
+      );
     } catch (error) {
-      console.error("Failed to semantic search:", error);
+      console.error(
+        `[search] FAILED semantic after ${Math.round(performance.now() - searchT0)}ms:`,
+        error,
+      );
       clearLoadingStatus(false, "Semantic search failed");
       toastError("Semantic search failed. Is ChromaDB running?");
     }
@@ -405,8 +413,11 @@ export async function searchItems(query: string) {
     S.currentItems = items;
     renderItems();
     clearLoadingStatus(true, `Found ${items.length} items`);
+    console.log(
+      `[search] done text in ${Math.round(performance.now() - searchT0)}ms hits=${items.length} query="${query}"`,
+    );
   } catch (error) {
-    console.error("Failed to search items:", error);
+    console.error(`[search] FAILED text after ${Math.round(performance.now() - searchT0)}ms:`, error);
     clearLoadingStatus(false, "Search failed");
     toastError("Failed to search items");
   }

@@ -1,5 +1,6 @@
 use chromadb::client::{ChromaAuthMethod, ChromaClient, ChromaClientOptions};
 use chromadb::collection::{ChromaCollection, CollectionEntries, QueryOptions, QueryResult};
+use chromadb::embeddings::EmbeddingFunction;
 use serde_json::Map;
 
 use crate::error::Result;
@@ -143,27 +144,44 @@ impl ChromaService {
         query: &str,
         n_results: usize,
     ) -> Result<Vec<SemanticSearchResult>> {
+        // Time each stage so slow searches can be diagnosed: embedding the
+        // query (ONNX model load + inference, client-side) vs the ChromaDB
+        // round trip. We embed ourselves and hand over the raw vector — the
+        // crate would otherwise embed internally and give us no visibility.
+        let total_t0 = std::time::Instant::now();
+        let embed_t0 = std::time::Instant::now();
+        let query_embedding = self
+            .embedding_function
+            .embed(&[query])
+            .await
+            .map_err(|e| {
+                crate::error::AppError::OperationFailed(format!("Embed query: {}", e))
+            })?
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let embed_ms = embed_t0.elapsed().as_millis();
+
         let includes: Vec<&str> = vec!["metadatas", "distances"];
 
         let query_options = QueryOptions {
-            query_texts: Some(vec![query]),
-            query_embeddings: None,
+            query_texts: None,
+            query_embeddings: Some(vec![query_embedding]),
             where_metadata: None,
             where_document: None,
             n_results: Some(n_results),
             include: Some(includes),
         };
 
-        // Querying by text requires an embedding function client-side, just
-        // like upserts — otherwise the crate bails ("You must provide an
-        // embedding function when providing query_texts").
+        let query_t0 = std::time::Instant::now();
         let result: QueryResult = self
             .collection
-            .query(query_options, Some(Box::new(self.embedding_function.clone())))
+            .query(query_options, None)
             .await
             .map_err(|e| {
                 crate::error::AppError::OperationFailed(format!("ChromaDB query: {}", e))
             })?;
+        let query_ms = query_t0.elapsed().as_millis();
 
         let mut results: Vec<SemanticSearchResult> = Vec::new();
 
@@ -220,6 +238,19 @@ impl ChromaService {
                 score,
             });
         }
+
+        // End-of-query summary — the split decides whether the model load,
+        // inference, or the ChromaDB round trip is the bottleneck.
+        let display: String = query.chars().take(80).collect();
+        println!(
+            "[chroma] SEARCH total={}ms (embed={}ms, server={}ms) hits={} n_results={} query={:?}",
+            total_t0.elapsed().as_millis(),
+            embed_ms,
+            query_ms,
+            results.len(),
+            n_results,
+            display,
+        );
 
         Ok(results)
     }
