@@ -121,6 +121,15 @@ pub async fn chroma_sync(state: State<'_, AppState>) -> Result<String> {
     ))
 }
 
+/// Live progress of the current reindex/sync run, polled by the UI while
+/// `reindex_chromadb` is in flight so it can show a running status.
+#[tauri::command]
+pub async fn chroma_sync_progress(
+    _state: State<'_, AppState>,
+) -> Result<crate::chroma::sync::SyncProgress> {
+    Ok(crate::chroma::sync::current_progress())
+}
+
 #[tauri::command]
 pub async fn chroma_health_check(state: State<'_, AppState>) -> Result<bool> {
     match state.chroma_service.get().await {

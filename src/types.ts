@@ -103,6 +103,16 @@ export interface ChromaConfigResponse {
   enabled: boolean;
 }
 
+/** Live progress of an in-flight ChromaDB reindex/sync, polled by the UI. */
+export interface SyncProgress {
+  running: boolean;
+  phase: string;
+  total: number;
+  done: number;
+  pages: number;
+  elapsed_ms: number;
+}
+
 export interface AiConfigResponse {
   /** Masked API key, e.g. `sk-****1234`. Empty when no key configured. */
   api_key: string;

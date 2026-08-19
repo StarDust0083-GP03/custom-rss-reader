@@ -4,7 +4,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import type { ChromaConfigResponse } from "../types";
+import type { ChromaConfigResponse, SyncProgress } from "../types";
 import { chroma as chromaApi } from "../api";
 import { state } from "../state";
 import { renderItems } from "../ui/render";
@@ -94,11 +94,35 @@ export function closeChromaSettingsModal() {
 }
 
 export async function reindexChroma() {
+  setLoadingWithStatus("", "Re-indexing...");
+  let poll: ReturnType<typeof setInterval> | undefined;
   try {
     toastSuccess("Re-indexing started...");
+    // Poll live progress while the (potentially long) reindex runs, so the
+    // status bar shows movement instead of sitting on "Re-indexing...".
+    poll = setInterval(async () => {
+      try {
+        const p = await invoke<SyncProgress>("chroma_sync_progress");
+        if (p.running) {
+          const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : 0;
+          setLoadingWithStatus(
+            "",
+            `Re-indexing (${p.phase || "walk"})... ${p.done}/${p.total} items ${pct}%, ` +
+              `page ${p.pages}, ${p.elapsed_ms}ms`,
+          );
+        }
+      } catch {
+        // transient polling errors are harmless — keep trying
+      }
+    }, 400);
     const result = await invoke<string>("reindex_chromadb");
+    clearInterval(poll);
+    poll = undefined;
+    clearLoadingStatus(true, result);
     toastSuccess(result);
   } catch (error) {
+    if (poll !== undefined) clearInterval(poll);
+    clearLoadingStatus(false, "Re-index failed");
     toastError(`Re-index failed: ${error}`);
   }
 }
