@@ -6,6 +6,7 @@ use crate::error::Result;
 use crate::models::feed_item::FeedItem;
 use crate::repositories::IndexRow;
 
+use super::embeddings::OnnxEmbeddingFunction;
 use super::ChromaConfig;
 
 /// Maximum number of characters of content indexed per article. Beyond this
@@ -18,28 +19,37 @@ const BATCH_SIZE: usize = 50;
 /// ChromaDB service for semantic search of RSS articles.
 pub struct ChromaService {
     collection: ChromaCollection,
+    /// Computes embeddings client-side: the `chromadb` crate refuses
+    /// documents without embeddings and `query_texts` without an embedding
+    /// function, and ChromaDB 1.x no longer provides a server-side default.
+    /// The model is downloaded/loaded lazily on first use — see
+    /// [`OnnxEmbeddingFunction`].
+    embedding_function: OnnxEmbeddingFunction,
 }
 
 impl ChromaService {
     /// Create a new ChromaService, connecting to ChromaDB and ensuring the collection exists.
+    ///
+    /// Database name compatibility: Chroma ≤0.6 created the v2 database as
+    /// `default`, Chroma 1.x renamed it to `default_database` (the identity
+    /// endpoint reports it). Hardcoding either breaks the other generation —
+    /// the identity response of a 1.x server is authoritative, so we try the
+    /// modern name first and fall back to the legacy one.
     pub async fn new(config: &ChromaConfig) -> Result<Self> {
         let url = config.url();
-        let client = ChromaClient::new(ChromaClientOptions {
-            url: Some(url),
-            database: "default".to_string(),
-            auth: ChromaAuthMethod::None,
+        let collection = match connect(&url, &config.collection_name, "default_database").await {
+            Ok(c) => c,
+            Err(first) => match connect(&url, &config.collection_name, "default").await {
+                Ok(c) => c,
+                Err(_) => return Err(first),
+            },
+        };
+        // Cheap: constructing the embedding function does no I/O — the
+        // ~120 MB model is downloaded/loaded on the first embed call.
+        Ok(Self {
+            collection,
+            embedding_function: OnnxEmbeddingFunction::new(),
         })
-        .await
-        .map_err(|e| crate::error::AppError::OperationFailed(format!("ChromaDB connect: {}", e)))?;
-
-        let collection = client
-            .get_or_create_collection(&config.collection_name, None)
-            .await
-            .map_err(|e| {
-                crate::error::AppError::OperationFailed(format!("ChromaDB collection: {}", e))
-            })?;
-
-        Ok(Self { collection })
     }
 
     /// Index a single feed item into ChromaDB.
@@ -144,9 +154,16 @@ impl ChromaService {
             include: Some(includes),
         };
 
-        let result: QueryResult = self.collection.query(query_options, None).await.map_err(|e| {
-            crate::error::AppError::OperationFailed(format!("ChromaDB query: {}", e))
-        })?;
+        // Querying by text requires an embedding function client-side, just
+        // like upserts — otherwise the crate bails ("You must provide an
+        // embedding function when providing query_texts").
+        let result: QueryResult = self
+            .collection
+            .query(query_options, Some(Box::new(self.embedding_function.clone())))
+            .await
+            .map_err(|e| {
+                crate::error::AppError::OperationFailed(format!("ChromaDB query: {}", e))
+            })?;
 
         let mut results: Vec<SemanticSearchResult> = Vec::new();
 
@@ -251,9 +268,14 @@ impl ChromaService {
                 documents: Some(doc_refs),
             };
 
-            self.collection.upsert(entries, None).await.map_err(|e| {
-                crate::error::AppError::OperationFailed(format!("ChromaDB batch upsert: {}", e))
-            })?;
+            // The embedding function computes embeddings client-side; without
+            // it the crate bails ("embedding_function cannot be None ...").
+            self.collection
+                .upsert(entries, Some(Box::new(self.embedding_function.clone())))
+                .await
+                .map_err(|e| {
+                    crate::error::AppError::OperationFailed(format!("ChromaDB batch upsert: {}", e))
+                })?;
         }
 
         Ok(())
@@ -270,6 +292,33 @@ impl ChromaService {
             Err(_) => Ok(false),
         }
     }
+}
+
+/// Connect to the server and open the collection inside `database`.
+///
+/// No collection configuration is needed: embeddings are computed client-side
+/// (see [`OnnxEmbeddingFunction`]), so a plain `get_or_create` suffices and a
+/// collection created by an older build (with or without a legacy EF config)
+/// just opens as-is.
+async fn connect(
+    url: &str,
+    collection_name: &str,
+    database: &str,
+) -> std::result::Result<ChromaCollection, crate::error::AppError> {
+    let client = ChromaClient::new(ChromaClientOptions {
+        url: Some(url.to_string()),
+        database: database.to_string(),
+        auth: ChromaAuthMethod::None,
+    })
+    .await
+    .map_err(|e| crate::error::AppError::OperationFailed(format!("ChromaDB connect: {}", e)))?;
+
+    client
+        .get_or_create_collection(collection_name, None)
+        .await
+        .map_err(|e| {
+            crate::error::AppError::OperationFailed(format!("ChromaDB collection: {}", e))
+        })
 }
 
 /// Result of a semantic search query. `document` is intentionally omitted;

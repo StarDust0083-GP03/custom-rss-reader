@@ -10,12 +10,33 @@ This directory contains cross-platform initialization scripts for setting up the
 ```
 
 This script will:
-- Check for Node.js and npm installation
+- Check for Node.js, npm, curl, and Python 3
 - Install Rust via rustup if not present
-- Install system dependencies (WebKitGTK, build tools, etc.)
+- Install system dependencies (WebKitGTK 4.1 for Tauri v2, build tools, etc.)
 - Install npm dependencies
-- Build the project
-- Install Tauri CLI globally
+- Build the frontend (`npm run build`)
+- Validate the Rust backend with `cargo check` (proves `npm run tauri dev/build` will compile)
+- Set up and start the ChromaDB server (venv + `pip install chromadb` + server on port 8000)
+- Pre-download the multilingual embedding model (~/.rss-reader/models) with mirror fallback
+
+Options:
+```bash
+./scripts/init.sh --build   # also run the full production build (npm run tauri build)
+./scripts/init.sh --help    # show usage
+```
+
+Environment overrides (also understood by the app and `setup-chroma.sh`):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CHROMA_PORT` | `8000` | ChromaDB port |
+| `CHROMA_VENV` | `~/chroma-venv` | ChromaDB Python venv location |
+| `CHROMA_DATA` | `~/chroma-data` | ChromaDB data directory |
+| `CHROMA_MODEL_DIR` | `~/.rss-reader/models` | Embedding model directory |
+| `HF_ENDPOINT` | — | HuggingFace mirror base (e.g. `https://hf-mirror.com`) |
+| `SKIP_CARGO_CHECK` | — | Set to `1` to skip `cargo check` |
+| `SKIP_CHROMA` | — | Set to `1` to skip ChromaDB server setup |
+| `SKIP_MODEL` | — | Set to `1` to skip the embedding model download |
 
 ### Windows
 ```powershell
@@ -23,13 +44,46 @@ This script will:
 ```
 
 This script will:
-- Check for Node.js and npm installation
+- Check for Node.js, npm, Python 3, WebView2 runtime, and Visual Studio C++ Build Tools
 - Install Rust via rustup if not present
-- Check for WebView2 runtime
-- Check for Visual Studio C++ Build Tools
 - Install npm dependencies
-- Build the project
-- Install Tauri CLI globally
+- Build the frontend (`npm run build`)
+- Validate the Rust backend with `cargo check`
+- Set up and start the ChromaDB server (venv + `pip install chromadb` + server on port 8000)
+- Pre-download the multilingual embedding model (~\.rss-reader\models)
+
+Options:
+```powershell
+.\scripts\init.ps1 -Build   # also run the full production build (npm run tauri build)
+```
+
+The same `CHROMA_PORT`, `CHROMA_VENV`, `CHROMA_DATA`, `CHROMA_MODEL_DIR`,
+`HF_ENDPOINT`, `SKIP_CARGO_CHECK`, `SKIP_CHROMA`, and `SKIP_MODEL` environment
+overrides apply.
+
+## What the initialization does, in detail
+
+1. **Toolchain** — Node.js, npm, Rust (rustup), and platform prerequisites.
+   Tauri v2 requires `libwebkit2gtk-4.1-dev` on Linux (the scripts install the
+   4.0 package too on distros that only ship that).
+2. **npm install** — installs everything including the Tauri CLI, which is a
+   regular **devDependency** (no global install needed).
+3. **cargo check** — compiles the Rust side of `src-tauri/` (fast "does it
+   compile?" check) so that `npm run tauri dev` / `npm run tauri build` won't
+   fail mid-way through on a missing dependency.
+4. **ChromaDB** — creates the Python venv, installs `chromadb`, and starts the
+   server on port 8000 (`scripts/setup-chroma.sh` on Linux/macOS; equivalent
+   inline logic on Windows). Idempotent: a running server is detected and left
+   alone. The server is not managed by npm/tauri; start/stop it with
+   `bash scripts/setup-chroma.sh --stop | --status` (Linux/macOS) or kill the
+   process whose PID is in `~/.chroma-server.pid` (Windows).
+5. **Embedding model** — pre-downloads the quantized ONNX
+   `paraphrase-multilingual-MiniLM-L12-v2` model (tokenizer + weights, ~120 MB)
+   into `~/.rss-reader/models/`. The app computes embeddings client-side
+   (ChromaDB 1.x removed server-side embedding functions), so this prevents a
+   slow first-index. Mirrors tried in order: `$HF_ENDPOINT` (if set),
+   `https://huggingface.co`, `https://hf-mirror.com`.
+6. **Optional full build** — `--build` / `-Build` runs `npm run tauri build`.
 
 ## Manual Setup
 
@@ -40,17 +94,18 @@ If you prefer to set up the environment manually:
 **All platforms:**
 - Node.js 18+ and npm
 - Rust (install via https://rustup.rs/)
+- Python 3.9+ (only needed for the ChromaDB server)
 
 **Linux:**
 ```bash
 # Ubuntu/Debian
-sudo apt-get install libwebkit2gtk-4.0-dev build-essential curl wget file libxdo-dev libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+sudo apt-get install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev python3-venv
 
 # Fedora
-sudo dnf install webkit2gtk3-devel.x86_64 openssl-devel curl wget file libappindicator-gtk3-devel librsvg2-devel
+sudo dnf install webkit2gtk4.1-devel.x86_64 openssl-devel curl wget file libappindicator-gtk3-devel librsvg2-devel
 
 # Arch Linux
-sudo pacman -S --needed webkit2gtk-4.0 base-devel curl wget file openssl appmenu-gtk-module libappindicator-gtk3 librsvg
+sudo pacman -S --needed webkit2gtk-4.1 base-devel curl wget file openssl appmenu-gtk-module libappindicator-gtk3 librsvg
 ```
 
 **macOS:**
@@ -59,6 +114,7 @@ sudo pacman -S --needed webkit2gtk-4.0 base-devel curl wget file openssl appmenu
 **Windows:**
 - WebView2 runtime: https://developer.microsoft.com/en-us/microsoft-edge/webview2/
 - Visual Studio C++ Build Tools with "Desktop development with C++" workload
+- Python 3 on PATH: https://www.python.org/downloads/
 
 ### Installation
 
@@ -66,11 +122,21 @@ sudo pacman -S --needed webkit2gtk-4.0 base-devel curl wget file openssl appmenu
 # Install dependencies
 npm install
 
-# Build the project
+# Build the frontend
 npm run build
 
-# (Optional) Install Tauri CLI globally
-npm install -g @tauri-apps/cli
+# Validate the Rust backend compiles
+(cd src-tauri && cargo check)
+
+# Start ChromaDB (Linux/macOS)
+./scripts/setup-chroma.sh
+
+# Pre-download the embedding model (optional but recommended)
+mkdir -p ~/.rss-reader/models/sentence-transformers
+curl -fL -o ~/.rss-reader/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2/tokenizer.json \
+  https://hf-mirror.com/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2/resolve/main/tokenizer.json
+curl -fL -o ~/.rss-reader/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2/onnx/model_quint8_avx2.onnx \
+  https://hf-mirror.com/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2/resolve/main/onnx/model_quint8_avx2.onnx
 ```
 
 ## Running the Application
@@ -93,9 +159,10 @@ npm run build      # Production
 
 ## Troubleshooting
 
-### Linux: WebViewGTK not found
+### Linux: WebKitGTK not found
 ```bash
-sudo apt-get install libwebkit2gtk-4.0-dev
+sudo apt-get install libwebkit2gtk-4.1-dev     # Ubuntu/Debian
+sudo dnf install webkit2gtk4.1-devel           # Fedora
 ```
 
 ### macOS: Xcode Command Line Tools
@@ -109,9 +176,19 @@ Download from: https://developer.microsoft.com/en-us/microsoft-edge/webview2/
 ### Rust not found
 Install from: https://rustup.rs/
 
+### cargo check fails
+Check which crate failed — on Linux this is usually a missing system library
+(WebKitGTK, openssl, librsvg), not a code error.
+
+### ChromaDB won't start / Semantic Search says "not reachable"
+- Check the log: `~/.chroma-server.log` (Linux/macOS), `~/.chroma-server.err.log` (Windows)
+- Linux/macOS: `bash scripts/setup-chroma.sh --status` and retry setup
+- Confirm the port in the app's Semantic DB settings matches `CHROMA_PORT` (8000)
+- The app works fine without ChromaDB — only semantic search is affected
+
 ### Permission denied (Linux/macOS)
 ```bash
-chmod +x scripts/init.sh
+chmod +x scripts/init.sh scripts/setup-chroma.sh
 ```
 
 ## Platform-Specific Notes
@@ -119,6 +196,7 @@ chmod +x scripts/init.sh
 ### Linux
 - Supports Ubuntu, Debian, Fedora, Arch, and derivatives
 - Automatically detects package manager (apt, dnf, pacman)
+- Installs `libwebkit2gtk-4.1-dev` (Tauri v2 requirement)
 
 ### macOS
 - Requires macOS 10.15 (Catalina) or later

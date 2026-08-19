@@ -3,7 +3,13 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppError;
 
 /// AI configuration for LLM API calls.
+///
+/// `#[serde(default)]` on the struct so config files written by older
+/// versions of the app (missing fields added later, e.g.
+/// `max_chars_per_segment`) still load — a legacy file must not brick the
+/// AI features until the user re-saves the settings.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct AiConfig {
     pub api_key: String,
     pub base_url: String,

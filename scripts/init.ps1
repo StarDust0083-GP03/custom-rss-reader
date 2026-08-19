@@ -1,12 +1,38 @@
 # Custom RSS Reader - Windows Initialization Script
-# This script sets up the development environment for Windows
+# Sets up the complete development environment:
+#   1. Toolchain checks: Node.js, npm, Rust, WebView2, VS C++ Build Tools
+#   2. Python 3 (required by the ChromaDB server)
+#   3. npm install + frontend build
+#   4. `cargo check` on src-tauri — validates that `npm run tauri dev/build` compiles
+#   5. ChromaDB server (venv + pip install + start)
+#   6. Embedding model pre-download into ~\.rss-reader\models
+#
+# Usage:
+#   .\scripts\init.ps1             # full setup (skips the long production build)
+#   .\scripts\init.ps1 -Build      # also run `npm run tauri build`
+#
+# Env overrides:
+#   CHROMA_PORT        ChromaDB port           (default 8000)
+#   CHROMA_VENV        ChromaDB venv location  (default ~\chroma-venv)
+#   CHROMA_DATA        ChromaDB data dir       (default ~\chroma-data)
+#   CHROMA_MODEL_DIR   embedding model dir     (default ~\.rss-reader\models)
+#   HF_ENDPOINT        HuggingFace mirror base (e.g. https://hf-mirror.com)
+#   SKIP_CARGO_CHECK   set to 1 to skip `cargo check`
+#   SKIP_CHROMA        set to 1 to skip ChromaDB server setup
+#   SKIP_MODEL         set to 1 to skip the embedding model download
+
+param([switch]$Build)
 
 $ErrorActionPreference = "Stop"
+
+function Write-Step($msg) { Write-Host ""; Write-Host "─── $msg ───" -ForegroundColor Cyan }
 
 Write-Host "================================" -ForegroundColor Cyan
 Write-Host "Custom RSS Reader - Initialization" -ForegroundColor Cyan
 Write-Host "================================" -ForegroundColor Cyan
-Write-Host ""
+
+# Set the working directory to the repo root (parent of scripts\)
+Set-Location (Split-Path -Parent $PSScriptRoot)
 
 # Check if running as Administrator
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -15,8 +41,11 @@ if (-not $isAdmin) {
     Write-Host ""
 }
 
+# ---------------------------------------------------------------------------
+Write-Step "1/6  Toolchain checks"
+# ---------------------------------------------------------------------------
+
 # Check if Node.js is installed
-Write-Host "Checking Node.js installation..." -ForegroundColor White
 try {
     $nodeVersion = node --version
     Write-Host "✅ Node.js $nodeVersion found" -ForegroundColor Green
@@ -27,7 +56,6 @@ try {
 }
 
 # Check if npm is installed
-Write-Host "Checking npm installation..." -ForegroundColor White
 try {
     $npmVersion = npm --version
     Write-Host "✅ npm $npmVersion found" -ForegroundColor Green
@@ -36,7 +64,7 @@ try {
     exit 1
 }
 
-# Check if Rust is installed (required for Tauri)
+# Check if Rust is installed
 Write-Host ""
 Write-Host "Checking Rust installation..." -ForegroundColor White
 try {
@@ -46,7 +74,6 @@ try {
     Write-Host "⚠️  Rust is not installed." -ForegroundColor Yellow
     Write-Host "Installing Rust via rustup..." -ForegroundColor White
 
-    # Download and run rustup-init
     $rustupUrl = "https://win.rustup.rs/x86_64"
     $rustupPath = "$env:TEMP\rustup-init.exe"
 
@@ -109,7 +136,22 @@ try {
     }
 }
 
-# Install npm dependencies
+# Python 3 (required by the ChromaDB server)
+Write-Host ""
+Write-Host "Checking Python 3..." -ForegroundColor White
+try {
+    $pythonVersion = python --version
+    Write-Host "✅ $pythonVersion found" -ForegroundColor Green
+} catch {
+    Write-Host "⚠️  Python 3 not found." -ForegroundColor Yellow
+    Write-Host "ChromaDB (Semantic Search) needs Python 3. Install it from https://www.python.org/downloads/ (check 'Add python.exe to PATH')." -ForegroundColor White
+    Write-Host "The rest of the setup will still proceed." -ForegroundColor Yellow
+}
+
+# ---------------------------------------------------------------------------
+Write-Step "2/6  npm install + frontend build"
+# ---------------------------------------------------------------------------
+
 Write-Host ""
 Write-Host "Installing npm dependencies..." -ForegroundColor White
 npm install
@@ -119,7 +161,16 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "✅ Dependencies installed" -ForegroundColor Green
 
-# Build the project
+# Tauri CLI ships as a devDependency (@tauri-apps/cli) — no global install needed.
+$localTauriCli = Join-Path (Get-Location) "node_modules\.bin\tauri.cmd"
+if (Test-Path $localTauriCli) {
+    Write-Host "✅ Tauri CLI found (local devDependency)" -ForegroundColor Green
+} else {
+    Write-Host "❌ Tauri CLI missing after 'npm install' — check the npm install output." -ForegroundColor Red
+    exit 1
+}
+
+# Build the frontend
 Write-Host ""
 Write-Host "Building the project..." -ForegroundColor White
 npm run build
@@ -129,37 +180,177 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "✅ Build successful" -ForegroundColor Green
 
-# Check if Tauri CLI is installed
-Write-Host ""
-Write-Host "Checking Tauri CLI..." -ForegroundColor White
-try {
-    $tauriVersion = npm list -g @tauri-apps/cli
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "✅ Tauri CLI found" -ForegroundColor Green
-    } else {
-        throw "Not installed"
+# ---------------------------------------------------------------------------
+Write-Step "3/6  Rust backend check"
+# ---------------------------------------------------------------------------
+
+# cargo check compiles src-tauri far faster than a full build and proves that
+# `npm run tauri dev` / `npm run tauri build` will initialize correctly.
+if ($env:SKIP_CARGO_CHECK -ne "1") {
+    Write-Host "First run compiles all Rust dependencies — this takes a few minutes." -ForegroundColor White
+    Push-Location "src-tauri"
+    try {
+        cargo check
+        if ($LASTEXITCODE -ne 0) { throw "cargo check failed" }
+        Write-Host "✅ Rust backend compiles OK — 'npm run tauri dev/build' will work." -ForegroundColor Green
+    } catch {
+        Write-Host "❌ cargo check failed — fix the Rust errors before 'npm run tauri dev/build'." -ForegroundColor Red
+        exit 1
+    } finally {
+        Pop-Location
     }
-} catch {
-    Write-Host "Installing Tauri CLI globally..." -ForegroundColor White
-    npm install -g @tauri-apps/cli
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "✅ Tauri CLI installed" -ForegroundColor Green
-    } else {
-        Write-Host "⚠️  Failed to install Tauri CLI globally" -ForegroundColor Yellow
-        Write-Host "You can still use 'npx tauri' commands" -ForegroundColor White
+} else {
+    Write-Host "⚠️  Skipping cargo check (SKIP_CARGO_CHECK=1)." -ForegroundColor Yellow
+}
+
+# Optional full production build
+if ($Build) {
+    Write-Host ""
+    Write-Host "Running full production build (npm run tauri build)..." -ForegroundColor White
+    npm run tauri build
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "❌ tauri build failed" -ForegroundColor Red
+        exit 1
     }
 }
 
+# ---------------------------------------------------------------------------
+Write-Step "4/6  ChromaDB server"
+# ---------------------------------------------------------------------------
+
+if ($env:SKIP_CHROMA -eq "1") {
+    Write-Host "⚠️  Skipping ChromaDB setup (SKIP_CHROMA=1)." -ForegroundColor Yellow
+} else {
+    $venvDir  = if ($env:CHROMA_VENV)      { $env:CHROMA_VENV }      else { "$HOME\chroma-venv" }
+    $dataDir  = if ($env:CHROMA_DATA)      { $env:CHROMA_DATA }      else { "$HOME\chroma-data" }
+    $port     = if ($env:CHROMA_PORT)      { $env:CHROMA_PORT }      else { 8000 }
+    $python   = "$venvDir\Scripts\python.exe"
+    $chromaExe = "$venvDir\Scripts\chroma.exe"
+    $heartbeat = "http://localhost:${port}/api/v2/heartbeat"
+
+    # Already running?
+    try {
+        Invoke-RestMethod -Uri $heartbeat -TimeoutSec 3 | Out-Null
+        Write-Host "✅ ChromaDB already running on port $port" -ForegroundColor Green
+    } catch {
+        Write-Host "Creating ChromaDB venv at $venvDir ..." -ForegroundColor White
+        if (-not (Test-Path $python)) {
+            New-Item -ItemType Directory -Force -Path (Split-Path $venvDir) | Out-Null
+            python -m venv "$venvDir"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to create venv — is Python 3 on PATH?" }
+        }
+
+        & $python -c "import chromadb" 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Installing chromadb..." -ForegroundColor White
+            & $python -m pip install --upgrade --quiet pip
+            & $python -m pip install --quiet chromadb
+            if ($LASTEXITCODE -ne 0) { throw "pip install chromadb failed" }
+        }
+
+        if (Test-Path $chromaExe) {
+            Write-Host "Starting ChromaDB on port $port (data: $dataDir) ..." -ForegroundColor White
+            New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+            $logOut = "$HOME\.chroma-server.log"
+            $logErr = "$HOME\.chroma-server.err.log"
+            $proc = Start-Process -FilePath $chromaExe `
+                -ArgumentList @("run", "--host", "0.0.0.0", "--port", "$port", "--path", "$dataDir") `
+                -WindowStyle Hidden `
+                -RedirectStandardOutput $logOut `
+                -RedirectStandardError $logErr `
+                -PassThru
+            $proc.Id | Set-Content "$HOME\.chroma-server.pid"
+
+            $ready = $false
+            for ($i = 0; $i -lt 30; $i++) {
+                Start-Sleep -Seconds 1
+                try { Invoke-RestMethod -Uri $heartbeat -TimeoutSec 2 | Out-Null; $ready = $true; break } catch {}
+            }
+            if ($ready) {
+                Write-Host "✅ ChromaDB is up on port $port" -ForegroundColor Green
+            } else {
+                Write-Host "⚠️  ChromaDB failed to start. Check the log:" -ForegroundColor Yellow
+                if (Test-Path $logErr) { Get-Content $logErr -Tail 20 }
+            }
+        } else {
+            Write-Host "⚠️  chroma.exe not found after install — rerun this script." -ForegroundColor Yellow
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+Write-Step "5/6  Embedding model pre-download"
+# ---------------------------------------------------------------------------
+
+# The app embeds documents client-side (ChromaDB 1.x has no server-side
+# embedding function) with a quantized ONNX model. Pre-fetching it here means
+# the first semantic search/index doesn't stall on a ~120 MB download.
+# Mirrors and paths mirror src-tauri/src/chroma/embeddings.rs.
+$modelRepo  = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+$modelFiles = @("tokenizer.json", "onnx/model_quint8_avx2.onnx")
+$modelBase  = if ($env:CHROMA_MODEL_DIR) { $env:CHROMA_MODEL_DIR } else { "$HOME\.rss-reader\models" }
+$modelDir   = Join-Path $modelBase $modelRepo
+
+$mirrors = @()
+if ($env:HF_ENDPOINT) { $mirrors += $env:HF_ENDPOINT }
+$mirrors += @("https://huggingface.co", "https://hf-mirror.com")
+
+if ($env:SKIP_MODEL -eq "1") {
+    Write-Host "⚠️  Skipping model download (SKIP_MODEL=1)." -ForegroundColor Yellow
+} else {
+    Write-Host "Embedding model: $modelRepo" -ForegroundColor White
+    Write-Host "Target dir:      $modelDir" -ForegroundColor White
+    $allOk = $true
+    foreach ($file in $modelFiles) {
+        $dest = Join-Path $modelDir $file
+        if (Test-Path $dest) {
+            Write-Host "✅ $file already present" -ForegroundColor Green
+            continue
+        }
+        New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
+        $found = $false
+        foreach ($mirror in $mirrors) {
+            $url = "$mirror/$modelRepo/resolve/main/$file"
+            Write-Host "  downloading $file from $mirror ..." -ForegroundColor White
+            try {
+                Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+                $size = (Get-Item $dest).Length / 1MB
+                Write-Host "✅ $file ($([math]::Round($size,1)) MB)" -ForegroundColor Green
+                $found = $true
+                break
+            } catch {
+                Write-Host "⚠️  failed from $mirror" -ForegroundColor Yellow
+                Remove-Item $dest -ErrorAction SilentlyContinue
+            }
+        }
+        if (-not $found) {
+            Write-Host "❌ could not download $file from any mirror" -ForegroundColor Red
+            $allOk = $false
+        }
+    }
+    if ($allOk) {
+        Write-Host "✅ Embedding model ready — first semantic search will load it instantly." -ForegroundColor Green
+    } else {
+        Write-Host "⚠️  Model download failed — the app retries automatically on first semantic use." -ForegroundColor Yellow
+    }
+}
+
+# ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "================================" -ForegroundColor Cyan
 Write-Host "✅ Initialization complete!" -ForegroundColor Green
 Write-Host "================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Available commands:" -ForegroundColor White
-Write-Host "  npm run tauri dev     - Start development server" -ForegroundColor Cyan
-Write-Host "  npm run tauri build   - Build for production" -ForegroundColor Cyan
+Write-Host "  npm run tauri dev     - Start development server (hot reload)" -ForegroundColor Cyan
+Write-Host "  npm run tauri build   - Build production bundles" -ForegroundColor Cyan
 Write-Host "  npm run build         - Build frontend only" -ForegroundColor Cyan
 Write-Host "  npm run dev           - Start frontend dev server" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Semantic search:" -ForegroundColor White
+$finalPort = if ($env:CHROMA_PORT) { $env:CHROMA_PORT } else { 8000 }
+Write-Host "  ChromaDB server:      http://localhost:$finalPort" -ForegroundColor Cyan
+Write-Host "  Model location:       $modelBase" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "For more information, see README.md" -ForegroundColor White
 Write-Host ""
