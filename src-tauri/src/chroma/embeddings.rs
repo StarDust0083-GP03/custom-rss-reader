@@ -107,6 +107,7 @@ impl OnnxEmbeddingFunction {
     async fn loaded(&self) -> anyhow::Result<&Loaded> {
         self.loaded
             .get_or_try_init(|| async {
+                let t0 = std::time::Instant::now();
                 let tokenizer_path = self.model_dir.join(TOKENIZER_FILE);
                 let model_path = self.model_dir.join(MODEL_FILE);
                 if !tokenizer_path.exists() || !model_path.exists() {
@@ -140,6 +141,11 @@ impl OnnxEmbeddingFunction {
                 let session = Session::builder()?
                     .commit_from_file(&model_path)
                     .with_context(|| format!("load ONNX model {}", model_path.display()))?;
+                println!(
+                    "[chroma] model loaded fresh in {:?} (files pre-present: {})",
+                    t0.elapsed(),
+                    tokenizer_path.exists() && model_path.exists()
+                );
                 Ok(Loaded {
                     tokenizer,
                     session: Mutex::new(session),
@@ -240,13 +246,20 @@ impl Default for OnnxEmbeddingFunction {
 #[async_trait]
 impl EmbeddingFunction for OnnxEmbeddingFunction {
     async fn embed(&self, docs: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        let t0 = std::time::Instant::now();
         let loaded = self.loaded().await?;
         let encodings = loaded
             .tokenizer
             .encode_batch(docs.to_vec(), true)
             .map_err(|e| anyhow::anyhow!("tokenize batch: {}", e))?;
         let mut session = loaded.session.lock().unwrap();
-        self.pool_batch(&mut session, &encodings)
+        let vectors = self.pool_batch(&mut session, &encodings)?;
+        println!(
+            "[chroma] embed {} doc(s) in {:?}",
+            docs.len(),
+            t0.elapsed()
+        );
+        Ok(vectors)
     }
 }
 
