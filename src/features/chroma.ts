@@ -7,7 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { ChromaConfigResponse, SyncProgress } from "../types";
 import { chroma as chromaApi } from "../api";
 import { state } from "../state";
-import { renderItems } from "../ui/render";
+import { renderItems, setSimilarMode, invalidateLoadItems } from "../ui/render";
 import { setLoadingWithStatus, clearLoadingStatus } from "../ui/status";
 import { success as toastSuccess, error as toastError, info as toastInfo } from "../toast";
 import { searchItems } from "./actions";
@@ -38,23 +38,39 @@ export function updateSearchModeBtn() {
   } else {
     btn.style.display = "none";
   }
-  // "Find Similar" lives in the detail ⋯ menu — only useful with Chroma
-  const similarItem = document.getElementById("similar-menu-item") as HTMLButtonElement | null;
-  if (similarItem) similarItem.disabled = !S.chromaEnabled;
+  // "Similar" is a dedicated detail-toolbar button — only useful with
+  // Chroma, so hide it entirely (a disabled button reads as broken) when
+  // the semantic DB is off.
+  const similarBtn = document.getElementById("similar-btn") as HTMLButtonElement | null;
+  if (similarBtn) similarBtn.hidden = !S.chromaEnabled;
 }
 
 /// Replace the item list with articles semantically similar to the
 /// currently selected one. Results are real summaries (unlike semantic
-/// search hits), so clicking a result opens its detail as usual.
+/// search hits), so clicking a result opens its detail as usual. A banner
+/// above the list names the anchor article and offers a way back.
 export async function findSimilarArticles() {
   if (!S.selectedItem) {
     toastInfo("Select an article first");
     return;
   }
+  if (!S.chromaEnabled) {
+    toastInfo("Semantic DB (ChromaDB) is disabled — enable it in Semantic DB settings");
+    return;
+  }
   setLoadingWithStatus("", `Finding articles similar to "${S.selectedItem.title}"...`);
+  // Capture the anchor before the (multi-second) query: the selection may
+  // change while it runs, and the banner must name what was actually
+  // queried — not whatever is selected when results land.
+  const anchor = { itemId: S.selectedItem.id, title: S.selectedItem.title };
   try {
-    const items = await chromaApi.findSimilar(S.selectedItem.id, 20);
+    const items = await chromaApi.findSimilar(anchor.itemId, 20);
+    // Drop any in-flight normal list load BEFORE installing the results,
+    // or its late response would paint over them (the "find similar showed
+    // nothing" race).
+    invalidateLoadItems();
     S.currentItems = items;
+    setSimilarMode(anchor);
     renderItems();
     clearLoadingStatus(true, `Found ${items.length} similar articles`);
   } catch (error) {

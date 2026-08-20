@@ -1,8 +1,9 @@
+use std::collections::VecDeque;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{oneshot, Mutex};
 use tokio::time::{sleep, Instant};
 
 use crate::ai::*;
@@ -11,54 +12,138 @@ use crate::error::{AppError, Result};
 // ---------------------------------------------------------------------------
 // LLM call throttling.
 //
-// Every LLM call in the app (translate block, classify, connection test)
-// funnels through `send_request`, so this is the single place to enforce a
-// global rate limit. A bulk refresh can enqueue dozens of auto-classify
+// Every LLM call in the app (translate block, classify, recommend, connection
+// test) funnels through `send_request`, so this is the single place to enforce
+// a global rate limit. A bulk refresh can enqueue dozens of auto-classify
 // requests at once; without spacing they fire as a burst and the provider
 // answers with HTTP 429.
 //
-// Two mechanisms:
-// 1. A semaphore of 1 — calls are serialized, never parallel.
-// 2. A minimum interval between call STARTS (token spacing), so even
-//    back-to-back short calls cannot exceed the configured request rate.
+// The gate is a single slot (calls are serialized, never parallel) with a
+// minimum interval between call STARTS, so even back-to-back short calls
+// cannot exceed the configured request rate.
+//
+// Waiters are queued by PRIORITY: user-facing calls (translate, ★ Picks,
+// connection test, manual classify) jump ahead of background auto-classify
+// batches. Without this, clicking ★ Picks right after a feed refresh waits
+// behind every queued classify call — minutes of "Picking..." for one
+// interactive request.
 // ---------------------------------------------------------------------------
-
-/// Max concurrent LLM API calls. 1 = serialized; raising this re-introduces
-/// burst pressure on the provider's rate limit.
-const LLM_MAX_CONCURRENT: usize = 1;
 
 /// Minimum spacing between the start of two consecutive LLM calls.
 /// ~1200ms ≈ 50 requests/minute ceiling, comfortably under typical
 /// provider tiers (DeepSeek/OpenAI non-burst limits).
 const LLM_MIN_INTERVAL_MS: u64 = 1200;
 
-fn llm_semaphore() -> &'static Semaphore {
-    static SEM: OnceLock<Semaphore> = OnceLock::new();
-    SEM.get_or_init(|| Semaphore::new(LLM_MAX_CONCURRENT))
+struct LlmGateState {
+    /// A call is currently in flight (slot taken).
+    busy: bool,
+    /// When the in-flight (or last) call was allowed to start.
+    last_start: Option<Instant>,
+    /// Queued waiters, front = next to run. Priority callers are pushed to
+    /// the front, background callers to the back.
+    queue: VecDeque<oneshot::Sender<()>>,
 }
 
-/// Timestamp of when the last LLM call was allowed to start (None = never).
-/// Guarded by a tokio Mutex so the wait-then-mark sequence is atomic even
-/// though the semaphore already serializes callers.
-fn llm_last_call_at() -> &'static Mutex<Option<Instant>> {
-    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-    LAST.get_or_init(|| Mutex::new(None))
+/// Serial, rate-limited, priority-aware gate around every LLM HTTP call.
+struct LlmGate {
+    state: Mutex<LlmGateState>,
 }
 
-/// Block until the next LLM call slot is available, then mark it as taken.
-/// Must be called while holding the semaphore permit so the lock is never
-/// actually contended for long.
-async fn acquire_llm_slot() {
-    let mut last = llm_last_call_at().lock().await;
-    let now = Instant::now();
-    let min_interval = Duration::from_millis(LLM_MIN_INTERVAL_MS);
-    if let Some(prev) = *last {
-        let elapsed = now.duration_since(prev);
-        if elapsed < min_interval {
-            sleep(min_interval - elapsed).await;
+fn llm_gate() -> &'static LlmGate {
+    static GATE: OnceLock<LlmGate> = OnceLock::new();
+    GATE.get_or_init(|| LlmGate {
+        state: Mutex::new(LlmGateState {
+            busy: false,
+            last_start: None,
+            queue: VecDeque::new(),
+        }),
+    })
+}
+
+fn min_interval() -> Duration {
+    Duration::from_millis(LLM_MIN_INTERVAL_MS)
+}
+
+/// An acquired LLM call slot. Releasing it (on drop) hands the slot to the
+/// next queued caller, honouring the min-interval spacing.
+struct LlmPermit {
+    gate: Option<&'static LlmGate>,
+}
+
+impl Drop for LlmPermit {
+    fn drop(&mut self) {
+        let Some(gate) = self.gate.take() else {
+            return;
+        };
+        // Wake the next waiter from a spawned task — it may need to sleep
+        // out the remaining min-interval spacing first, and drop() must not
+        // block. Dropping the JoinHandle detaches the task in tokio.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                gate.wake_next().await;
+            });
         }
     }
-    *last = Some(Instant::now());
+}
+
+/// Acquire the LLM call slot. `priority = true` queues ahead of background
+/// (bulk classify) callers.
+async fn llm_acquire(priority: bool) -> LlmPermit {
+    let gate = llm_gate();
+    let (tx, rx) = oneshot::channel();
+    {
+        let mut st = gate.state.lock().await;
+        let spacing_ok = st
+            .last_start
+            .map(|t| t.elapsed() >= min_interval())
+            .unwrap_or(true);
+        // Fast path: slot free, spacing satisfied and nobody queued.
+        if !st.busy && spacing_ok && st.queue.is_empty() {
+            st.busy = true;
+            st.last_start = Some(Instant::now());
+            return LlmPermit { gate: Some(gate) };
+        }
+        if priority {
+            st.queue.push_front(tx);
+        } else {
+            st.queue.push_back(tx);
+        }
+    }
+    // Wait for our turn. The waker marks the slot taken and updates
+    // `last_start` BEFORE sending, so no second caller can slip in.
+    let _ = rx.await;
+    LlmPermit { gate: Some(gate) }
+}
+
+impl LlmGate {
+    /// Mark the slot free and wake the next waiter (after the remaining
+    /// min-interval spacing, if any).
+    async fn wake_next(&self) {
+        let (tx, wait) = {
+            let mut st = self.state.lock().await;
+            let Some(tx) = st.queue.pop_front() else {
+                st.busy = false;
+                return;
+            };
+            // Reserve the slot for this waiter right away so no newcomer
+            // can grab it while we sleep out the spacing.
+            st.busy = true;
+            let wait = st
+                .last_start
+                .map(|t| min_interval().saturating_sub(t.elapsed()))
+                .unwrap_or(Duration::ZERO);
+            (tx, wait)
+        };
+        if !wait.is_zero() {
+            sleep(wait).await;
+        }
+        // Record the actual start moment, then hand over the slot.
+        {
+            let mut st = self.state.lock().await;
+            st.last_start = Some(Instant::now());
+        }
+        let _ = tx.send(());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -186,16 +271,26 @@ impl LlmAiService {
         self.config.max_chars_per_segment.unwrap_or(MAX_CHARS_PER_SEGMENT)
     }
 
-    /// Send a chat completion request to the LLM API.
-    /// Acquires a semaphore permit before sending (max 3 concurrent).
+    /// Send a chat completion request to the LLM API (interactive priority:
+    /// jumps ahead of queued background classify batches).
     async fn send_request(&self, request: &ChatRequest) -> Result<String> {
-        let _permit = llm_semaphore()
-            .acquire()
-            .await
-            .map_err(|_| AppError::Internal("LLM semaphore closed".into()))?;
+        self.send_request_with_priority(request, true).await
+    }
 
-        // Serialize AND space out call starts — this is the rate-limit guard.
-        acquire_llm_slot().await;
+    /// Background variant — queues BEHIND interactive callers. Used by bulk
+    /// auto-classify, whose latency nobody is staring at a spinner for.
+    async fn send_request_background(&self, request: &ChatRequest) -> Result<String> {
+        self.send_request_with_priority(request, false).await
+    }
+
+    /// Serialize calls AND space out call starts — this is the rate-limit
+    /// guard. One slot, min interval between starts, priority queueing.
+    async fn send_request_with_priority(
+        &self,
+        request: &ChatRequest,
+        priority: bool,
+    ) -> Result<String> {
+        let _permit = llm_acquire(priority).await;
 
         let url = format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'));
 
@@ -462,7 +557,10 @@ impl AiService for LlmAiService {
             temperature: Some(0.1),
         };
 
-        let response = self.send_request(&req).await?;
+        // Bulk classification runs during feed refresh — background
+        // priority, so interactive calls (translate / picks / test) are
+        // never stuck behind a long classify queue.
+        let response = self.send_request_background(&req).await?;
         Ok(parse_classification_batch_json(&response, entries.len()))
     }
 
@@ -1174,6 +1272,51 @@ fn strip_think_tags(response: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // LLM gate — priority queueing
+    // -----------------------------------------------------------------------
+
+    /// Interactive calls (translate / ★ Picks / connection test) must jump
+    /// ahead of queued background classify batches; background callers keep
+    /// their FIFO order among themselves. Regression test for "clicking
+    /// ★ Picks after a refresh waits behind every classify call".
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn llm_gate_priority_caller_jumps_background_queue() {
+        // Occupy the slot.
+        let holder = llm_acquire(false).await;
+
+        // Two background callers queue up behind the holder.
+        let b1 = tokio::spawn(async {
+            let _permit = llm_acquire(false).await;
+            Instant::now()
+        });
+        let b2 = tokio::spawn(async {
+            let _permit = llm_acquire(false).await;
+            Instant::now()
+        });
+        // Let them actually reach the queue before the priority caller.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // An interactive caller arrives LAST but must run FIRST.
+        let p = tokio::spawn(async {
+            let _permit = llm_acquire(true).await;
+            Instant::now()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        drop(holder);
+
+        let p_at = p.await.unwrap();
+        let b1_at = b1.await.unwrap();
+        let b2_at = b2.await.unwrap();
+
+        assert!(
+            p_at < b1_at,
+            "interactive call must jump the background queue"
+        );
+        assert!(b1_at < b2_at, "background calls keep their FIFO order");
+    }
 
     // -----------------------------------------------------------------------
     // extract_blocks

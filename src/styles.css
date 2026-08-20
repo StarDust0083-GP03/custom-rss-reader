@@ -535,6 +535,57 @@ body::after {
     align-items: center;
 }
 
+/* "Find similar" results banner — names the anchor article, ✕ exits the
+   mode and restores the normal list. */
+.similar-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.45rem;
+    padding: 0.3rem 0.6rem;
+    border: 1px solid var(--accent-color);
+    border-left: 3px solid var(--accent-color);
+    border-radius: 4px;
+    background: var(--accent-soft);
+    font-family: var(--font-ui);
+    font-size: 0.78rem;
+    color: var(--text-primary);
+}
+
+.similar-banner[hidden] {
+    display: none;
+}
+
+.similar-banner-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.similar-banner-close {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.similar-banner-close:hover {
+    color: var(--accent-color);
+    border-color: var(--accent-color);
+}
+
 /* Search — underline field, ink caret */
 .search-box input {
     flex: 1;

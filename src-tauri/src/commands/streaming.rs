@@ -32,8 +32,9 @@ pub async fn translate_html_content_streaming(
     state: State<'_, AppState>,
     item_id: i64,
     content: String,
+    force: Option<bool>,
 ) -> Result<String> {
-    translate_streaming_inner(&app_handle, &state, item_id, TranslateRequest { content }).await
+    translate_streaming_inner(&app_handle, &state, item_id, TranslateRequest { content }, force.unwrap_or(false)).await
 }
 
 /// Translate a stored feed item by ID. Equivalent to
@@ -44,6 +45,7 @@ pub async fn translate_item_bilingual_streaming(
     app_handle: AppHandle,
     state: State<'_, AppState>,
     item_id: i64,
+    force: Option<bool>,
 ) -> Result<String> {
     // Lazily fill content_md first, then ALWAYS prefer it as the translation
     // source: text mode renders exactly this markdown, so the bilingual
@@ -62,7 +64,7 @@ pub async fn translate_item_bilingual_streaming(
         .or(item.description.as_ref())
         .ok_or_else(|| AppError::OperationFailed("No content to translate".into()))?
         .clone();
-    translate_streaming_inner(&app_handle, &state, item_id, TranslateRequest { content }).await
+    translate_streaming_inner(&app_handle, &state, item_id, TranslateRequest { content }, force.unwrap_or(false)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -74,9 +76,16 @@ async fn translate_streaming_inner(
     state: &AppState,
     item_id: i64,
     request: TranslateRequest,
+    force: bool,
 ) -> Result<String> {
-    // 1. Cache lookup
-    if let Some(cached) = lookup_cached_translation(state, item_id).await? {
+    // 1. Cache lookup — skipped when the user forces a re-translation
+    //    (right-click on the Translate button), which also drops the stale
+    //    stored translation so a failed re-run can't resurrect it.
+    if force {
+        if let Err(e) = state.feed_repo.update_translation(item_id, None, "").await {
+            eprintln!("Failed to clear translation for item {}: {}", item_id, e);
+        }
+    } else if let Some(cached) = lookup_cached_translation(state, item_id).await? {
         let _ = app_handle.emit_to(
             "main",
             "translation-progress",
@@ -121,12 +130,13 @@ async fn translate_streaming_inner(
         {
             Ok(translated_block) => {
                 completed += 1;
-                // Strip images from the translated side BEFORE emitting: the
-                // frontend streams these chunks live, so the final
-                // strip_images_from_translated pass below is too late —
-                // raw chunks made images appear twice (original + echoed
-                // translation) while the stream was running.
-                let stripped = strip_images_from_translated(&translated_block);
+                // Clean BOTH sides of the pair BEFORE emitting: the
+                // translated side must not echo images, and the original
+                // side must not carry redundant links/images that have no
+                // counterpart in the translation (issue #10 comment) —
+                // the frontend streams these chunks live, so a final pass
+                // alone would be too late.
+                let stripped = clean_bilingual_block(&translated_block);
                 all_chunks.push(stripped.clone());
 
                 let _ = app_handle.emit_to(
@@ -160,45 +170,37 @@ async fn translate_streaming_inner(
         }
     }
 
-    // 4. Persist whatever we got (even partial on error) so the next view
-    //    doesn't restart from scratch.
-    let raw = all_chunks.join("\n");
-    let bilingual = strip_images_from_translated(&raw);
-    let result_body = if first_error.is_some() && bilingual.is_empty() {
-        String::new()
-    } else if first_error.is_some() {
-        wrap_bilingual_partial(&bilingual)
-    } else {
-        wrap_bilingual(&bilingual, false)
-    };
+    // 4. Persist ONLY a fully successful translation (issue #10): when the
+    //    LLM API errored, nothing is recorded — a partial run must not be
+    //    cached and replayed as if it were a good translation. The flow
+    //    fails loudly instead.
+    if let Some(err) = first_error {
+        return Err(AppError::OperationFailed(err));
+    }
 
-    if !result_body.is_empty() {
-        if let Err(e) = state
-            .feed_repo
-            .update_translation(item_id, None, &result_body)
-            .await
-        {
-            eprintln!("Failed to persist translation for item {}: {}", item_id, e);
-        }
+    let raw = all_chunks.join("\n");
+    let bilingual = clean_bilingual_block(&raw);
+    let result_body = wrap_bilingual(&bilingual, false);
+
+    if let Err(e) = state
+        .feed_repo
+        .update_translation(item_id, None, &result_body)
+        .await
+    {
+        eprintln!("Failed to persist translation for item {}: {}", item_id, e);
     }
 
     // 5. Final progress event
-    let mut payload = serde_json::json!({
+    let payload = serde_json::json!({
         "item_id": item_id,
         "total": total,
         "completed": completed,
         "is_complete": true,
-        "cached": false
+        "cached": false,
+        "has_error": false,
+        "error_messages": [],
+        "html_chunk": result_body.clone(),
     });
-    if let Some(err) = first_error {
-        payload["has_error"] = serde_json::json!(true);
-        payload["error_messages"] = serde_json::json!([err]);
-        payload["partial_content"] = serde_json::json!(bilingual);
-    } else {
-        payload["has_error"] = serde_json::json!(false);
-        payload["error_messages"] = serde_json::json!([]);
-    }
-    payload["html_chunk"] = serde_json::json!(result_body.clone());
     let _ = app_handle.emit_to("main", "translation-progress", payload);
 
     Ok(result_body)
@@ -216,6 +218,12 @@ async fn lookup_cached_translation(
     let Some(translated) = item.translated_content else {
         return Ok(None);
     };
+    // Legacy rows may hold an empty string instead of NULL — treat both as
+    // "no translation" so a force re-translate can't be fed back an empty
+    // cache hit.
+    if translated.trim().is_empty() {
+        return Ok(None);
+    }
     let Some(translated_at) = item.translated_at else {
         return Ok(None);
     };
@@ -232,11 +240,128 @@ fn wrap_bilingual(body: &str, cached: bool) -> String {
     )
 }
 
-fn wrap_bilingual_partial(body: &str) -> String {
-    format!(
-        r#"<div class="bilingual-content" data-cached="false" data-partial="true">{}</div>"#,
-        body
-    )
+/// Clean one bilingual pair block (or a whole bilingual document):
+/// - translated side: echoed images are stripped (`strip_images_from_translated`)
+/// - original side: redundant images and links are removed so the two
+///   sides of each pair stay format-aligned (issue #10 comment — the
+///   original used to keep `![img](…)` / `[link](…)` noise that had no
+///   counterpart in the translation).
+fn clean_bilingual_block(html: &str) -> String {
+    let translated_clean = strip_images_from_translated(html);
+    clean_original_side(&translated_clean)
+}
+
+/// Strip images and redundant links from within `.paragraph-original` divs.
+///
+/// Pairs the `<div class="paragraph-original">` marker with its matching
+/// `</div>` (depth-counted), then inside it:
+/// - removes `<img>` tags and markdown `![alt](url)` images
+/// - reduces markdown links `[text](url)` to just `text`
+/// - reduces HTML anchors `<a …>text</a>` to just `text`
+fn clean_original_side(html: &str) -> String {
+    let marker = r#"<div class="paragraph-original">"#;
+    let mut out = String::with_capacity(html.len());
+    let mut pos = 0;
+
+    while let Some(start) = html[pos..].find(marker) {
+        let abs_start = pos + start;
+        out.push_str(&html[pos..abs_start + marker.len()]);
+        let scan_from = abs_start + marker.len();
+
+        if let Some(end) = find_matching_div_close(&html[scan_from..]) {
+            let inner = &html[scan_from..scan_from + end];
+            let cleaned = strip_anchor_tags(&strip_markdown_links(&strip_markdown_images(
+                &strip_img_tags(inner),
+            )));
+            out.push_str(&cleaned);
+            out.push_str("</div>");
+            pos = scan_from + end + "</div>".len();
+        } else {
+            // Unmatched — copy rest verbatim and stop
+            out.push_str(&html[scan_from..]);
+            return out;
+        }
+    }
+
+    out.push_str(&html[pos..]);
+    out
+}
+
+/// Reduce markdown links `[text](url)` to just `text`. Handles parentheses
+/// nested inside the URL via depth counting.
+fn strip_markdown_links(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let len = s.len();
+    let mut out = String::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        // Images (`![`) are handled by strip_markdown_images — skip them
+        // here so their alt text isn't left behind.
+        if bytes[i] == b'[' {
+            let after = &s[i + 1..];
+            if let Some(close_bracket) = after.find("](") {
+                let text = &s[i + 1..i + 1 + close_bracket];
+                let url_start = i + 1 + close_bracket + 2;
+                let mut depth = 1usize;
+                let mut j = url_start;
+                while j < len && depth > 0 {
+                    if bytes[j] == b'(' {
+                        depth += 1;
+                    } else if bytes[j] == b')' {
+                        depth -= 1;
+                    }
+                    j += 1;
+                }
+                if depth == 0 {
+                    out.push_str(text);
+                    i = j; // skip the entire [text](url)
+                    continue;
+                }
+            }
+        }
+        let ch = s[i..].chars().next().unwrap_or(' ');
+        let n = ch.len_utf8();
+        out.push_str(&s[i..i + n]);
+        i += n;
+    }
+    out
+}
+
+/// Reduce HTML anchors `<a …>text</a>` to just `text` (case-insensitive).
+fn strip_anchor_tags(s: &str) -> String {
+    let lower = s.to_lowercase();
+    let bytes = s.as_bytes();
+    let len = s.len();
+    let mut out = String::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        // Opening <a ...>
+        if lower[i..].starts_with("<a") {
+            let after = i + 2;
+            if after >= len || bytes[after] == b' ' || bytes[after] == b'\t' || bytes[after] == b'\n' || bytes[after] == b'>' {
+                // Find the end of the opening tag
+                let Some(open_end_rel) = lower[after..].find('>') else {
+                    break;
+                };
+                let content_start = after + open_end_rel + 1;
+                // Find the matching </a>
+                let Some(close_rel) = lower[content_start..].find("</a>") else {
+                    // Unclosed anchor — drop the opening tag, keep the text
+                    out.push_str(&s[content_start..]);
+                    return out;
+                };
+                let content_end = content_start + close_rel;
+                out.push_str(&s[content_start..content_end]);
+                i = content_end + "</a>".len();
+                continue;
+            }
+        }
+        let ch = s[i..].chars().next().unwrap_or(' ');
+        let n = ch.len_utf8();
+        out.push_str(&s[i..i + n]);
+        i += n;
+    }
+    out
 }
 
 /// Get an AI service from the state or create one from config file.
@@ -593,10 +718,51 @@ mod tests {
     }
 
     #[test]
-    fn test_wrap_bilingual_partial() {
+    /// Issue #10 comment: the ORIGINAL side of a bilingual pair must lose
+    /// redundant images and links so both sides of the pair stay
+    /// format-aligned.
+    #[test]
+    fn test_clean_original_side_strips_images_and_links() {
+        let html = r#"<div class="paragraph-original">See [the docs](https://x.com/a) and ![fig](x.png) and <a href="https://x.com/b">more</a></div><div class="paragraph-translated">看文档</div>"#;
+        let result = clean_bilingual_block(html);
         assert_eq!(
-            wrap_bilingual_partial("body"),
-            r#"<div class="bilingual-content" data-cached="false" data-partial="true">body</div>"#
+            result,
+            r#"<div class="paragraph-original">See the docs and  and more</div><div class="paragraph-translated">看文档</div>"#
+        );
+    }
+
+    #[test]
+    fn test_clean_original_side_keeps_plain_text() {
+        let html = r#"<div class="paragraph-original">Just plain words, some (parens) too.</div>"#;
+        assert_eq!(clean_bilingual_block(html), html);
+    }
+
+    #[test]
+    fn test_strip_markdown_links_keeps_text_and_nested_parens() {
+        assert_eq!(
+            strip_markdown_links("see [link](https://x.com/a(1)) now"),
+            "see link now",
+        );
+        // Not a link (no `](`) — kept verbatim
+        assert_eq!(strip_markdown_links("array [0] item"), "array [0] item");
+    }
+
+    #[test]
+    fn test_strip_anchor_tags_case_insensitive() {
+        assert_eq!(
+            strip_anchor_tags("go <A HREF=\"x\">there</A> now"),
+            "go there now",
+        );
+        // Non-anchor tags starting with "a" survive
+        assert_eq!(strip_anchor_tags("<abbr>HTML</abbr>"), "<abbr>HTML</abbr>");
+    }
+
+    #[test]
+    fn test_clean_bilingual_block_translated_side_still_stripped() {
+        let html = r#"<div class="paragraph-original">Text</div><div class="paragraph-translated">文本 <img src="x.jpg"></div>"#;
+        assert_eq!(
+            clean_bilingual_block(html),
+            r#"<div class="paragraph-original">Text</div><div class="paragraph-translated">文本 </div>"#
         );
     }
 }

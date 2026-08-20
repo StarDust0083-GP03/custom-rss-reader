@@ -33,6 +33,7 @@ import {
 } from "./features/actions";
 import {
   translateItem,
+  retranslateItem,
   classifyItem,
   openAiSettingsModal,
   closeAiSettingsModal,
@@ -101,7 +102,6 @@ async function init() {
     "mark-all-read": () => markAllAsRead(),
     "chroma-settings": () => openChromaSettingsModal(),
     "classify": () => { if (S.selectedItem) classifyItem(S.selectedItem); },
-    "similar": () => findSimilarArticles(),
     "ai-settings": () => openAiSettingsModal(),
   };
   const attach = (btnId: string, menuId: string) => {
@@ -135,6 +135,12 @@ async function init() {
       }
     });
   });
+
+  // Find similar — dedicated detail-toolbar button (visible when the
+  // semantic DB is enabled; see updateSearchModeBtn).
+  document.getElementById("similar-btn")?.addEventListener("click", findSimilarArticles);
+  // ✕ on the banner restores the normal list (also exits similar mode).
+  document.getElementById("similar-banner-close")?.addEventListener("click", () => loadItems());
 
   // AI 推荐阅读(手动触发)
   document.getElementById("recommend-btn")?.addEventListener("click", openRecommendations);
@@ -276,6 +282,17 @@ async function init() {
     if (S.selectedItem) {
       toggleReadLater(S.selectedItem.id);
     }
+  });
+
+  // 右键翻译按钮 = 强制重新翻译（忽略并清除已有缓存）—— 当缓存的翻译不
+  // 正确时可以重新生成，而不用先手动清掉旧结果（issue #10）。
+  document.getElementById("translate-btn")?.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    if (!S.selectedItem) return;
+    // An in-flight translation makes no sense to force-restart — ignore.
+    const ts = S.translationStateByItemId.get(S.selectedItem.id);
+    if (ts?.abortController) return;
+    retranslateItem(S.selectedItem);
   });
 
   // AI 功能按钮

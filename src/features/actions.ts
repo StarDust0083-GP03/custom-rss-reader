@@ -17,6 +17,7 @@ import {
   selectSubscription,
   updateToggleButtonStates,
   iframeManager,
+  invalidateLoadItems,
 } from "../ui/render";
 import { setLoadingWithStatus, clearLoadingStatus, resetCounts, incrementError } from "../ui/status";
 import { success as toastSuccess, error as toastError, info as toastInfo } from "../toast";
@@ -367,6 +368,9 @@ export async function searchItems(query: string) {
     setLoadingWithStatus("", `Semantic search: "${query}"`);
     try {
       const results = await chromaApi.search(query, 50);
+      // Drop any in-flight normal list load before installing search hits —
+      // same staleness race find-similar guards against.
+      invalidateLoadItems();
       // Synthesize a FeedItemSummary from each semantic hit. Fields the hit
       // doesn't carry (subscription_id, flags) are zeroed; navigation still
       // works because `selectItem` re-fetches the full item by its real id.

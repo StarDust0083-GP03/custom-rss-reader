@@ -46,3 +46,6 @@ ort = { version = "2.0.0-rc.13", features = ["download-binaries"] }
 tokenizers = "0.23.1"
 ndarray = "0.17.2"
 anyhow = "1.0.104"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

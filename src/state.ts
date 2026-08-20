@@ -33,6 +33,8 @@ export interface AppState {
   currentSubscriptionId: number | null;
   currentItems: FeedItemSummary[];
   selectedItem: FeedItem | null;
+  /** Non-null while the item list shows "find similar" results. */
+  similarMode: { itemId: number; title: string } | null;
   /** "Today + Unread" combination mode. */
   unreadFilterEnabled: boolean;
   useWebView: boolean;
@@ -53,6 +55,7 @@ export const state: AppState = {
   currentSubscriptionId: null,
   currentItems: [],
   selectedItem: null,
+  similarMode: null,
   unreadFilterEnabled: false,
   useWebView: false,
   searchMode: "text",

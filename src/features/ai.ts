@@ -15,7 +15,8 @@ import { success as toastSuccess, error as toastError, info as toastInfo } from 
 const S = state;
 
 // 翻译
-export async function translateItem(item: FeedItem, htmlContent?: string) {
+export async function translateItem(item: FeedItem, htmlContent?: string, opts?: { force?: boolean }) {
+  const force = opts?.force === true;
   // 获取或创建该文章的翻译状态
   let translationState: TranslationState | undefined = S.translationStateByItemId.get(item.id);
 
@@ -35,8 +36,8 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
     translationState = undefined;
   }
 
-  // 检查是否已经有翻译内容（缓存）
-  if (item.translated_content) {
+  // 检查是否已经有翻译内容（缓存）— 强制重新翻译时跳过
+  if (!force && item.translated_content) {
     // 直接使用已有的翻译
     translationState = {
       useTranslation: true,
@@ -68,13 +69,15 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
   renderItemDetail(item);
 
   try {
-    toastSuccess("Translating...");
+    toastSuccess(force ? "Re-translating..." : "Translating...");
 
     let unlistenProgress: (() => void) | null = null;
     let unlistenError: (() => void) | null = null;
 
     try {
-      // Listen for translation error events
+      // Listen for translation error events. State only — the actual
+      // error toast comes from the invoke rejection below, so a failure
+      // is reported exactly once.
       unlistenError = await listen<{ item_id: number; error: string; paragraph_index: number }>(
         "translation-error",
         (event) => {
@@ -84,15 +87,16 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
             currentState.hasError = true;
             currentState.errorMessage = event.payload.error;
           }
-          toastError(`Translation error: ${event.payload.error}`);
         }
       );
 
-      // Listen for translation progress events
-      unlistenProgress = await listen<{ item_id: number; total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean; has_error?: boolean; error_messages?: string[]; partial_content?: string }>(
+      // Listen for translation progress events. (`has_error`/
+      // `error_messages` are legacy fields: error runs now reject the invoke
+      // instead of emitting a final event — issue #10.)
+      unlistenProgress = await listen<{ item_id: number; total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean; partial_content?: string }>(
         "translation-progress",
         (event) => {
-          const { item_id, completed, total, html_chunk, is_complete, cached, has_error, error_messages } = event.payload;
+          const { item_id, completed, total, html_chunk, is_complete, cached } = event.payload;
 
           // 确保事件属于正确的文章
           if (item_id !== item.id) {
@@ -131,36 +135,11 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
 
           // Append the chunk to state storage (not to item yet)
           if (is_complete) {
-            // Final event - clean up state
+            // Final event — only sent for a FULLY successful run now
+            // (issue #10): when the LLM API errors, the backend emits
+            // nothing further and the invoke rejects, so the catch path
+            // below owns the error UX.
             currentState.abortController = null;
-
-            // Handle error case
-            if (has_error) {
-              currentState.hasError = true;
-              currentState.errorMessage = error_messages?.[0] || "Translation failed";
-              // Use the partial content from html_chunk if available
-              if (html_chunk) {
-                currentState.inProgressContent = html_chunk;
-                item.translated_content = html_chunk;
-              } else {
-                currentState.inProgressContent = null;
-              }
-              currentState.useTranslation = false;
-
-              // 更新列表徽章
-              renderItems(true);
-
-              // 只有当前选中的文章才渲染
-              if (S.selectedItem?.id === item.id) {
-                renderItemDetail(item);
-                if (html_chunk) {
-                  toastError(`Translation partially complete: ${currentState.errorMessage}`);
-                } else {
-                  toastError(`Translation failed: ${currentState.errorMessage}. Check ~/.rss-reader/ai_errors.log for details.`);
-                }
-              }
-              return;
-            }
 
             // Success case
             if (currentState.inProgressContent && !currentState.inProgressContent.endsWith("</div>")) {
@@ -226,11 +205,13 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
         await invoke<string>("translate_html_content_streaming", {
           itemId: item.id,
           content: htmlContent,
+          force,
         });
       } else {
         // 使用流式双语对照翻译
         await invoke<string>("translate_item_bilingual_streaming", {
           itemId: item.id,
+          force,
         });
       }
     } finally {
@@ -278,6 +259,18 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
       renderItemDetail(item); // Update button to show error state
     }
   }
+}
+
+/// Force a fresh translation of `item`, ignoring (and clearing) any cached
+/// one (issue #10: right-click the Translate button to re-translate a bad
+/// result). The backend also drops the stored translation, so a failed
+/// re-run never resurrects the stale cache.
+export async function retranslateItem(item: FeedItem) {
+  // Drop the old translation everywhere it is tracked.
+  S.translationStateByItemId.delete(item.id);
+  item.translated_content = null;
+  renderItems(true); // Update badge
+  await translateItem(item, undefined, { force: true });
 }
 
 export async function classifyItem(item: FeedItem) {
@@ -354,7 +347,9 @@ export async function openRecommendations() {
 
   modal.classList.add("visible");
 
-  // Loading state
+  // Loading state — with a live elapsed timer. One LLM call over ~60
+  // candidates legitimately takes tens of seconds; a static "Picking..."
+  // looks frozen, an advancing timer shows it's still working.
   list.replaceChildren();
   const loading = document.createElement("div");
   loading.className = "recommend-loading";
@@ -364,6 +359,11 @@ export async function openRecommendations() {
     btn.disabled = true;
     btn.textContent = "Picking...";
   }
+  const startedAt = Date.now();
+  const ticker = window.setInterval(() => {
+    const secs = Math.round((Date.now() - startedAt) / 1000);
+    loading.textContent = `Reading your unread articles... (${secs}s)`;
+  }, 1000);
 
   try {
     const recs = await aiApi.recommendReads();
@@ -378,6 +378,7 @@ export async function openRecommendations() {
     list.appendChild(err);
     toastError(`Recommendation failed: ${error}`);
   } finally {
+    window.clearInterval(ticker);
     if (btn) {
       btn.disabled = false;
       btn.textContent = "★ Picks";

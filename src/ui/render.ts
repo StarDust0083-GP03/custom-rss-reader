@@ -40,6 +40,17 @@ export const iframeManager = new IframeManager();
 // subscription A doesn't paint over the fresh results for subscription B.
 let loadItemsSeq = 0;
 
+/** Invalidate any in-flight `loadItems` response.
+ *
+ * View modes that replace the item list directly (find-similar, semantic
+ * search) must call this BEFORE installing their results — otherwise a
+ * `loadItems` that was still in flight would pass its staleness check and
+ * clobber the fresh results a moment later.
+ */
+export function invalidateLoadItems(): void {
+  loadItemsSeq++;
+}
+
 // Sync the Markdown / Web View buttons to the current render mode.
 //
 // Two separate buttons with distinct semantics (user clarification):
@@ -215,9 +226,30 @@ export function revealSubscription(subscriptionId: number) {
   window.setTimeout(() => row.classList.remove("reveal"), 1600);
 }
 
+/** Enter/leave "find similar" results mode and sync its banner.
+ *
+ * `null` hides the banner; an `{ itemId, title }` shows
+ * "Similar to: <title>" with a ✕ that restores the normal list.
+ */
+export function setSimilarMode(mode: { itemId: number; title: string } | null) {
+  S.similarMode = mode;
+  const banner = document.getElementById("similar-banner");
+  const text = document.getElementById("similar-banner-text");
+  if (!banner || !text) return;
+  if (mode) {
+    text.textContent = `Similar to: ${mode.title}`;
+    text.title = mode.title;
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
+}
+
 // 加载内容
 export async function loadItems() {
   const seq = ++loadItemsSeq;
+  // A normal list load always ends find-similar mode.
+  setSimilarMode(null);
   setLoadingWithStatusLocal("", "Loading items...");
   try {
     let items: FeedItemSummary[] = [];
@@ -464,10 +496,13 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
   // Translation button state
   if (translateBtn) {
     const ts = S.translationStateByItemId.get(item.id);
+    // Always advertise the right-click re-translate shortcut (issue #10).
+    const RETRANSLATE_HINT = "Right-click to re-translate";
     translateBtn.classList.remove("translating", "has-cache", "has-error");
     if (ts?.abortController) {
       translateBtn.classList.add("translating");
       translateBtn.textContent = "Cancel";
+      translateBtn.title = "Click to cancel";
     } else if (ts?.hasError) {
       translateBtn.classList.add("has-error");
       translateBtn.textContent = "Retry";
@@ -475,10 +510,10 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
     } else if (item.translated_content) {
       translateBtn.classList.add("has-cache");
       translateBtn.textContent = ts?.useTranslation ? "Show Original" : "Translate";
-      translateBtn.title = "";
+      translateBtn.title = RETRANSLATE_HINT;
     } else {
       translateBtn.textContent = "Translate";
-      translateBtn.title = "";
+      translateBtn.title = RETRANSLATE_HINT;
     }
   }
 

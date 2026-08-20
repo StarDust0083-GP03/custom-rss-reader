@@ -78,6 +78,12 @@
                         <button id="search-mode-btn" class="search-mode-btn" title="Toggle search mode">Text</button>
                         <input type="text" id="search-input" placeholder="Search items..." />
                     </div>
+                    <!-- "Find similar" results mode banner: shown while the item
+                         list displays articles similar to another article. -->
+                    <div id="similar-banner" class="similar-banner" hidden>
+                        <span id="similar-banner-text" class="similar-banner-text"></span>
+                        <button id="similar-banner-close" class="similar-banner-close" title="Back to normal list">✕</button>
+                    </div>
                 </div>
                 <div class="items-list" id="items-list">
                     <!-- Feed items will be rendered here -->
@@ -93,12 +99,12 @@
                     <div class="detail-actions">
                         <button id="markdown-btn" title="View as rendered Markdown" class="active">Markdown</button>
                         <button id="webview-btn" title="View as live webpage">Web View</button>
-                        <button id="translate-btn" title="Translate">Translate</button>
+                        <button id="translate-btn" title="Translate (right-click to re-translate)">Translate</button>
+                        <button id="similar-btn" title="Find similar articles" hidden>Similar</button>
                         <button id="detail-menu-btn" class="menu-btn" title="More">⋯</button>
                     </div>
                     <div id="detail-menu" class="dropdown-menu">
                         <button type="button" class="dropdown-item" data-action="classify">Classify Tags</button>
-                        <button type="button" class="dropdown-item" data-action="similar" id="similar-menu-item">Find Similar</button>
                         <button type="button" class="dropdown-item" data-action="ai-settings">AI Settings…</button>
                         <div class="theme-section">
                             <span class="theme-label">Theme</span>
