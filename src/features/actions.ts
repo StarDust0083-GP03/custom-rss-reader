@@ -20,6 +20,7 @@ import {
 } from "../ui/render";
 import { setLoadingWithStatus, clearLoadingStatus, resetCounts, incrementError } from "../ui/status";
 import { success as toastSuccess, error as toastError, info as toastInfo } from "../toast";
+import { ensureMarkdownBackfill } from "./chroma";
 
 const S = state;
 
@@ -75,7 +76,11 @@ export async function selectItem(item: FeedItemSummary) {
   setupIgnoreTimer(fullItem);
 }
 
-// Set up timer to detect if user quickly abandons the article
+/// How long a selected article must go without any engagement (scroll,
+/// click, translate) before it is treated as a quick skip.
+const QUICK_ABANDON_MS = 1000;
+
+// Set up timer to detect if user quickly abandons the article.
 function setupIgnoreTimer(item: FeedItem) {
   // Clear any existing timer
   if (ignoreTimer !== null) {
@@ -88,28 +93,24 @@ function setupIgnoreTimer(item: FeedItem) {
     return;
   }
 
-  S.lastSelectedAt = Date.now();
-
   ignoreTimer = setTimeout(async () => {
-    // Only mark as ignored if:
-    // 1. The same item is still selected
-    // 2. The item has not been marked as read (is_read should be true by now if user actually read it)
-    // 3. Less than 1 second elapsed between selection and timer fire
+    // Only mark as ignored if the same item is still selected and nothing
+    // cancelled the timer (scroll/click/translate call cancelIgnoreTimer,
+    // i.e. the user engaged). The timeout itself is the elapsed guard, so
+    // no redundant clock re-check is needed here — the previous
+    // `elapsed < 1000` check ran after a 1000 ms timeout and was never true.
     if (S.selectedItem?.id === item.id && !item.is_ignored) {
-      const elapsed = Date.now() - S.lastSelectedAt;
-      if (elapsed < 1000) {
-        try {
-          await invoke<boolean>("toggle_ignored", { itemId: item.id });
-          item.is_ignored = true;
-          renderItems(true);
-          console.log(`[Ignore] Article "${item.title}" marked as ignored (read for ${elapsed}ms)`);
-        } catch (error) {
-          console.error('[Ignore] Failed to toggle ignored:', error);
-        }
+      try {
+        await invoke<boolean>("toggle_ignored", { itemId: item.id });
+        item.is_ignored = true;
+        renderItems(true);
+        console.log(`[Ignore] Article "${item.title}" marked as ignored (no engagement within ${QUICK_ABANDON_MS}ms)`);
+      } catch (error) {
+        console.error('[Ignore] Failed to toggle ignored:', error);
       }
     }
     ignoreTimer = null;
-  }, 1000);
+  }, QUICK_ABANDON_MS);
 }
 
 let ignoreTimer: ReturnType<typeof setTimeout> | null = null;
@@ -364,6 +365,10 @@ export async function searchItems(query: string) {
   console.log(`[search] start mode=${S.searchMode} query="${query}"`);
 
   if (S.searchMode === "semantic" && S.chromaEnabled) {
+    // Loading the semantic search view is the trigger to catch up on
+    // website Markdown for history-imported articles (they get re-indexed
+    // in the background). Fire-and-forget: this search isn't delayed.
+    void ensureMarkdownBackfill();
     setLoadingWithStatus("", `Semantic search: "${query}"`);
     try {
       const results = await chromaApi.search(query, 50);

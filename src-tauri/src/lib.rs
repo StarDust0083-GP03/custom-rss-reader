@@ -72,7 +72,6 @@ pub fn run() {
                 fetcher,
                 ai_service: None,
                 chroma_service,
-                pool: pool.clone(),
             };
 
             app.manage(app_state);
@@ -140,6 +139,7 @@ pub fn run() {
             reindex_chromadb,
             chroma_sync,
             chroma_sync_progress,
+            chroma_backfill_markdown,
             chroma_health_check,
             // Debug commands (dev builds only)
             #[cfg(debug_assertions)]

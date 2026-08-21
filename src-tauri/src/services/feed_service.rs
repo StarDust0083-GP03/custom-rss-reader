@@ -85,11 +85,6 @@ impl FeedService {
         self.repo.find_by_id(id).await
     }
 
-    #[cfg(test)]
-    pub async fn get_items_by_subscription(&self, subscription_id: i64) -> Result<Vec<FeedItem>> {
-        self.repo.find_by_subscription(subscription_id).await
-    }
-
     // ------------------------------------------------------------------
     // Feed Fetching
     // ------------------------------------------------------------------
@@ -342,11 +337,11 @@ async fn fetch_parse_and_save(
         let is_dup = item
             .guid
             .as_ref()
-            .map_or(false, |g| existing_guids.contains(g))
+            .is_some_and(|g| existing_guids.contains(g))
             || item
                 .link
                 .as_ref()
-                .map_or(false, |l| existing_links.contains(l));
+                .is_some_and(|l| existing_links.contains(l));
         if is_dup {
             continue;
         }
@@ -364,7 +359,7 @@ async fn fetch_parse_and_save(
         if let Some(chroma) = chroma_service.get().await {
             if let Err(e) = chroma.index_item(&feed_item).await {
                 eprintln!("ChromaDB indexing failed for item {}: {}", feed_item.id, e);
-                crate::chroma::sync::SyncState::queue_upsert(feed_item.id);
+                crate::chroma::sync::SyncState::queue_upsert(feed_item.id).await;
             }
         }
 
@@ -451,6 +446,11 @@ async fn precache_website_content(
         Ok(Ok(md)) => {
             if let Err(e) = repo.update_content_md(item.id, &md, true).await {
                 eprintln!("Failed to cache website content for item {}: {}", item.id, e);
+            } else {
+                // The website Markdown is richer than the RSS snippet the
+                // item was indexed from at insert time — queue a re-embed
+                // so semantic search matches the full article text.
+                crate::chroma::sync::SyncState::queue_upsert(item.id).await;
             }
         }
         Ok(Err(e)) => {

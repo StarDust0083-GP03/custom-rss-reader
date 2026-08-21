@@ -36,11 +36,14 @@ pub async fn fetch_all_feeds(state: State<'_, AppState>) -> Result<crate::servic
     Ok(summary)
 }
 
+/// Result of refreshing one subscription: `(subscription_id, outcome)`.
+type RefreshResult = Vec<(i64, std::result::Result<Vec<FeedItem>, String>)>;
+
 #[tauri::command]
 pub async fn refresh_subscriptions(
     state: State<'_, AppState>,
     subscription_ids: Vec<i64>,
-) -> Result<Vec<(i64, std::result::Result<Vec<FeedItem>, String>)>> {
+) -> Result<RefreshResult> {
     state
         .feed_service
         .refresh_subscriptions(&subscription_ids)
@@ -72,6 +75,10 @@ pub async fn fetch_website_markdown(
 
     if let Some(item_id) = item_id {
         state.feed_repo.update_content_md(item_id, &md, true).await?;
+        // The website Markdown is richer than the RSS snippet the item was
+        // first indexed with — queue a re-embed so semantic search finds
+        // this article by its full text on the next sync.
+        crate::chroma::sync::SyncState::queue_upsert(item_id).await;
     }
 
     Ok(md)
@@ -301,8 +308,8 @@ mod tests {
                 websiteUrl="https://x.com" useWebsite="true" autoClassify="false"/>
         </body></opml>"#;
         let subs = parse_opml(xml).unwrap();
-        assert_eq!(subs[0].use_website, true);
-        assert_eq!(subs[0].auto_classify, false);
+        assert!(subs[0].use_website);
+        assert!(!subs[0].auto_classify);
         assert_eq!(subs[0].website_url.as_deref(), Some("https://x.com"));
     }
 

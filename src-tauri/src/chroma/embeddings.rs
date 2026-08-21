@@ -194,7 +194,7 @@ impl OnnxEmbeddingFunction {
         let outputs = session.run(inputs)?;
         // Prefer the named output; fall back to the first output in case a
         // model names it differently. `fallback` lives at this scope so the
-        // deref'd &Value (borrowing the owned ValueRef) outlives the match.
+        // `&Value` (borrowing the owned ValueRef) outlives the match.
         let fallback = outputs.iter().next();
         let last_hidden: &Value = match outputs.get("last_hidden_state") {
             Some(v) => v,
@@ -202,7 +202,7 @@ impl OnnxEmbeddingFunction {
                 let (_, v) = fallback
                     .as_ref()
                     .with_context(|| "ONNX model produced no output")?;
-                &**v
+                v
             }
         };
         let (_, data) = last_hidden.try_extract_tensor::<f32>()?;

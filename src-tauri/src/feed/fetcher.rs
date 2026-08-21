@@ -52,7 +52,7 @@ impl FeedFetcher {
                 Ok(content) => return Ok(content),
                 Err(e) if retry_count < max_retries && is_retryable_error(&e) => {
                     retry_count += 1;
-                    let delay = Duration::from_millis(1000 * 2_u64.pow(retry_count as u32));
+                    let delay = Duration::from_millis(1000 * 2_u64.pow(retry_count));
                     sleep(delay).await;
                 }
                 Err(e) => return Err(e),

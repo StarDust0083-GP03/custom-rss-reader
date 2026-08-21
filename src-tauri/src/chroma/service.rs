@@ -68,17 +68,12 @@ impl ChromaService {
                 .description
                 .as_deref()
                 .map(|d| d.chars().take(MAX_INDEXED_DOC_CHARS).collect()),
-            content: item
-                .content
-                .as_deref()
+            // Prefer the cached Markdown body — for website-mode items the
+            // RSS `content` is often just a teaser (see IndexRow docs).
+            content: best_body(item.content_md.as_deref(), item.content.as_deref())
                 .map(|c| c.chars().take(MAX_INDEXED_DOC_CHARS).collect()),
         };
         self.upsert_index_rows(std::slice::from_ref(&row)).await
-    }
-
-    /// Remove a feed item from the ChromaDB index.
-    pub async fn delete_item(&self, item_id: i64) -> Result<()> {
-        self.delete_items(&[item_id]).await
     }
 
     /// Remove multiple feed items from the index (e.g. every article of a
@@ -123,7 +118,7 @@ impl ChromaService {
         let text = build_document_from_parts(
             &item.title,
             item.description.as_deref(),
-            item.content.as_deref(),
+            best_body(item.content_md.as_deref(), item.content.as_deref()),
         );
         if text.is_empty() {
             return Ok(Vec::new());
@@ -364,6 +359,17 @@ pub struct SemanticSearchResult {
     pub score: f64,
 }
 
+/// Prefer the cached Markdown body over the raw RSS content: for
+/// website-mode subscriptions the RSS `content` is often just a teaser
+/// while `content_md` holds the full article, and for plain RSS items the
+/// lazy RSS→Markdown conversion produces equivalent text either way.
+fn best_body<'a>(content_md: Option<&'a str>, content: Option<&'a str>) -> Option<&'a str> {
+    match content_md.filter(|md| !md.is_empty()) {
+        Some(md) => Some(md),
+        None => content,
+    }
+}
+
 /// Build the document text from an index row for indexing.
 ///
 /// Strips `<script>`, `<style>`, `<noscript>` and all HTML tags, collapses
@@ -388,13 +394,13 @@ pub fn build_document_from_parts(
     let mut parts: Vec<String> = Vec::new();
     parts.push(title.to_string());
 
-    if let Some(ref desc) = description {
+    if let Some(desc) = description {
         if !desc.is_empty() {
             parts.push(strip_html_tags(desc));
         }
     }
 
-    if let Some(ref content) = content {
+    if let Some(content) = content {
         if !content.is_empty() {
             let cleaned = strip_script_and_style(content);
             let text = strip_html_tags(&cleaned);
@@ -576,5 +582,17 @@ mod tests {
     fn test_build_document_empty_parts() {
         assert_eq!(build_document_from_parts("", None, None), "");
         assert_eq!(build_document_from_parts("T", Some(""), Some("")), "T");
+    }
+
+    /// Website-mode items carry their full text in `content_md` while the
+    /// RSS `content` is just a teaser — the embedding must prefer the
+    /// Markdown body.
+    #[test]
+    fn test_best_body_prefers_markdown() {
+        assert_eq!(best_body(Some("# Full"), Some("<p>teaser</p>")), Some("# Full"));
+        // Empty/missing Markdown falls back to the RSS content.
+        assert_eq!(best_body(Some(""), Some("<p>teaser</p>")), Some("<p>teaser</p>"));
+        assert_eq!(best_body(None, Some("<p>teaser</p>")), Some("<p>teaser</p>"));
+        assert_eq!(best_body(None, None), None);
     }
 }

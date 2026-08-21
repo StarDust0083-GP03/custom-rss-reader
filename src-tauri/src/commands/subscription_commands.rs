@@ -64,7 +64,7 @@ pub async fn remove_subscription(
         if let Err(e) = chroma.delete_items(&item_ids).await {
             eprintln!("ChromaDB cleanup for subscription {} failed: {}", id, e);
             for item_id in &item_ids {
-                crate::chroma::sync::SyncState::queue_delete(*item_id);
+                crate::chroma::sync::SyncState::queue_delete(*item_id).await;
             }
         }
     }

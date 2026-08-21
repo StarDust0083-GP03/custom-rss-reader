@@ -63,7 +63,7 @@ pub struct FeedItemSummary {
 }
 
 /// Input for creating a new feed item.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NewFeedItem {    pub subscription_id: i64,
     pub guid: Option<String>,
     pub title: String,
@@ -83,30 +83,4 @@ pub struct NewFeedItem {    pub subscription_id: i64,
     pub translated_title: Option<String>,
     pub translated_content: Option<String>,
     pub translated_at: Option<DateTime<Utc>>,
-}
-
-impl Default for NewFeedItem {
-    fn default() -> Self {
-        Self {
-            subscription_id: 0,
-            guid: None,
-            title: String::new(),
-            link: None,
-            content: None,
-            content_md: None,
-            description: None,
-            author: None,
-            published_at: None,
-            is_website_content: false,
-            is_read: false,
-            is_favorite: false,
-            is_read_later: false,
-            is_ignored: false,
-            tags: None,
-            category: None,
-            translated_title: None,
-            translated_content: None,
-            translated_at: None,
-        }
-    }
 }

@@ -110,7 +110,7 @@ pub async fn classify_item(
         existing_tags,
     };
 
-    Ok(ai_service.classify(request).await?)
+    ai_service.classify(request).await
 }
 
 // ---- Read recommendations (manual trigger, first version) ----

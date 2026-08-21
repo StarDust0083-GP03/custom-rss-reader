@@ -18,6 +18,7 @@ import type {
   ChromaConfigResponse,
   AiConfigResponse,
   OpmlImportResult,
+  MarkdownBackfillReport,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -299,6 +300,8 @@ export const chroma = {
     call<FeedItemSummary[]>("find_similar_items", { itemId, limit }, "chroma.findSimilar"),
   reindex: () => call<string>("reindex_chromadb", undefined, "chroma.reindex"),
   healthCheck: () => call<boolean>("chroma_health_check", undefined, "chroma.healthCheck"),
+  backfillMarkdown: () =>
+    call<MarkdownBackfillReport>("chroma_backfill_markdown", undefined, "chroma.backfillMarkdown"),
 };
 
 // ---------------------------------------------------------------------------

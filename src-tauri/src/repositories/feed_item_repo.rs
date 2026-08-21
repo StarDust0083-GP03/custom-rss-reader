@@ -290,38 +290,18 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
-    async fn find_by_subscription(&self, subscription_id: i64) -> Result<Vec<FeedItem>> {
-        let rows = sqlx::query_as::<_, FeedItemRow>(
-            "SELECT * FROM feed_items WHERE subscription_id = $1 ORDER BY published_at DESC",
-        )
-        .bind(subscription_id)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows.into_iter().map(|r| r.into()).collect())
-    }
-
-    async fn find_all_full(&self, limit: i64, offset: i64) -> Result<Vec<FeedItem>> {
-        let rows = sqlx::query_as::<_, FeedItemRow>(
-            "SELECT * FROM feed_items ORDER BY id LIMIT $1 OFFSET $2",
-        )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows.into_iter().map(|r| r.into()).collect())
-    }
-
     async fn find_index_page(&self, after_id: i64, limit: i64) -> Result<Vec<IndexRow>> {
         // substr(...) truncates in CHARACTERS (SQLite text semantics), which
         // bounds each row regardless of article size while still supplying
         // everything the 2000-unit document truncation can consume.
+        // COALESCE(NULLIF(content_md, ''), content) prefers the cached
+        // Markdown (full website text) over the raw RSS snippet — see the
+        // IndexRow docs.
         let rows = sqlx::query_as::<_, IndexRowImpl>(
             r#"
             SELECT id, title, link, author, published_at, category,
                    substr(description, 1, $2) AS description,
-                   substr(content, 1, $2)    AS content
+                   substr(COALESCE(NULLIF(content_md, ''), content), 1, $2) AS content
             FROM feed_items
             WHERE id > $1
             ORDER BY id ASC
@@ -346,7 +326,7 @@ impl FeedItemRepository for SqliteFeedItemRepository {
                    substr(description, 1, "#,
         );
         qb.push_bind(INDEX_TEXT_CHARS_SQL)
-            .push(r#") AS description, substr(content, 1, "#)
+            .push(r#") AS description, substr(COALESCE(NULLIF(content_md, ''), content), 1, "#)
             .push_bind(INDEX_TEXT_CHARS_SQL)
             .push(r#") AS content FROM feed_items WHERE id IN ("#);
         let mut separated = qb.separated(", ");
@@ -367,6 +347,28 @@ impl FeedItemRepository for SqliteFeedItemRepository {
             .fetch_optional(&self.pool)
             .await?;
         Ok(max.unwrap_or(0))
+    }
+
+    async fn find_website_backfill_candidates(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(i64, String)>> {
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            r#"
+            SELECT f.id, f.link
+            FROM feed_items f
+            JOIN subscriptions s ON s.id = f.subscription_id
+            WHERE s.use_website = 1
+              AND f.link IS NOT NULL AND f.link != ''
+              AND (f.content_md IS NULL OR f.content_md = '' OR f.is_website_content = 0)
+            ORDER BY f.id DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     async fn update_content_md(
@@ -430,7 +432,10 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         let row = sqlx::query_as::<_, FeedItemRow>(
             r#"
             UPDATE feed_items
-            SET translated_content = $2,
+            -- An empty string clears the translation (force re-translate path):
+            -- NULLIF keeps the column NULL so the cache lookup sees "no
+            -- translation" instead of a stale empty value.
+            SET translated_content = NULLIF($2, ''),
                 translated_title = COALESCE($3, translated_title),
                 translated_at = CURRENT_TIMESTAMP
             WHERE id = $1

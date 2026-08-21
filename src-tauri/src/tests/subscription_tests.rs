@@ -50,8 +50,8 @@ async fn test_create_subscription_with_all_fields() {
 
     assert_eq!(sub.url, "https://blog.example.com/feed");
     assert_eq!(sub.title, Some("Tech Blog".into()));
-    assert_eq!(sub.use_website, true);
-    assert_eq!(sub.auto_classify, false);
+    assert!(sub.use_website);
+    assert!(!sub.auto_classify);
     assert_eq!(
         sub.opml_attributes,
         Some(r#"{"type":"rss","version":"2.0"}"#.into())
@@ -248,7 +248,7 @@ async fn test_update_subscription_preserves_unchanged_fields() {
 
     assert_eq!(updated.title, Some("New Title".into()));
     assert_eq!(updated.website_url, Some("https://example.com".into()));
-    assert_eq!(updated.use_website, true);
+    assert!(updated.use_website);
 }
 
 #[tokio::test]
