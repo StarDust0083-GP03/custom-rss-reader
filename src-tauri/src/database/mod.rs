@@ -25,7 +25,7 @@ pub async fn init_database() -> Result<SqlitePool> {
 
     let pool = SqlitePool::connect_with(options)
         .await
-        .map_err(|e| AppError::Database(e))?;
+        .map_err(AppError::Database)?;
 
     migrations::run_migrations(&pool).await?;
 

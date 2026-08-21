@@ -126,6 +126,16 @@ export interface SyncProgress {
   elapsed_ms: number;
 }
 
+/** Result of a website-Markdown backfill pass (see the QPS contract in Rust). */
+export interface MarkdownBackfillReport {
+  already_running: boolean;
+  fetched: number;
+  failed: number;
+  queued_reindex: number;
+  hosts_skipped: number;
+  more_pending: boolean;
+  duration_ms: number;
+}
 
 export interface AiConfigResponse {
   /** Masked API key, e.g. `sk-****1234`. Empty when no key configured. */

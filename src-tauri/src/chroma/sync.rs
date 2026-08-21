@@ -33,6 +33,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::error::{AppError, Result};
 use crate::repositories::FeedItemRepository;
@@ -89,6 +90,12 @@ fn update_progress(f: impl FnOnce(&mut SyncProgress)) {
     f(&mut p);
 }
 
+/// Serializes every read-modify-write of the persisted [`SyncState`] — both
+/// sync runs and the `queue_*` helpers — so concurrent triggers (startup,
+/// post-refresh, backfill, manual re-index) can't overwrite freshly queued
+/// work with stale state. One lock, one owner of the state file.
+static STATE_LOCK: TokioMutex<()> = TokioMutex::const_new(());
+
 /// Persisted sync state. Stored as JSON next to the other app config files.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SyncState {
@@ -138,8 +145,12 @@ impl SyncState {
 
     /// Queue an item for deletion on the next sync (called when the live
     /// delete fails, e.g. ChromaDB briefly unreachable).
-    pub fn queue_delete(id: i64) {
-        Self::mutate(|s| {
+    ///
+    /// Serialized with [`STATE_LOCK`] so a concurrent sync run's save can't
+    /// overwrite the freshly queued id with stale state.
+    pub async fn queue_delete(id: i64) {
+        let _guard = STATE_LOCK.lock().await;
+        Self::mutate_locked(|s| {
             if !s.pending_deletes.contains(&id) {
                 s.pending_deletes.push(id);
             }
@@ -148,8 +159,9 @@ impl SyncState {
     }
 
     /// Queue an item for (re)indexing on the next sync.
-    pub fn queue_upsert(id: i64) {
-        Self::mutate(|s| {
+    pub async fn queue_upsert(id: i64) {
+        let _guard = STATE_LOCK.lock().await;
+        Self::mutate_locked(|s| {
             if !s.pending_upserts.contains(&id) {
                 s.pending_upserts.push(id);
             }
@@ -160,7 +172,10 @@ impl SyncState {
     /// Load-modify-save with the modification applied to a fresh load. Best
     /// effort: a write failure is logged, never propagated to callers that
     /// run in fire-and-forget contexts.
-    fn mutate(f: impl FnOnce(&mut SyncState)) {
+    ///
+    /// Callers must hold [`STATE_LOCK`] so the load → save round-trip is
+    /// atomic with respect to sync runs and other queue mutations.
+    fn mutate_locked(f: impl FnOnce(&mut SyncState)) {
         let mut state = Self::load();
         f(&mut state);
         if let Err(e) = state.save() {
@@ -180,11 +195,29 @@ impl SyncState {
 ///
 /// Any failure aborts the run and returns the error — the state on disk
 /// still reflects the last completed page, so the next run resumes there.
+///
+/// The whole run is serialized behind [`STATE_LOCK`], so a second trigger
+/// waits for the first to finish and then runs as a no-op (idempotent
+/// upserts, drained queues).
 pub async fn incremental_sync(
     repo: &Arc<dyn FeedItemRepository>,
     chroma: &ChromaService,
 ) -> Result<SyncReport> {
+    let _guard = STATE_LOCK.lock().await;
     let started = std::time::Instant::now();
+    let result = sync_pass(repo, chroma, started).await;
+    finish_progress(&result, started);
+    result
+}
+
+/// The unlocked body of [`incremental_sync`]. Progress is marked running at
+/// the top and reset by [`finish_progress`] on every exit path — a failed
+/// run must not leave the UI's poll stuck on `running = true`.
+async fn sync_pass(
+    repo: &Arc<dyn FeedItemRepository>,
+    chroma: &ChromaService,
+    started: std::time::Instant,
+) -> Result<SyncReport> {
     let mut state = SyncState::load();
     let mut report = SyncReport::default();
 
@@ -233,7 +266,7 @@ pub async fn incremental_sync(
 
     // 4. Keyset walk above the watermark — the long haul (embedding page by
     //    page), so this is where per-page progress is reported.
-    let pages_total = (max_id as usize + SYNC_PAGE_SIZE as usize - 1) / SYNC_PAGE_SIZE as usize;
+    let pages_total = (max_id as usize).div_ceil(SYNC_PAGE_SIZE as usize);
     if max_id > state.last_indexed_id {
         update_progress(|p| p.phase = "walk");
     }
@@ -270,17 +303,27 @@ pub async fn incremental_sync(
         }
     }
 
-    // Final snapshot: done, not running — the UI's last poll shows totals.
+    report.duration_ms = started.elapsed().as_millis();
+    Ok(report)
+}
+
+/// Always leave the progress tracker idle after a sync attempt, success or
+/// failure. On success the final snapshot shows the totals the UI's last
+/// poll displays.
+fn finish_progress(result: &Result<SyncReport>, started: std::time::Instant) {
+    let (done, pages) = match result {
+        Ok(r) => ((r.indexed + r.deleted) as i64, r.pages),
+        Err(_) => (0, 0),
+    };
     update_progress(|p| {
-        p.done = processed;
-        p.pages = report.pages;
         p.running = false;
         p.phase = "";
         p.elapsed_ms = started.elapsed().as_millis();
+        if result.is_ok() {
+            p.done = done;
+            p.pages = pages;
+        }
     });
-
-    report.duration_ms = started.elapsed().as_millis();
-    Ok(report)
 }
 
 /// Full rebuild: reset the state (watermark back to 0, queues kept) and run
@@ -291,10 +334,14 @@ pub async fn full_resync(
     repo: &Arc<dyn FeedItemRepository>,
     chroma: &ChromaService,
 ) -> Result<SyncReport> {
+    let _guard = STATE_LOCK.lock().await;
     let mut state = SyncState::load();
     state.last_indexed_id = 0;
     state.save()?;
-    incremental_sync(repo, chroma).await
+    let started = std::time::Instant::now();
+    let result = sync_pass(repo, chroma, started).await;
+    finish_progress(&result, started);
+    result
 }
 
 /// Convenience wrapper used by fire-and-forget call sites (startup, post-

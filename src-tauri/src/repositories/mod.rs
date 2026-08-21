@@ -15,6 +15,12 @@ use crate::models::{NewFeedItem, FeedItem, FeedItemSummary, NewSubscription, Sub
 /// units after joining — bytes beyond that can never influence the embedding.
 /// This keeps a 500-row page bounded regardless of article size, unlike
 /// [`FeedItem`] which carries the full text columns.
+///
+/// `content` prefers `content_md` over the raw RSS `content`: for
+/// website-mode subscriptions the RSS text is often just a teaser while the
+/// cached Markdown holds the full article (and for plain RSS items the lazy
+/// Markdown conversion is textually equivalent), so the coalesced column is
+/// never worse and frequently much richer.
 #[derive(Debug, Clone)]
 pub struct IndexRow {
     pub id: i64,
@@ -60,14 +66,6 @@ pub trait FeedItemRepository: Send + Sync {
     /// external indexes (ChromaDB) before the rows are cascade-deleted.
     async fn find_ids_by_subscription(&self, subscription_id: i64) -> Result<Vec<i64>>;
 
-    /// List full feed items for a subscription, ordered by published_at DESC.
-    /// Heavy (includes content) — pipeline use only.
-    async fn find_by_subscription(&self, subscription_id: i64) -> Result<Vec<FeedItem>>;
-
-    /// Page through ALL full feed items (includes content). Pipeline use only
-    /// (e.g. Chroma reindex); UI lists must use the summary queries.
-    async fn find_all_full(&self, limit: i64, offset: i64) -> Result<Vec<FeedItem>>;
-
     /// Keyset page of lightweight [`IndexRow`]s with `id > after_id`, in
     /// ascending id order. Stable under concurrent inserts/deletes (unlike
     /// OFFSET paging) and memory-bounded (text columns are truncated).
@@ -80,6 +78,18 @@ pub trait FeedItemRepository: Send + Sync {
     /// The maximum feed-item id currently in the database (0 when empty).
     /// Used to validate the Chroma sync watermark after a DB reset.
     async fn max_item_id(&self) -> Result<i64>;
+
+    /// Find items that should have website Markdown cached but don't:
+    /// their subscription has `use_website` enabled and they carry a link,
+    /// yet `content_md` is missing/empty or did not come from the website
+    /// (`is_website_content = 0`). These are typically articles imported
+    /// from the feed's history before website mode was enabled, or whose
+    /// fetch-time website pre-cache failed. Returned newest-first so a
+    /// batched backfill refreshes the most relevant articles first.
+    async fn find_website_backfill_candidates(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(i64, String)>>;
 
 
     /// Update the Markdown-cached content for a feed item.

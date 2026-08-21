@@ -22,8 +22,6 @@ pub use debug::*;
 
 use std::sync::Arc;
 
-use sqlx::SqlitePool;
-
 use crate::ai::activity::AiActivityStore;
 use crate::ai::service::AiService;
 use crate::feed::FeedFetcher;
@@ -34,7 +32,7 @@ use crate::{FeedService, SubscriptionService};
 ///
 /// Holds all service instances and shared infrastructure.
 /// Services are the canonical way to access business logic;
-/// repositories and the pool are exposed for command convenience.
+/// repositories are exposed for command convenience.
 pub struct AppState {
     pub subscription_service: SubscriptionService,
     pub feed_service: FeedService,
@@ -44,8 +42,4 @@ pub struct AppState {
     pub ai_activity: AiActivityStore,
     /// Lazily-connected ChromaDB service (auto-reconnects).
     pub chroma_service: crate::chroma::ChromaHolder,
-    /// SQLite pool — still exposed because the streaming translation
-    /// commands cache hot writes via direct SQL. New code should prefer
-    /// `feed_repo.update_translation(...)` over touching this directly.
-    pub pool: SqlitePool,
 }

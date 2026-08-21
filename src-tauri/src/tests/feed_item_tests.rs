@@ -111,14 +111,14 @@ async fn test_find_feed_items_by_subscription() {
     let sub_id = seed_sub(&env).await;
 
     // No items yet
-    let items = env.feed_service.get_items_by_subscription(sub_id).await.unwrap();
+    let items = env.feed_repo.find_all(Some(sub_id), 50, 0).await.unwrap();
     assert!(items.is_empty());
 
     // Add two items
     create_item(&env, sub_id, "Item 1").await;
     create_item(&env, sub_id, "Item 2").await;
 
-    let items = env.feed_service.get_items_by_subscription(sub_id).await.unwrap();
+    let items = env.feed_repo.find_all(Some(sub_id), 50, 0).await.unwrap();
     assert_eq!(items.len(), 2);
     assert!(items.iter().all(|i| i.subscription_id == sub_id));
 }
@@ -486,6 +486,166 @@ async fn test_find_index_rows_by_ids() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].id, id1);
     assert_eq!(rows[1].id, id2);
+}
+
+/// The index projection must prefer `content_md` (full website text) over
+/// the raw RSS `content` (often just a teaser) so history-backfilled
+/// articles embed their real body.
+#[tokio::test]
+async fn test_index_rows_prefer_content_md() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+
+    // Website-mode item: full text lives in content_md, content is a teaser.
+    let full_id = env
+        .feed_service
+        .create_item(NewFeedItem {
+            subscription_id: sub_id,
+            title: "full".into(),
+            content: Some("<p>RSS teaser</p>".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .id;
+    env.feed_repo
+        .update_content_md(full_id, "# Full website article body", true)
+        .await
+        .unwrap();
+
+    // Plain item with an EMPTY content_md (lazy conversion never ran):
+    // must fall back to the RSS content.
+    let lazy_id = env
+        .feed_service
+        .create_item(NewFeedItem {
+            subscription_id: sub_id,
+            title: "lazy".into(),
+            content: Some("<p>RSS only text</p>".into()),
+            content_md: Some(String::new()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .id;
+
+    let rows = env
+        .feed_repo
+        .find_index_rows_by_ids(&[full_id, lazy_id])
+        .await
+        .unwrap();
+    assert_eq!(rows[0].content.as_deref(), Some("# Full website article body"));
+    assert_eq!(rows[1].content.as_deref(), Some("<p>RSS only text</p>"));
+}
+
+// ---------------------------------------------------------------------------
+// Website-Markdown backfill candidates
+// ---------------------------------------------------------------------------
+
+/// Helper: create a subscription with website mode enabled, return its ID.
+async fn seed_website_sub(env: &TestEnv, url: &str) -> i64 {
+    env.repo
+        .create(NewSubscription {
+            url: url.into(),
+            title: Some("Website Sub".into()),
+            use_website: true,
+            ..Default::default()
+        })
+        .await
+        .expect("Failed to seed website subscription")
+        .id
+}
+
+#[tokio::test]
+async fn test_find_website_backfill_candidates() {
+    let env = TestEnv::new().await;
+    let web_sub = seed_website_sub(&env, "https://web.example.com/rss").await;
+    let rss_sub = seed_sub(&env).await; // use_website = false
+
+    // Missing website Markdown → candidate
+    let missing = env
+        .feed_service
+        .create_item(NewFeedItem {
+            subscription_id: web_sub,
+            title: "missing md".into(),
+            link: Some("https://web.example.com/a".into()),
+            content: Some("<p>teaser</p>".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .id;
+
+    // Website Markdown already cached (is_website_content = 1) → NOT a candidate
+    let cached = env
+        .feed_service
+        .create_item(NewFeedItem {
+            subscription_id: web_sub,
+            title: "cached md".into(),
+            link: Some("https://web.example.com/b".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .id;
+    env.feed_repo
+        .update_content_md(cached, "# Cached", true)
+        .await
+        .unwrap();
+
+    // Lazily converted RSS Markdown (is_website_content still 0) → candidate:
+    // the full text lives on the website but was never fetched.
+    let lazy = env
+        .feed_service
+        .create_item(NewFeedItem {
+            subscription_id: web_sub,
+            title: "lazy md".into(),
+            link: Some("https://web.example.com/c".into()),
+            content: Some("<p>rss text</p>".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .id;
+    env.feed_repo
+        .update_content_md(lazy, "rss text", false)
+        .await
+        .unwrap();
+
+    // No link → can't fetch the website → NOT a candidate
+    env.feed_service
+        .create_item(NewFeedItem {
+            subscription_id: web_sub,
+            title: "no link".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // Website mode off → NOT a candidate (RSS content is the full text)
+    env.feed_service
+        .create_item(NewFeedItem {
+            subscription_id: rss_sub,
+            title: "rss mode".into(),
+            link: Some("https://example.com/d".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let candidates = env
+        .feed_repo
+        .find_website_backfill_candidates(10)
+        .await
+        .unwrap();
+    // Newest-first: the lazy item was created after the missing one
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0], (lazy, "https://web.example.com/c".to_string()));
+    assert_eq!(candidates[1], (missing, "https://web.example.com/a".to_string()));
+
+    // The limit bounds the batch (politeness: Q)
+    let one = env.feed_repo.find_website_backfill_candidates(1).await.unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(one[0].0, lazy);
 }
 
 // ---------------------------------------------------------------------------

@@ -104,17 +104,17 @@ fn find_open_tag_start(html: &str, from: usize, tag: &str) -> Option<usize> {
             let after_lt = i + 1;
             if after_lt < html.len() {
                 let start = if bytes[after_lt] == b'/' { after_lt + 1 } else { after_lt };
-                if start + tag_bytes.len() <= html.len() {
-                    if &html.as_bytes()[start..start + tag_bytes.len()] == tag_bytes {
-                        // Make sure it's followed by space, >, or /
-                        let after_tag = start + tag_bytes.len();
-                        if after_tag >= html.len()
-                            || bytes[after_tag] == b'>'
-                            || bytes[after_tag] == b' '
-                            || bytes[after_tag] == b'/'
-                        {
-                            return Some(i);
-                        }
+                if start + tag_bytes.len() <= html.len()
+                    && &html.as_bytes()[start..start + tag_bytes.len()] == tag_bytes
+                {
+                    // Make sure it's followed by space, >, or /
+                    let after_tag = start + tag_bytes.len();
+                    if after_tag >= html.len()
+                        || bytes[after_tag] == b'>'
+                        || bytes[after_tag] == b' '
+                        || bytes[after_tag] == b'/'
+                    {
+                        return Some(i);
                     }
                 }
             }

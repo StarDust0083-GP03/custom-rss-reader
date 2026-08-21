@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 
 use crate::ai::*;
@@ -230,10 +230,12 @@ pub trait AiService: Send + Sync {
     ///
     /// Returns one response per entry, aligned with the input order. Entries
     /// the model skipped or mis-indexed come back as empty tags (never an
-    /// error), so one bad row can't fail the whole batch.
+    /// error), so one bad row can't fail the whole batch. `existing_tags`
+    /// is the current global canonical vocabulary offered to the model.
     async fn classify_batch(
         &self,
         entries: &[crate::ai::BatchClassifyEntry],
+        existing_tags: &[String],
     ) -> Result<Vec<ClassificationResponse>>;
 
     /// Recommend the most worthwhile reads from a candidate list (one LLM
@@ -252,6 +254,12 @@ pub trait AiService: Send + Sync {
     /// service would do internally.
     fn config_max_chars(&self) -> usize;
 }
+
+/// Shared, replaceable AI service used by commands and the feed pipeline.
+///
+/// Keeping the slot behind an `Arc<RwLock<...>>` means saving AI settings can
+/// update auto-classification immediately without restarting the app.
+pub type SharedAiService = Arc<RwLock<Option<Arc<dyn AiService>>>>;
 
 // ---------------------------------------------------------------------------
 // Real implementation: LlmAiService
@@ -490,9 +498,9 @@ impl AiService for LlmAiService {
     async fn classify(&self, request: ClassificationRequest) -> Result<ClassificationResponse> {
         let system_prompt = "You are an article classification assistant. Given an article's title, description, and content snippet, \
             classify it by returning a JSON object with:\n\
-            - \"tags\": array of 1-3 relevant tag strings (in English)\n\
+            - \"tags\": array of 1-3 durable subject tags\n\
             - \"category\": a single category string (e.g., \"technology\", \"science\", \"politics\", \"entertainment\", \"sports\", \"business\", \"health\", \"education\", \"other\")\n\
-            Respond with ONLY the JSON object, no other text.";
+            Prefer an existing canonical tag exactly when it describes the same or a closely related subject. Only propose a new tag when no existing tag represents the subject. New tags must be lowercase English snake_case. Do not use generic labels such as news, article, or important. Respond with ONLY the JSON object, no other text.";
 
         let content_snippet = request
             .content_snippet
@@ -534,15 +542,16 @@ impl AiService for LlmAiService {
     async fn classify_batch(
         &self,
         entries: &[crate::ai::BatchClassifyEntry],
+        existing_tags: &[String],
     ) -> Result<Vec<ClassificationResponse>> {
         if entries.is_empty() {
             return Ok(Vec::new());
         }
 
-        let system_prompt = "You are an article classification assistant. You will receive a numbered list of article \
-            titles. For EACH article, classify it by title alone and return a JSON array where every element is:\n\
-            {\"index\": <the article number>, \"tags\": [1-3 relevant English tag strings], \"category\": \"<one of: technology, science, politics, entertainment, sports, business, health, education, other>\"}\n\
-            Respond with ONLY the JSON array, one element per input article, no other text.";
+        let system_prompt = format!("You are an article classification assistant. You will receive a numbered list of article titles. For EACH article, classify it by title alone and return a JSON array where every element is:\n\
+            {{\"index\": <the article number>, \"tags\": [1-3 durable subject tags], \"category\": \"<one of: technology, science, politics, entertainment, sports, business, health, education, other>\"}}\n\
+            Reuse an existing canonical tag exactly when it describes the same or a closely related subject. Only propose a new tag when no existing tag represents the subject. New tags must be lowercase English snake_case. Avoid generic labels such as news, article, or important. Existing canonical tags: {}\n\
+            Respond with ONLY the JSON array, one element per input article, no other text.", existing_tags.join(", "));
 
         let mut user_message = String::new();
         for e in entries {
@@ -552,7 +561,7 @@ impl AiService for LlmAiService {
         let req = ChatRequest {
             model: self.config.model.clone(),
             messages: vec![
-                ChatMessage { role: "system".into(), content: system_prompt.into() },
+                ChatMessage { role: "system".into(), content: system_prompt },
                 ChatMessage { role: "user".into(), content: user_message },
             ],
             max_tokens: Some(2000),
@@ -847,21 +856,6 @@ fn find_matching_close(html: &str, tag: &str) -> Option<usize> {
     None
 }
 
-/// Extract paragraphs from plain text (double newline separation).
-pub fn extract_paragraphs_plain(content: &str) -> Vec<String> {
-    let mut paragraphs: Vec<String> = content
-        .split("\n\n")
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if paragraphs.is_empty() && !content.trim().is_empty() {
-        paragraphs.push(content.trim().to_string());
-    }
-
-    paragraphs
-}
-
 /// Merge small blocks together to reduce translation API calls.
 /// For HTML blocks larger than `max_chars`, uses [`split_html_block`] (tag-aware)
 /// so the split point doesn't fall inside an attribute value or tag name.
@@ -1061,41 +1055,6 @@ pub fn split_large_paragraph(paragraph: &str, max_chars: usize) -> Vec<String> {
     }
 
     chunks
-}
-
-/// Heuristic check: does the translated output look truncated relative to the
-/// original? Used to decide whether to retry.
-pub fn is_translation_truncated(original: &str, translated: &str) -> bool {
-    if original.len() < 200 {
-        return false;
-    }
-    let min_ratio = 0.4;
-    if translated.len() < (original.len() as f32 * min_ratio) as usize {
-        return true;
-    }
-    let trimmed = translated.trim_end();
-    if let Some(last_char) = trimmed.chars().last() {
-        let proper_endings = ['。', '！', '？', '.', '!', '?', '」', '》', ')', '）', '`', '"', '\''];
-        if !proper_endings.contains(&last_char) {
-            if let Some(orig_last) = original.trim_end().chars().last() {
-                if proper_endings.contains(&orig_last) && !proper_endings.contains(&last_char) {
-                    return true;
-                }
-            }
-        }
-    }
-    if translated.matches("**").count() % 2 != 0 {
-        return true;
-    }
-    if translated.matches('`').count() % 2 != 0 {
-        return true;
-    }
-    let open_tags = translated.matches('<').count();
-    let close_tags = translated.matches('>').count();
-    if open_tags != close_tags {
-        return true;
-    }
-    false
 }
 
 /// Parse a JSON classification response from the LLM. Tolerates ``` fenced
@@ -1412,29 +1371,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // extract_paragraphs_plain
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_extract_paragraphs_plain_basic() {
-        let text = "第一段。\n\n第二段。\n\n第三段。";
-        let paras = extract_paragraphs_plain(text);
-        assert_eq!(paras.len(), 3);
-    }
-
-    #[test]
-    fn test_extract_paragraphs_plain_single() {
-        let paras = extract_paragraphs_plain("只有一段。");
-        assert_eq!(paras.len(), 1);
-    }
-
-    #[test]
-    fn test_extract_paragraphs_plain_empty() {
-        let paras = extract_paragraphs_plain("");
-        assert!(paras.is_empty());
-    }
-
-    // -----------------------------------------------------------------------
     // split_large_paragraph
     // -----------------------------------------------------------------------
 
@@ -1515,7 +1451,7 @@ mod tests {
     #[test]
     fn test_merge_small_blocks_respects_limit() {
         let blocks: Vec<String> = (0..10)
-            .map(|i| format!("<p>{}</p>", "内容".repeat(400)))
+            .map(|_| format!("<p>{}</p>", "内容".repeat(400)))
             .collect();
         let merged = merge_small_blocks(blocks, MAX_CHARS_PER_SEGMENT);
         for (i, batch) in merged.iter().enumerate() {
@@ -1574,43 +1510,6 @@ mod tests {
         assert_eq!(joined, html);
         // Tag/attribute should still be intact in some chunk
         assert!(chunks.iter().any(|c| c.starts_with("<a ")));
-    }
-
-    // -----------------------------------------------------------------------
-    // is_translation_truncated
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_is_translation_truncated_short_original() {
-        assert!(!is_translation_truncated("短", "短"));
-    }
-
-    #[test]
-    fn test_is_translation_truncated_by_length() {
-        let original = "很长".repeat(100);
-        let truncated = "短";
-        assert!(is_translation_truncated(&original, truncated));
-    }
-
-    #[test]
-    fn test_is_translation_truncated_by_ending() {
-        let original = "完整句子。".repeat(50);
-        let no_ending = "没有句尾标点".repeat(40);
-        assert!(is_translation_truncated(&original, &no_ending));
-    }
-
-    #[test]
-    fn test_is_translation_truncated_unbalanced_markdown() {
-        let original = "**加粗**和`代码`。".repeat(20);
-        let unbalanced = "**只有开头".repeat(20);
-        assert!(is_translation_truncated(&original, &unbalanced));
-    }
-
-    #[test]
-    fn test_is_translation_truncated_complete() {
-        let original = "完整句子。".repeat(50);
-        let complete = "完整翻译。".repeat(60);
-        assert!(!is_translation_truncated(&original, &complete));
     }
 
     // -----------------------------------------------------------------------

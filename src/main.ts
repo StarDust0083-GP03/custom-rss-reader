@@ -398,6 +398,14 @@ async function init() {
   // Cancel ignore timer for any user interaction (indicates engagement)
   cancelIgnoreTimer();
 
+  // Scrolling the article body is engagement — cancel the quick-abandon
+  // timer so a user actually reading a long article is never marked ignored.
+  document.getElementById("detail-content")?.addEventListener(
+    "scroll",
+    () => cancelIgnoreTimer(),
+    { passive: true },
+  );
+
   // 初始化图片缩放功能
   initImageZoom();
   addZoomHintToImages();

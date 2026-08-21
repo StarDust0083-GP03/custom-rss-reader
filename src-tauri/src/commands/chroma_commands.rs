@@ -130,6 +130,27 @@ pub async fn chroma_sync_progress(
     Ok(crate::chroma::sync::current_progress())
 }
 
+/// Refresh website Markdown for articles that were imported from a feed's
+/// history without it (website mode came later, or the fetch-time pre-cache
+/// failed) and queue them for ChromaDB re-indexing, so they become findable
+/// by semantic search.
+///
+/// The pass is strictly rate-limited (QPS cap, small batch, no retries,
+/// one host-failure cutoff) — see the contract in `chroma::backfill`.
+/// Intended to be fired (unawaited) by the frontend when the search view
+/// loads; the report describes what was done once the pass finishes.
+#[tauri::command]
+pub async fn chroma_backfill_markdown(
+    state: State<'_, AppState>,
+) -> Result<crate::chroma::backfill::BackfillReport> {
+    crate::chroma::backfill::backfill_website_markdown(
+        &state.feed_repo,
+        &state.fetcher,
+        &state.chroma_service,
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn chroma_health_check(state: State<'_, AppState>) -> Result<bool> {
     match state.chroma_service.get().await {

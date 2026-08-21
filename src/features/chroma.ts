@@ -143,8 +143,50 @@ export async function chromaHealthCheck() {
 export function toggleSearchMode() {
   S.searchMode = S.searchMode === "text" ? "semantic" : "text";
   updateSearchModeBtn();
+  // Entering semantic search is also a good moment to catch up on missing
+  // website Markdown (fire-and-forget — never blocks the mode switch).
+  if (S.searchMode === "semantic") {
+    void ensureMarkdownBackfill();
+  }
   const searchInput = document.getElementById("search-input") as HTMLInputElement;
   if (searchInput && searchInput.value.trim()) {
     searchItems(searchInput.value);
+  }
+}
+
+/// One-shot per app session: refresh the website Markdown for articles that
+/// were imported from a feed's history without it, so semantic search can
+/// match their full text once the background re-index finishes.
+///
+/// The backend pass is strictly rate-limited (QPS cap, small batch, no
+/// retries — see the contract in `chroma/backfill.rs`), so this is safe to
+/// fire whenever the search view loads. It runs unawaited: the current
+/// search proceeds on whatever is indexed, and later searches see
+/// the backfilled articles.
+let markdownBackfillTriggered = false;
+export async function ensureMarkdownBackfill(): Promise<void> {
+  if (markdownBackfillTriggered || !S.chromaEnabled) return;
+  markdownBackfillTriggered = true;
+  try {
+    const report = await chromaApi.backfillMarkdown();
+    if (report.already_running) return;
+    console.log("[chroma] markdown backfill:", report);
+    if (report.fetched > 0) {
+      toastInfo(
+        `Refreshed website text for ${report.fetched} article${report.fetched === 1 ? "" : "s"} ` +
+        `and re-indexed ${report.queued_reindex} for semantic search`,
+      );
+    }
+    // A full batch means the backlog isn't drained — re-arm so the next
+    // search-page load triggers another (paced) pass and we keep catching
+    // up instead of stalling at 20 articles per app session.
+    if (report.more_pending) {
+      markdownBackfillTriggered = false;
+    }
+  } catch (error) {
+    console.error("Markdown backfill failed:", error);
+    // Allow a retry on the next trigger — a transient failure shouldn't
+    // permanently disable the catch-up for this session.
+    markdownBackfillTriggered = false;
   }
 }

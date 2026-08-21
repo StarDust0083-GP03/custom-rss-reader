@@ -42,8 +42,6 @@ export interface AppState {
   webviewPerSubscription: Map<number, boolean>;
   /** Per-item translation progress, keyed by item id. */
   translationStateByItemId: Map<number, TranslationState>;
-  /** Last item click timestamp for the "ignored" timer. */
-  lastSelectedAt: number;
 }
 
 export const state: AppState = {
@@ -59,7 +57,6 @@ export const state: AppState = {
   chromaEnabled: false,
   webviewPerSubscription: new Map(),
   translationStateByItemId: new Map(),
-  lastSelectedAt: 0,
 };
 
 const listeners = new Set<Listener>();
