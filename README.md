@@ -92,6 +92,7 @@ Useful scripts:
 
 ```bash
 npm run typecheck     # tsc --noEmit over the strict TS config
+npm test              # Frontend regression tests
 cargo test --lib      # Rust unit tests (in src-tauri/)
 ```
 

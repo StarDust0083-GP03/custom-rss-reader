@@ -11,6 +11,7 @@ import { setSafeHtml, setText, htmlToPlainText, dedupeImages } from "../sanitize
 import { IframeManager } from "../iframe";
 import { configureMarked, renderMarkdown } from "../markdown";
 import { state } from "../state";
+import { resetFiltersForSubscription } from "./filter-state";
 // Selection / subscription actions are defined in features/actions.ts and
 // invoked from click handlers below. This is a function-level module cycle:
 // both sides use hoisted function declarations, so it resolves at call time.
@@ -106,10 +107,7 @@ export function renderSubscriptions() {
   allTitle.textContent = "All Items";
   allItem.appendChild(allTitle);
   allItem.addEventListener("click", () => {
-    S.currentSubscriptionId = null;
-    S.currentFilter = "all";
-    renderSubscriptions();
-    loadItems();
+    selectSubscription(null);
   });
   list.appendChild(allItem);
 
@@ -194,10 +192,11 @@ function makeBadge(className: string, text: string): HTMLElement {
 // 选择订阅
 export function selectSubscription(id: number | null) {
   S.currentSubscriptionId = id;
-  // When selecting a specific subscription, don't reset filter (allows unread + subscription)
-  // When selecting "All Items" (id === null), keep current filter to allow "unread" for all subscriptions
+  // A subscription click changes the content context. Start from the full
+  // subscription view instead of carrying over Unread, Today, or Tags.
+  resetFiltersForSubscription();
   renderSubscriptions();
-  loadItems();
+  void loadItems();
 }
 
 // Peek navigation: scroll the sidebar to a subscription row and flash-
@@ -472,13 +471,13 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
       translateBtn.classList.add("has-error");
       translateBtn.textContent = "Retry";
       translateBtn.title = ts.errorMessage || "Translation failed";
-    } else if (item.translated_content) {
+    } else if (item.translated_content?.trim()) {
       translateBtn.classList.add("has-cache");
       translateBtn.textContent = ts?.useTranslation ? "Show Original" : "Translate";
-      translateBtn.title = "";
+      translateBtn.title = "Right-click or long-press to re-translate";
     } else {
       translateBtn.textContent = "Translate";
-      translateBtn.title = "";
+      translateBtn.title = "Right-click or long-press to re-translate";
     }
   }
 
