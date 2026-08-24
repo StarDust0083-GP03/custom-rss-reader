@@ -1361,6 +1361,62 @@ body::after {
     flex-shrink: 0;
 }
 
+.status-ai {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    max-width: min(52vw, 520px);
+    min-width: 0;
+    padding-left: 0.7rem;
+    border-left: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+.status-ai-label {
+    display: flex;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.status-ai-kind,
+.status-ai-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.status-ai-kind {
+    flex-shrink: 0;
+}
+
+.status-ai-title {
+    min-width: 0;
+}
+
+.status-ai-progress {
+    color: var(--accent-color);
+    font-weight: 600;
+    flex-shrink: 0;
+}
+
+.status-ai-timer,
+.status-ai-queue {
+    color: var(--muted-color);
+    flex-shrink: 0;
+}
+
+@media (max-width: 760px) {
+    .status-ai {
+        max-width: 42vw;
+    }
+
+    .status-ai-title {
+        display: none;
+    }
+}
+
 .status-icon {
     width: 10px;
     height: 10px;

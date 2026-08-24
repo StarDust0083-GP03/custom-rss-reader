@@ -4,6 +4,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
+use crate::ai::activity::{with_ai_task, AiTaskSpec, AiActivitySnapshot};
 use crate::ai::{AiConfig, ClassificationRequest, ClassificationResponse};
 use crate::ai::service::{AiService, LlmAiService};
 use crate::error::{AppError, Result};
@@ -57,7 +58,17 @@ pub async fn translate_item_bilingual(
         .ok_or_else(|| AppError::OperationFailed("No content to translate".into()))?;
 
     let ai_service = get_ai_service(&state).await?;
-    let bilingual = ai_service.translate_bilingual(content, "auto", "zh-CN").await?;
+    let task = state
+        .ai_activity
+        .begin(AiTaskSpec::translation(Some(item.title.clone())))
+        .await;
+    let translation = with_ai_task(
+        task.clone(),
+        ai_service.translate_bilingual(content, "auto", "zh-CN"),
+    )
+    .await;
+    task.finish().await;
+    let bilingual = translation?;
 
     let result = format!(
         r#"<div class="bilingual-content" data-cached="false">{}</div>"#,
@@ -81,9 +92,14 @@ pub async fn translate_content_bilingual(
     target_lang: String,
 ) -> Result<String> {
     let ai_service = get_ai_service(&state).await?;
-    let bilingual = ai_service
-        .translate_bilingual(&content, &source_lang, &target_lang)
-        .await?;
+    let task = state.ai_activity.begin(AiTaskSpec::translation(None)).await;
+    let translation = with_ai_task(
+        task.clone(),
+        ai_service.translate_bilingual(&content, &source_lang, &target_lang),
+    )
+    .await;
+    task.finish().await;
+    let bilingual = translation?;
 
     Ok(format!(
         r#"<div class="bilingual-content">{}</div>"#,
@@ -110,7 +126,13 @@ pub async fn classify_item(
         existing_tags,
     };
 
-    Ok(ai_service.classify(request).await?)
+    let task = state
+        .ai_activity
+        .begin(AiTaskSpec::classification(Some(request.title.clone())))
+        .await;
+    let result = with_ai_task(task.clone(), ai_service.classify(request)).await;
+    task.finish().await;
+    result
 }
 
 // ---- Read recommendations (manual trigger, first version) ----
@@ -186,7 +208,14 @@ pub async fn recommend_reads(
         .collect();
 
     let ai_service = get_ai_service(&state).await?;
-    let picks = ai_service.recommend_reads(&candidates).await?;
+    let task = state
+        .ai_activity
+        .begin(AiTaskSpec::recommendations(candidates.len()))
+        .await;
+    let recommendation_result =
+        with_ai_task(task.clone(), ai_service.recommend_reads(&candidates)).await;
+    task.finish().await;
+    let picks = recommendation_result?;
 
     // Map picks back to their summaries (LLM order = ranking order).
     let out = picks
@@ -211,6 +240,7 @@ pub async fn recommend_reads(
 
 #[tauri::command]
 pub async fn set_ai_config(
+    state: State<'_, AppState>,
     api_key: String,
     base_url: Option<String>,
     model: Option<String>,
@@ -229,7 +259,10 @@ pub async fn set_ai_config(
     let skip = skip_test.unwrap_or(false);
     if !skip {
         let test_service = LlmAiService::new(config.clone())?;
-        test_service.test_connection().await.map_err(|e| {
+        let task = state.ai_activity.begin(AiTaskSpec::connection_test()).await;
+        let connection = with_ai_task(task.clone(), test_service.test_connection()).await;
+        task.finish().await;
+        connection.map_err(|e| {
             AppError::Network(format!(
                 "API connection test failed: {}. Please check your base URL and model name.", e
             ))
@@ -249,6 +282,11 @@ pub async fn get_ai_config() -> Result<AiConfigResponse> {
         model: config.model,
         max_chars_per_segment: config.max_chars_per_segment,
     })
+}
+
+#[tauri::command]
+pub async fn get_ai_activity(state: State<'_, AppState>) -> Result<AiActivitySnapshot> {
+    Ok(state.ai_activity.snapshot().await)
 }
 
 // ---- Helpers ----

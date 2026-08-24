@@ -103,6 +103,19 @@ export interface ChromaConfigResponse {
   enabled: boolean;
 }
 
+export interface AiActivitySnapshot {
+  version: number;
+  task_id: number | null;
+  phase: "idle" | "waiting" | "running";
+  kind: string;
+  title: string | null;
+  current: number | null;
+  total: number | null;
+  candidate_count: number | null;
+  queue_length: number;
+  started_at_ms: number | null;
+}
+
 export interface AiConfigResponse {
   /** Masked API key, e.g. `sk-****1234`. Empty when no key configured. */
   api_key: string;

@@ -94,4 +94,5 @@ pub const CLASSIFY_BATCH_SIZE: usize = 20;
 /// Number of picks the recommendation prompt asks for.
 pub const RECOMMEND_PICK_COUNT: usize = 5;
 
+pub mod activity;
 pub mod service;
