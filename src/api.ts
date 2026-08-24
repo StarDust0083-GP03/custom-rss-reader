@@ -17,6 +17,7 @@ import type {
   SemanticSearchResult,
   ChromaConfigResponse,
   AiConfigResponse,
+  AiActivitySnapshot,
   OpmlImportResult,
 } from "./types";
 
@@ -210,6 +211,7 @@ export const opml = {
 
 export const ai = {
   getConfig: () => call<AiConfigResponse>("get_ai_config", undefined, "ai.getConfig"),
+  getActivity: () => call<AiActivitySnapshot>("get_ai_activity", undefined, "ai.getActivity"),
   setConfig: (config: {
     apiKey: string;
     baseUrl?: string;

@@ -4,6 +4,7 @@ use chrono::Utc;
 use tauri::{AppHandle, Emitter};
 use tauri::State;
 
+use crate::ai::activity::{current_ai_task, with_ai_task, AiTaskSpec};
 use crate::ai::service::{is_html_content, AiService, LlmAiService};
 use crate::ai::AiConfig;
 use crate::content_processor::clean_markdown;
@@ -34,12 +35,13 @@ pub async fn translate_html_content_streaming(
     content: String,
     force: Option<bool>,
 ) -> Result<String> {
-    translate_streaming_inner(
+    run_translation_task(
         &app_handle,
         &state,
         item_id,
         TranslateRequest { content },
         force.unwrap_or(false),
+        None,
     )
     .await
 }
@@ -71,14 +73,49 @@ pub async fn translate_item_bilingual_streaming(
         .or(item.description.as_ref())
         .ok_or_else(|| AppError::OperationFailed("No content to translate".into()))?
         .clone();
-    translate_streaming_inner(
+    run_translation_task(
         &app_handle,
         &state,
         item_id,
         TranslateRequest { content },
         force.unwrap_or(false),
+        Some(item.title),
     )
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Shared translation pipeline
+// ---------------------------------------------------------------------------
+
+async fn run_translation_task(
+    app_handle: &AppHandle,
+    state: &AppState,
+    item_id: i64,
+    request: TranslateRequest,
+    force: bool,
+    title: Option<String>,
+) -> Result<String> {
+    let title = match title {
+        Some(title) => Some(title),
+        None => state
+            .feed_repo
+            .find_by_id(item_id)
+            .await
+            .ok()
+            .map(|item| item.title),
+    };
+    let task = state
+        .ai_activity
+        .begin(AiTaskSpec::translation(title))
+        .await;
+    let result = with_ai_task(
+        task.clone(),
+        translate_streaming_inner(app_handle, state, item_id, request, force),
+    )
+    .await;
+    task.finish().await;
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +161,9 @@ async fn translate_streaming_inner(
         ai_service.config_max_chars,
     );
     let total = blocks.len();
+    if let Some(task) = current_ai_task() {
+        task.progress(0, total).await;
+    }
     let mut completed = 0;
     let mut all_chunks: Vec<String> = Vec::new();
     let mut first_error: Option<String> = None;
@@ -141,6 +181,9 @@ async fn translate_streaming_inner(
         {
             Ok(translated_block) => {
                 completed += 1;
+                if let Some(task) = current_ai_task() {
+                    task.progress(completed, total).await;
+                }
                 // Clean both sides before emitting. The frontend renders
                 // chunks live, so a final cleanup pass would be too late.
                 let stripped = clean_bilingual_block(&translated_block);

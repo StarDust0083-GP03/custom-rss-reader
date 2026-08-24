@@ -9,6 +9,7 @@ A cross-platform RSS reader desktop application built with Tauri, featuring OPML
 - **Dual-Source Content**: Fetch content from RSS feeds or directly from websites
 - **AI Translation**: Streaming bilingual (original + Chinese) article translation
 - **AI Classification**: Automatic article tagging by title, batched (20 articles per LLM call) to stay under API rate limits
+- **AI Task Status**: The bottom status bar shows whether the model is translating, classifying, recommending, testing, or waiting in the queue
 - **AI Picks** *(manual)*: "★ Picks" button — the LLM plays editor, reading your recent unread titles/snippets and picking the 5 most worthwhile articles with a one-line reason each
 - **Semantic Search** *(optional)*: ChromaDB-backed "search by meaning" and similar-article discovery
 - **SQLite Persistence**: Local database for storing subscriptions and feed items
@@ -93,6 +94,7 @@ Useful scripts:
 ```bash
 npm run typecheck     # tsc --noEmit over the strict TS config
 npm test              # Frontend regression tests
+npm run verify        # Frontend build plus Rust tests
 cargo test --lib      # Rust unit tests (in src-tauri/)
 ```
 

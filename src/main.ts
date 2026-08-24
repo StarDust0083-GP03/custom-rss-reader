@@ -49,11 +49,13 @@ import {
   toggleSearchMode,
 } from "./features/chroma";
 import { success as toastSuccess, error as toastError } from "./toast";
+import { initAiActivity } from "./ui/ai-activity";
 
 const S = state;
 
 // 初始化
 async function init() {
+  void initAiActivity();
   await loadSubscriptions();
   await loadItems();
 

@@ -44,6 +44,8 @@ pub fn run() {
             });
 
             // Wire up services with repository pattern
+            let ai_activity = crate::ai::activity::AiActivityStore::new();
+            ai_activity.attach_app(app.handle().clone());
             let feed_repo = Arc::new(SqliteFeedItemRepository::new(pool.clone()));
             let sub_repo = Arc::new(SqliteSubscriptionRepository::new(pool.clone()));
             let subscription_service = SubscriptionService::new(sub_repo.clone());
@@ -60,7 +62,8 @@ pub fn run() {
             let feed_service = FeedService::new(feed_repo.clone())
                 .with_subscription_repo(sub_repo.clone())
                 .with_fetcher(fetcher.clone())
-                .with_chroma_service(chroma_service.clone());
+                .with_chroma_service(chroma_service.clone())
+                .with_ai_activity(ai_activity.clone());
 
             let sync_chroma = chroma_service.clone();
             let sync_repo = feed_repo.clone();
@@ -71,6 +74,7 @@ pub fn run() {
                 feed_repo,
                 fetcher,
                 ai_service: None,
+                ai_activity,
                 chroma_service,
                 pool: pool.clone(),
             };
@@ -132,6 +136,7 @@ pub fn run() {
             recommend_reads,
             set_ai_config,
             get_ai_config,
+            get_ai_activity,
             // ChromaDB commands
             set_chroma_config,
             get_chroma_config,

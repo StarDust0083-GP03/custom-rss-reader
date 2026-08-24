@@ -4,6 +4,7 @@ use tokio::sync::Semaphore;
 
 use serde::Serialize;
 
+use crate::ai::activity::{with_ai_task, AiActivityStore, AiTaskSpec};
 use crate::chroma::ChromaHolder;
 use crate::error::{AppError, Result};
 use crate::feed::parser::parse_feed;
@@ -37,6 +38,7 @@ pub struct FeedService {
     sub_repo: Option<Arc<dyn SubscriptionRepository>>,
     fetcher: Option<Arc<FeedFetcher>>,
     ai_service: Option<Arc<dyn crate::ai::service::AiService>>,
+    ai_activity: AiActivityStore,
     chroma_service: ChromaHolder,
 }
 
@@ -49,6 +51,7 @@ impl FeedService {
             sub_repo: None,
             fetcher: None,
             ai_service: None,
+            ai_activity: AiActivityStore::new(),
             chroma_service: ChromaHolder::default(),
         }
     }
@@ -68,6 +71,12 @@ impl FeedService {
     /// Attach the ChromaDB holder (enables semantic search indexing).
     pub fn with_chroma_service(mut self, chroma: ChromaHolder) -> Self {
         self.chroma_service = chroma;
+        self
+    }
+
+    /// Attach the shared AI activity store used by the status bar.
+    pub fn with_ai_activity(mut self, activity: AiActivityStore) -> Self {
+        self.ai_activity = activity;
         self
     }
 
@@ -107,6 +116,7 @@ impl FeedService {
             &self.repo,
             fetcher,
             self.ai_service.as_ref(),
+            &self.ai_activity,
             &self.chroma_service,
             subscription,
         )
@@ -208,6 +218,7 @@ impl FeedService {
             let repo = self.repo.clone();
             let fetcher = self.fetcher.clone();
             let ai_service = self.ai_service.clone();
+            let ai_activity = self.ai_activity.clone();
             let chroma_service = self.chroma_service.clone();
 
             handles.push(tokio::spawn(async move {
@@ -220,6 +231,7 @@ impl FeedService {
                         &repo,
                         fetcher,
                         ai_service.as_ref(),
+                        &ai_activity,
                         &chroma_service,
                         &sub,
                     )
@@ -316,6 +328,7 @@ async fn fetch_parse_and_save(
     repo: &Arc<dyn FeedItemRepository>,
     fetcher: &Arc<FeedFetcher>,
     ai_service: Option<&Arc<dyn crate::ai::service::AiService>>,
+    ai_activity: &AiActivityStore,
     chroma_service: &ChromaHolder,
     subscription: &Subscription,
 ) -> Result<Vec<FeedItem>> {
@@ -383,7 +396,12 @@ async fn fetch_parse_and_save(
     // CLASSIFY_BATCH_SIZE articles.
     if let Some(ai) = ai_service {
         for chunk in pending_classify.chunks(crate::ai::CLASSIFY_BATCH_SIZE) {
-            if let Err(e) = classify_batch_and_save(repo, ai.as_ref(), chunk).await {
+            let task = ai_activity
+                .begin(AiTaskSpec::background_classification(chunk.len()))
+                .await;
+            let result = with_ai_task(task.clone(), classify_batch_and_save(repo, ai.as_ref(), chunk)).await;
+            task.finish().await;
+            if let Err(e) = result {
                 eprintln!("Batch classification failed ({} items): {}", chunk.len(), e);
             }
         }

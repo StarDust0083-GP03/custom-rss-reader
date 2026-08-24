@@ -1,64 +1,155 @@
+use std::collections::VecDeque;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{oneshot, Mutex};
 use tokio::time::{sleep, Instant};
 
 use crate::ai::*;
+use crate::ai::activity::current_ai_task;
 use crate::error::{AppError, Result};
 
 // ---------------------------------------------------------------------------
-// LLM call throttling.
+// LLM call throttling and task visibility.
 //
-// Every LLM call in the app (translate block, classify, connection test)
-// funnels through `send_request`, so this is the single place to enforce a
-// global rate limit. A bulk refresh can enqueue dozens of auto-classify
-// requests at once; without spacing they fire as a burst and the provider
-// answers with HTTP 429.
-//
-// Two mechanisms:
-// 1. A semaphore of 1 — calls are serialized, never parallel.
-// 2. A minimum interval between call STARTS (token spacing), so even
-//    back-to-back short calls cannot exceed the configured request rate.
+// Every model request goes through this gate. Calls stay serialized and are
+// spaced apart, while interactive work jumps ahead of background batches.
+// The task-local activity context lets this lower layer update the same
+// status snapshot that the frontend sees, including queue waiting.
 // ---------------------------------------------------------------------------
 
-/// Max concurrent LLM API calls. 1 = serialized; raising this re-introduces
-/// burst pressure on the provider's rate limit.
-const LLM_MAX_CONCURRENT: usize = 1;
-
 /// Minimum spacing between the start of two consecutive LLM calls.
-/// ~1200ms ≈ 50 requests/minute ceiling, comfortably under typical
-/// provider tiers (DeepSeek/OpenAI non-burst limits).
 const LLM_MIN_INTERVAL_MS: u64 = 1200;
 
-fn llm_semaphore() -> &'static Semaphore {
-    static SEM: OnceLock<Semaphore> = OnceLock::new();
-    SEM.get_or_init(|| Semaphore::new(LLM_MAX_CONCURRENT))
+struct LlmGateState {
+    busy: bool,
+    last_start: Option<Instant>,
+    queue: VecDeque<oneshot::Sender<()>>,
 }
 
-/// Timestamp of when the last LLM call was allowed to start (None = never).
-/// Guarded by a tokio Mutex so the wait-then-mark sequence is atomic even
-/// though the semaphore already serializes callers.
-fn llm_last_call_at() -> &'static Mutex<Option<Instant>> {
-    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-    LAST.get_or_init(|| Mutex::new(None))
+struct LlmGate {
+    state: Mutex<LlmGateState>,
 }
 
-/// Block until the next LLM call slot is available, then mark it as taken.
-/// Must be called while holding the semaphore permit so the lock is never
-/// actually contended for long.
-async fn acquire_llm_slot() {
-    let mut last = llm_last_call_at().lock().await;
-    let now = Instant::now();
-    let min_interval = Duration::from_millis(LLM_MIN_INTERVAL_MS);
-    if let Some(prev) = *last {
-        let elapsed = now.duration_since(prev);
-        if elapsed < min_interval {
-            sleep(min_interval - elapsed).await;
+fn llm_gate() -> &'static LlmGate {
+    static GATE: OnceLock<LlmGate> = OnceLock::new();
+    GATE.get_or_init(|| LlmGate {
+        state: Mutex::new(LlmGateState {
+            busy: false,
+            last_start: None,
+            queue: VecDeque::new(),
+        }),
+    })
+}
+
+fn min_interval() -> Duration {
+    Duration::from_millis(LLM_MIN_INTERVAL_MS)
+}
+
+struct LlmPermit {
+    gate: Option<&'static LlmGate>,
+}
+
+impl Drop for LlmPermit {
+    fn drop(&mut self) {
+        let Some(gate) = self.gate.take() else {
+            return;
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                gate.wake_next().await;
+            });
         }
     }
-    *last = Some(Instant::now());
+}
+
+/// Acquire the serialized slot. Priority callers are inserted before queued
+/// background classification calls.
+async fn llm_acquire(priority: bool) -> LlmPermit {
+    let gate = llm_gate();
+    let task = current_ai_task();
+    let priority = task.as_ref().map(|task| task.priority()).unwrap_or(priority);
+    let (tx, rx) = oneshot::channel();
+    let (fast_path, initial_wait) = {
+        let mut state = gate.state.lock().await;
+        let wait = state
+            .last_start
+            .map(|started| min_interval().saturating_sub(started.elapsed()))
+            .unwrap_or(Duration::ZERO);
+        if !state.busy && state.queue.is_empty() {
+            // Reserve the slot while sleeping out the rate-limit interval.
+            // Without this reservation, a caller arriving between two
+            // requests could enqueue forever after the previous permit had
+            // already been dropped.
+            state.busy = true;
+            if wait.is_zero() {
+                state.last_start = Some(Instant::now());
+                (true, None)
+            } else {
+                (true, Some(wait))
+            }
+        } else {
+            if priority {
+                state.queue.push_front(tx);
+            } else {
+                state.queue.push_back(tx);
+            }
+            (false, None)
+        }
+    };
+
+    if fast_path {
+        if let Some(task) = &task {
+            if initial_wait.is_some() {
+                task.waiting().await;
+            }
+        }
+        if let Some(wait) = initial_wait {
+            sleep(wait).await;
+            let mut state = gate.state.lock().await;
+            state.last_start = Some(Instant::now());
+        }
+        if let Some(task) = task {
+            task.running().await;
+        }
+        return LlmPermit { gate: Some(gate) };
+    }
+
+    if let Some(task) = &task {
+        task.waiting().await;
+    }
+    let _ = rx.await;
+    if let Some(task) = task {
+        task.running().await;
+    }
+    LlmPermit { gate: Some(gate) }
+}
+
+impl LlmGate {
+    async fn wake_next(&self) {
+        let (tx, wait) = {
+            let mut state = self.state.lock().await;
+            let Some(tx) = state.queue.pop_front() else {
+                state.busy = false;
+                return;
+            };
+            state.busy = true;
+            let wait = state
+                .last_start
+                .map(|started| min_interval().saturating_sub(started.elapsed()))
+                .unwrap_or(Duration::ZERO);
+            (tx, wait)
+        };
+        if !wait.is_zero() {
+            sleep(wait).await;
+        }
+        {
+            let mut state = self.state.lock().await;
+            state.last_start = Some(Instant::now());
+        }
+        let _ = tx.send(());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -186,16 +277,22 @@ impl LlmAiService {
         self.config.max_chars_per_segment.unwrap_or(MAX_CHARS_PER_SEGMENT)
     }
 
-    /// Send a chat completion request to the LLM API.
-    /// Acquires a semaphore permit before sending (max 3 concurrent).
+    /// Send an interactive chat completion request.
     async fn send_request(&self, request: &ChatRequest) -> Result<String> {
-        let _permit = llm_semaphore()
-            .acquire()
-            .await
-            .map_err(|_| AppError::Internal("LLM semaphore closed".into()))?;
+        self.send_request_with_priority(request, true).await
+    }
 
-        // Serialize AND space out call starts — this is the rate-limit guard.
-        acquire_llm_slot().await;
+    /// Send a background request, behind interactive work in the queue.
+    async fn send_request_background(&self, request: &ChatRequest) -> Result<String> {
+        self.send_request_with_priority(request, false).await
+    }
+
+    async fn send_request_with_priority(
+        &self,
+        request: &ChatRequest,
+        priority: bool,
+    ) -> Result<String> {
+        let _permit = llm_acquire(priority).await;
 
         let url = format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'));
 
@@ -462,7 +559,7 @@ impl AiService for LlmAiService {
             temperature: Some(0.1),
         };
 
-        let response = self.send_request(&req).await?;
+        let response = self.send_request_background(&req).await?;
         Ok(parse_classification_batch_json(&response, entries.len()))
     }
 
@@ -647,7 +744,6 @@ fn extract_html_blocks(content: &str) -> Vec<String> {
 
     for tag in &block_tags {
         let open_tag = format!("<{}", tag);
-        let close_tag = format!("</{}>", tag);
         let mut search_start = 0;
 
         while let Some(start) = content[search_start..].find(&open_tag) {
