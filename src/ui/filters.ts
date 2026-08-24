@@ -11,6 +11,9 @@ import { items as itemsApi } from "../api";
 import { state } from "../state";
 import { loadItems, renderSubscriptions } from "./render";
 import { error as toastError } from "../toast";
+import { updateFilterTabs } from "./filter-state";
+
+export { resetFiltersForSubscription, updateFilterTabs } from "./filter-state";
 
 const S = state;
 
@@ -59,35 +62,6 @@ export function filterByTag(tag: string) {
   S.unreadFilterEnabled = false;
   updateFilterTabs();
   loadItems();
-}
-
-// Update filter tabs styling
-export function updateFilterTabs() {
-  document.querySelectorAll(".filter-tab").forEach(tab => {
-    const tabFilter = tab.getAttribute("data-filter");
-    if (S.currentFilter === "tag" && S.currentTagFilter && tabFilter === "tag") {
-      tab.classList.add("active");
-      tab.querySelector(".filter-label")!.textContent = `#${S.currentTagFilter}`;
-    } else if (tabFilter === "today" && S.unreadFilterEnabled) {
-      // Show "Today + Unread" when both filters are active
-      tab.classList.add("active");
-      tab.querySelector(".filter-label")!.textContent = "Today + Unread";
-    } else if (tabFilter === S.currentFilter && S.currentFilter !== "tag") {
-      tab.classList.add("active");
-      // Reset text to default
-      if (tabFilter === "today") {
-        tab.querySelector(".filter-label")!.textContent = "Today";
-      }
-    } else {
-      tab.classList.remove("active");
-      if (tabFilter === "tag") {
-        tab.querySelector(".filter-label")!.textContent = "Tags";
-      }
-      if (tabFilter === "today") {
-        tab.querySelector(".filter-label")!.textContent = "Today";
-      }
-    }
-  });
 }
 
 // ---------------------------------------------------------------------------

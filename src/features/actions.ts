@@ -69,7 +69,7 @@ export async function selectItem(item: FeedItemSummary) {
   renderItemDetail(fullItem);
 
   if (!fullItem.is_read) {
-    markAsRead(fullItem.id, true);
+    await markAsRead(fullItem.id, true);
   }
 
   setupIgnoreTimer(fullItem);
@@ -135,15 +135,9 @@ export async function markAsRead(itemId: number, isRead: boolean) {
     console.error("Failed to mark as read:", error);
     return;
   }
-  // Update local state
+
   const item = S.currentItems.find(i => i.id === itemId);
   if (item) item.is_read = isRead;
-
-  // Targeted DOM update by data-id — no full re-render
-  const card = document.querySelector(
-    `.item-card[data-id="${itemId}"]`,
-  );
-  if (card) card.classList.toggle("unread", !isRead);
 
   if (S.selectedItem?.id === itemId) {
     S.selectedItem.is_read = isRead;
@@ -152,6 +146,18 @@ export async function markAsRead(itemId: number, isRead: boolean) {
       markReadBtn.classList.toggle("active", isRead);
     }
   }
+
+  // A read item must disappear immediately from an unread-only result. A
+  // targeted class toggle leaves it visible and makes the filter lie.
+  const unreadOnly = S.currentFilter === "unread"
+    || (S.currentFilter === "today" && S.unreadFilterEnabled);
+  if (unreadOnly && isRead) {
+    await loadItems();
+    return;
+  }
+
+  const card = document.querySelector(`.item-card[data-id="${itemId}"]`);
+  if (card) card.classList.toggle("unread", !isRead);
 }
 
 // 切换收藏
@@ -206,8 +212,17 @@ export async function toggleReadLater(itemId: number) {
 export async function markAllAsRead() {
   try {
     await invoke("mark_all_read", { subscriptionId: S.currentSubscriptionId });
-    S.currentItems.forEach(item => item.is_read = true);
-    renderItems();
+    const unreadOnly = S.currentFilter === "unread"
+      || (S.currentFilter === "today" && S.unreadFilterEnabled);
+    if (unreadOnly) {
+      await loadItems();
+    } else {
+      S.currentItems.forEach(item => item.is_read = true);
+      if (S.selectedItem && (!S.currentSubscriptionId || S.selectedItem.subscription_id === S.currentSubscriptionId)) {
+        S.selectedItem.is_read = true;
+      }
+      renderItems();
+    }
     toastSuccess("All items marked as read");
   } catch (error) {
     console.error("Failed to mark all as read:", error);

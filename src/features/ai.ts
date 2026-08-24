@@ -9,23 +9,24 @@ import type { FeedItem, AiClassificationResponse, Recommendation } from "../type
 import { ai as aiApi } from "../api";
 import { state, type TranslationState } from "../state";
 import { renderItems, renderItemDetail } from "../ui/render";
-import { selectItem } from "./actions";
+import { markAsRead, selectItem } from "./actions";
 import { success as toastSuccess, error as toastError, info as toastInfo } from "../toast";
 
 const S = state;
 
 // 翻译
-export async function translateItem(item: FeedItem, htmlContent?: string) {
+export async function translateItem(
+  item: FeedItem,
+  htmlContent?: string,
+  options: { force?: boolean } = {},
+) {
+  const force = options.force === true;
   // 获取或创建该文章的翻译状态
   let translationState: TranslationState | undefined = S.translationStateByItemId.get(item.id);
 
   // 如果正在翻译同一篇文章，取消翻译
   if (translationState?.abortController) {
-    translationState.abortController.abort();
-    S.translationStateByItemId.delete(item.id);
-    renderItems(true); // Update badge
-    renderItemDetail(item);
-    toastSuccess("Translation cancelled");
+    cancelTranslation(item);
     return;
   }
 
@@ -35,8 +36,10 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
     translationState = undefined;
   }
 
-  // 检查是否已经有翻译内容（缓存）
-  if (item.translated_content) {
+  // 强制重译必须先丢弃旧缓存，普通点击则复用有效缓存。
+  if (force) {
+    item.translated_content = null;
+  } else if (item.translated_content?.trim()) {
     // 直接使用已有的翻译
     translationState = {
       useTranslation: true,
@@ -52,6 +55,11 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
     return;
   }
 
+  // 翻译动作会把文章标为未读，和详情页的其他已读状态修改共用同一条路径。
+  if (item.is_read) {
+    await markAsRead(item.id, false);
+  }
+
   // 创建新的 AbortController 和翻译状态
   const abortController = new AbortController();
   translationState = {
@@ -62,11 +70,13 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
     errorMessage: null
   };
   S.translationStateByItemId.set(item.id, translationState);
+  const runState = translationState;
 
   // 立即更新按钮和徽章状态
   renderItems(true); // Show translating badge
   renderItemDetail(item);
 
+  let errorNotified = false;
   try {
     toastSuccess("Translating...");
 
@@ -80,11 +90,12 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
         (event) => {
           if (event.payload.item_id !== item.id) return;
           const currentState = S.translationStateByItemId.get(item.id);
-          if (currentState) {
-            currentState.hasError = true;
-            currentState.errorMessage = event.payload.error;
-          }
-          toastError(`Translation error: ${event.payload.error}`);
+          if (currentState !== runState) return;
+          currentState.hasError = true;
+          currentState.errorMessage = event.payload.error;
+          currentState.useTranslation = false;
+          // The invoke rejection owns the user-facing error toast. Keeping
+          // this listener state-only prevents duplicate errors.
         }
       );
 
@@ -106,7 +117,7 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
 
           // 获取最新的翻译状态
           const currentState = S.translationStateByItemId.get(item.id);
-          if (!currentState) return;
+          if (currentState !== runState) return;
 
           // 如果是缓存命中，直接设置完整内容
           if (cached && html_chunk) {
@@ -138,13 +149,9 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
             if (has_error) {
               currentState.hasError = true;
               currentState.errorMessage = error_messages?.[0] || "Translation failed";
-              // Use the partial content from html_chunk if available
-              if (html_chunk) {
-                currentState.inProgressContent = html_chunk;
-                item.translated_content = html_chunk;
-              } else {
-                currentState.inProgressContent = null;
-              }
+              // Never expose or cache a partial translation as a successful
+              // result. The original article remains the fallback view.
+              currentState.inProgressContent = null;
               currentState.useTranslation = false;
 
               // 更新列表徽章
@@ -153,12 +160,9 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
               // 只有当前选中的文章才渲染
               if (S.selectedItem?.id === item.id) {
                 renderItemDetail(item);
-                if (html_chunk) {
-                  toastError(`Translation partially complete: ${currentState.errorMessage}`);
-                } else {
-                  toastError(`Translation failed: ${currentState.errorMessage}. Check ~/.rss-reader/ai_errors.log for details.`);
-                }
+                toastError(`Translation failed: ${currentState.errorMessage}. Check ~/.rss-reader/ai_errors.log for details.`);
               }
+              errorNotified = true;
               return;
             }
 
@@ -226,11 +230,13 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
         await invoke<string>("translate_html_content_streaming", {
           itemId: item.id,
           content: htmlContent,
+          force,
         });
       } else {
         // 使用流式双语对照翻译
         await invoke<string>("translate_item_bilingual_streaming", {
           itemId: item.id,
+          force,
         });
       }
     } finally {
@@ -239,7 +245,7 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
       if (unlistenError) unlistenError();
       // Clean up translation state on error (keep cached success entries)
       const currentState = S.translationStateByItemId.get(item.id);
-      if (currentState) {
+      if (currentState === runState) {
         if (abortController.signal.aborted) {
           // User cancelled - clean up
           S.translationStateByItemId.delete(item.id);
@@ -251,33 +257,110 @@ export async function translateItem(item: FeedItem, htmlContent?: string) {
     }
   } catch (error) {
     const currentState = S.translationStateByItemId.get(item.id);
+    if (currentState !== runState) return;
     if (abortController.signal.aborted) {
-      // User cancelled
-      if (currentState) {
-        currentState.abortController = null;
-        currentState.hasError = false;
-        // Clean up any open divs from partial content
-        if (currentState.inProgressContent && !currentState.inProgressContent.endsWith("</div>")) {
-          currentState.inProgressContent += "</div>";
-        }
-      }
-      toastSuccess("Translation cancelled");
-    } else {
-      // Error occurred
-      if (currentState) {
-        currentState.hasError = true;
-        currentState.errorMessage = String(error);
-        currentState.abortController = null;
-        // Clean up any open divs from partial content
-        if (currentState.inProgressContent && !currentState.inProgressContent.endsWith("</div>")) {
-          currentState.inProgressContent += "</div>";
-        }
-      }
-      toastError(`Translation failed: ${error}`);
-      renderItems(true); // Update badge to show error
-      renderItemDetail(item); // Update button to show error state
+      // User cancellation is handled synchronously by cancelTranslation().
+      S.translationStateByItemId.delete(item.id);
+      return;
     }
+
+    // Error occurred. Keep the error state for an explicit retry, but never
+    // keep the partial HTML assembled during the failed run.
+    currentState.hasError = true;
+    currentState.errorMessage = String(error);
+    currentState.abortController = null;
+    currentState.inProgressContent = null;
+    currentState.useTranslation = false;
+    if (!errorNotified) {
+      toastError(`Translation failed: ${error}`);
+    }
+    renderItems(true);
+    if (S.selectedItem?.id === item.id) renderItemDetail(item);
   }
+}
+
+/** Cancel the visible translation run without allowing its late events to
+ * update a newer run for the same item. The backend request may still finish
+ * in the background because Tauri invoke has no transport cancellation here.
+ */
+export function cancelTranslation(item: FeedItem): boolean {
+  const translationState = S.translationStateByItemId.get(item.id);
+  if (!translationState?.abortController) return false;
+
+  translationState.abortController.abort();
+  S.translationStateByItemId.delete(item.id);
+  renderItems(true);
+  if (S.selectedItem?.id === item.id) renderItemDetail(item);
+  toastSuccess("Translation cancelled");
+  return true;
+}
+
+/** Toggle a completed translation without starting another model request. */
+export function toggleCachedTranslation(item: FeedItem): boolean {
+  if (!item.translated_content?.trim()) return false;
+
+  const translationState = S.translationStateByItemId.get(item.id);
+  if (!translationState) {
+    S.translationStateByItemId.set(item.id, {
+      useTranslation: true,
+      inProgressContent: null,
+      abortController: null,
+      hasError: false,
+      errorMessage: null,
+    });
+    toastSuccess("Showing translation");
+  } else {
+    translationState.useTranslation = !translationState.useTranslation;
+    toastSuccess(translationState.useTranslation ? "Showing translation" : "Showing original");
+  }
+  renderItemDetail(item);
+  return true;
+}
+
+async function ensureWebsiteContent(item: FeedItem): Promise<void> {
+  const subscription = S.subscriptions.find(s => s.id === item.subscription_id);
+  if (!subscription?.use_website || !item.link || item.content_md) return;
+
+  try {
+    const markdown = await invoke<string>("fetch_website_markdown", {
+      url: item.link,
+      itemId: item.id,
+    });
+    item.content_md = markdown;
+  } catch (error) {
+    console.error("[Translate] Failed to fetch website content:", error);
+  }
+}
+
+/** Handle click, right-click, and long-press semantics for the translate button. */
+export async function handleTranslateAction(item: FeedItem, force = false): Promise<void> {
+  const translationState = S.translationStateByItemId.get(item.id);
+  if (force && translationState?.abortController) return;
+
+  if (!force && translationState?.abortController) {
+    cancelTranslation(item);
+    return;
+  }
+
+  if (!force && toggleCachedTranslation(item)) return;
+
+  await ensureWebsiteContent(item);
+  if (force) {
+    await retranslateItem(item);
+  } else {
+    await translateItem(item);
+  }
+}
+
+/** Force a fresh translation, bypassing and clearing the old cache. */
+export async function retranslateItem(item: FeedItem): Promise<void> {
+  const translationState = S.translationStateByItemId.get(item.id);
+  if (translationState?.abortController) return;
+
+  S.translationStateByItemId.delete(item.id);
+  item.translated_content = null;
+  renderItems(true);
+  await translateItem(item, undefined, { force: true });
 }
 
 export async function classifyItem(item: FeedItem) {

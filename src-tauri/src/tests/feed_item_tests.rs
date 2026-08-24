@@ -147,6 +147,25 @@ async fn test_update_content_md() {
 }
 
 // ---------------------------------------------------------------------------
+// TRANSLATION CACHE
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_empty_translation_clears_cached_content() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+    let item_id = create_item(&env, sub_id, "Translation cache").await;
+
+    env.feed_repo
+        .update_translation(item_id, None, "<div>cached</div>")
+        .await
+        .unwrap();
+    let cleared = env.feed_repo.update_translation(item_id, None, "").await.unwrap();
+
+    assert!(cleared.translated_content.is_none());
+}
+
+// ---------------------------------------------------------------------------
 // DELETE
 // ---------------------------------------------------------------------------
 

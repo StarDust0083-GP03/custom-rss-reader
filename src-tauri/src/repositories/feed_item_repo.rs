@@ -430,7 +430,8 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         let row = sqlx::query_as::<_, FeedItemRow>(
             r#"
             UPDATE feed_items
-            SET translated_content = $2,
+            -- An empty string clears the translation before a forced retry.
+            SET translated_content = NULLIF($2, ''),
                 translated_title = COALESCE($3, translated_title),
                 translated_at = CURRENT_TIMESTAMP
             WHERE id = $1

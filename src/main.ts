@@ -7,7 +7,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { state } from "./state";
 import { items as itemsApi, misc } from "./api";
 import {
-  renderItems,
   renderItemDetail,
   loadItems,
   updateToggleButtonStates,
@@ -32,7 +31,7 @@ import {
   cancelIgnoreTimer,
 } from "./features/actions";
 import {
-  translateItem,
+  handleTranslateAction,
   classifyItem,
   openAiSettingsModal,
   closeAiSettingsModal,
@@ -278,71 +277,50 @@ async function init() {
     }
   });
 
-  // AI 功能按钮
-  document.getElementById("translate-btn")?.addEventListener("click", async () => {
-    if (!S.selectedItem) return;
+  // AI 功能按钮。普通点击负责开始、取消或切换缓存；右键和长按强制重译。
+  const translateBtn = document.getElementById("translate-btn");
+  if (translateBtn) {
+    let longPressTimer: number | null = null;
+    let longPressTriggered = false;
+    let suppressNextClick = false;
 
-    // 获取当前文章的翻译状态
-    const translationState = S.translationStateByItemId.get(S.selectedItem.id);
-    const isTranslating = !!(translationState && translationState.abortController);
-    const hasCache = S.selectedItem.translated_content !== null;
-
-    // 1. 如果正在翻译，点击取消
-    if (isTranslating) {
-      translationState!.abortController!.abort();
-      S.translationStateByItemId.delete(S.selectedItem.id);
-      renderItemDetail(S.selectedItem);
-      toastSuccess("Translation cancelled");
-      return;
-    }
-
-    // 2. 如果有缓存，切换显示模式
-    if (hasCache) {
-      if (!translationState) {
-        S.translationStateByItemId.set(S.selectedItem.id, {
-          useTranslation: true,
-          inProgressContent: null,
-          abortController: null,
-          hasError: false,
-          errorMessage: null,
-        });
-        toastSuccess("Showing translation");
-      } else {
-        translationState.useTranslation = !translationState.useTranslation;
-        toastSuccess(translationState.useTranslation ? "Showing translation" : "Showing original");
+    const clearLongPress = () => {
+      if (longPressTimer !== null) {
+        window.clearTimeout(longPressTimer);
+        longPressTimer = null;
       }
-      renderItemDetail(S.selectedItem);
-      return;
-    }
+    };
 
-    // 3. 开始新的翻译
-    // 标记为未读
-    if (S.selectedItem.is_read) {
-      S.selectedItem.is_read = false;
-      await invoke("mark_item_read", { itemId: S.selectedItem.id, isRead: false });
-      renderItems();
-    }
-
-    // 检查是否在 webview 模式下，如果是则先将网页内容保存为 content_md
-    // Webview mode = the subscription's persistent use_website setting.
-    const selItem = S.selectedItem;
-    if (!selItem) return;
-    const subWebView = S.subscriptions.find(s => s.id === selItem.subscription_id)?.use_website ?? false;
-
-    if (subWebView && selItem.link && !selItem.content_md) {
-      // 只在 content_md 尚未缓存时获取网页内容（避免重复请求）
-      try {
-        console.log('[Translate] Fetching website markdown');
-        await invoke<string>("fetch_website_markdown", { url: selItem.link, itemId: selItem.id });
-      } catch (error) {
-        console.error('[Translate] Failed to fetch website content:', error);
+    translateBtn.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      clearLongPress();
+      longPressTriggered = false;
+      longPressTimer = window.setTimeout(() => {
+        longPressTimer = null;
+        longPressTriggered = true;
+        suppressNextClick = true;
+        if (S.selectedItem) void handleTranslateAction(S.selectedItem, true);
+      }, 600);
+    });
+    translateBtn.addEventListener("pointerup", () => {
+      if (longPressTriggered) suppressNextClick = true;
+      clearLongPress();
+    });
+    translateBtn.addEventListener("pointercancel", clearLongPress);
+    translateBtn.addEventListener("pointerleave", clearLongPress);
+    translateBtn.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      clearLongPress();
+      if (S.selectedItem) void handleTranslateAction(S.selectedItem, true);
+    });
+    translateBtn.addEventListener("click", () => {
+      if (suppressNextClick) {
+        suppressNextClick = false;
+        return;
       }
-    }
-
-    // 开始翻译 — 使用 translate_item_bilingual_streaming 从数据库读取
-    // WebView 模式：优先使用 content_md；RSS 模式：优先使用 content
-    await translateItem(S.selectedItem, undefined);
-  });
+      if (S.selectedItem) void handleTranslateAction(S.selectedItem);
+    });
+  }
 
   // 测试 AI 连接按钮 - 测试连接并保存
   document.getElementById("test-ai-btn")?.addEventListener("click", async () => {
