@@ -148,24 +148,34 @@ pub async fn toggle_ignored(
 #[tauri::command]
 pub async fn get_favorites(
     state: State<'_, AppState>,
+    subscription_id: Option<i64>,
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<Vec<FeedItemSummary>> {
     state
         .feed_repo
-        .get_favorites(clamp_limit(limit, 50, 200), clamp_offset(offset))
+        .get_favorites(
+            subscription_id,
+            clamp_limit(limit, 50, 200),
+            clamp_offset(offset),
+        )
         .await
 }
 
 #[tauri::command]
 pub async fn get_read_later(
     state: State<'_, AppState>,
+    subscription_id: Option<i64>,
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<Vec<FeedItemSummary>> {
     state
         .feed_repo
-        .get_read_later(clamp_limit(limit, 50, 200), clamp_offset(offset))
+        .get_read_later(
+            subscription_id,
+            clamp_limit(limit, 50, 200),
+            clamp_offset(offset),
+        )
         .await
 }
 
@@ -209,8 +219,13 @@ pub async fn get_today_items(
 pub async fn save_item_tags(
     state: State<'_, AppState>,
     item_id: i64,
-    tags: String,
-    category: String,
+    tags: Vec<String>,
+    category: Option<String>,
 ) -> Result<FeedItem> {
-    state.feed_repo.save_tags(item_id, &tags, &category).await
+    let tags = serde_json::to_string(&tags)
+        .map_err(|e| crate::error::AppError::Validation(format!("Invalid tags: {}", e)))?;
+    state
+        .feed_repo
+        .save_tags(item_id, &tags, category.as_deref().unwrap_or_default())
+        .await
 }

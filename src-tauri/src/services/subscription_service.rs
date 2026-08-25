@@ -15,18 +15,22 @@ pub struct SubscriptionService {
     repo: Arc<dyn SubscriptionRepository>,
 }
 
-/// Validate an http(s) URL, rejecting bare schemes and whitespace.
+/// Validate an http(s) URL with the same parser used by reqwest at fetch
+/// time, rejecting malformed hosts instead of only checking the scheme.
 fn validate_http_url(url: &str, field_name: &str) -> Result<()> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"));
-    match rest {
-        Some(host) if !host.trim().is_empty() => Ok(()),
-        _ => Err(AppError::Validation(format!(
+    let parsed = reqwest::Url::parse(url).map_err(|_| {
+        AppError::Validation(format!(
             "{} must be a valid http(s) URL with a host",
             field_name
-        ))),
+        ))
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(AppError::Validation(format!(
+            "{} must be a valid http(s) URL with a host",
+            field_name
+        )));
     }
+    Ok(())
 }
 
 /// Normalize a clearable URL field: empty string means "clear to NULL",

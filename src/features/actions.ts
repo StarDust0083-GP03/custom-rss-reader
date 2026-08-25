@@ -33,6 +33,11 @@ let refreshInProgress = false;
 // selection doesn't paint over a fresh one.
 let selectItemSeq = 0;
 
+// Search has the same stale-response hazard as item loading, but it uses a
+// separate counter because a query can race with a mode switch or clearing the
+// input. Only the latest search generation may mutate the list or status bar.
+let searchItemsSeq = 0;
+
 // ---------------------------------------------------------------------------
 // Item selection + ignore timer
 // ---------------------------------------------------------------------------
@@ -372,8 +377,10 @@ export async function refreshAllFeeds() {
 
 // 搜索
 export async function searchItems(query: string) {
-  if (!query.trim()) {
-    loadItems();
+  const seq = ++searchItemsSeq;
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) {
+    await loadItems();
     return;
   }
   const searchT0 = performance.now();
@@ -386,7 +393,8 @@ export async function searchItems(query: string) {
     void ensureMarkdownBackfill();
     setLoadingWithStatus("", `Semantic search: "${query}"`);
     try {
-      const results = await chromaApi.search(query, 50);
+      const results = await chromaApi.search(trimmedQuery, 50);
+      if (seq !== searchItemsSeq) return;
       // Synthesize a FeedItemSummary from each semantic hit. Fields the hit
       // doesn't carry (subscription_id, flags) are zeroed; navigation still
       // works because `selectItem` re-fetches the full item by its real id.
@@ -414,9 +422,10 @@ export async function searchItems(query: string) {
       renderItems();
       clearLoadingStatus(true, `Found ${results.length} semantic results`);
       console.log(
-        `[search] done semantic in ${Math.round(performance.now() - searchT0)}ms hits=${results.length} query="${query}"`,
+        `[search] done semantic in ${Math.round(performance.now() - searchT0)}ms hits=${results.length} query="${trimmedQuery}"`,
       );
     } catch (error) {
+      if (seq !== searchItemsSeq) return;
       console.error(
         `[search] FAILED semantic after ${Math.round(performance.now() - searchT0)}ms:`,
         error,
@@ -429,14 +438,16 @@ export async function searchItems(query: string) {
 
   setLoadingWithStatus("", `Searching: "${query}"`);
   try {
-    const items = await itemsApi.search(query, 100);
+    const items = await itemsApi.search(trimmedQuery, 100);
+    if (seq !== searchItemsSeq) return;
     S.currentItems = items;
     renderItems();
     clearLoadingStatus(true, `Found ${items.length} items`);
     console.log(
-      `[search] done text in ${Math.round(performance.now() - searchT0)}ms hits=${items.length} query="${query}"`,
+      `[search] done text in ${Math.round(performance.now() - searchT0)}ms hits=${items.length} query="${trimmedQuery}"`,
     );
   } catch (error) {
+    if (seq !== searchItemsSeq) return;
     console.error(`[search] FAILED text after ${Math.round(performance.now() - searchT0)}ms:`, error);
     clearLoadingStatus(false, "Search failed");
     toastError("Failed to search items");

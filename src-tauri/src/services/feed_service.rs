@@ -15,6 +15,7 @@ use crate::content_processor::html_to_markdown_pipeline;
 #[cfg(test)]
 use crate::models::NewFeedItem;
 use crate::repositories::{FeedItemRepository, SubscriptionRepository};
+use crate::ai::service::{AiService, SharedAiService};
 
 /// Summary of a batch fetch operation.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -31,13 +32,14 @@ pub struct FetchSummary {
 /// Orchestrates feed fetching, parsing, deduplication, and
 /// the HTML-to-Markdown caching pipeline.
 ///
-/// Optional dependencies (fetcher, sub_repo, ai_service) are `None` by default.
-/// Use the builder methods to wire them in for full fetch/classify capability.
+/// Optional dependencies (fetcher and sub_repo) are `None` by default.
+/// The shared AI slot starts empty until a valid configuration is loaded or
+/// saved; use the builder methods to wire in full fetch/classify capability.
 pub struct FeedService {
     repo: Arc<dyn FeedItemRepository>,
     sub_repo: Option<Arc<dyn SubscriptionRepository>>,
     fetcher: Option<Arc<FeedFetcher>>,
-    ai_service: Option<Arc<dyn crate::ai::service::AiService>>,
+    ai_service: SharedAiService,
     ai_activity: AiActivityStore,
     chroma_service: ChromaHolder,
 }
@@ -50,7 +52,7 @@ impl FeedService {
             repo,
             sub_repo: None,
             fetcher: None,
-            ai_service: None,
+            ai_service: Arc::new(tokio::sync::RwLock::new(None)),
             ai_activity: AiActivityStore::new(),
             chroma_service: ChromaHolder::default(),
         }
@@ -68,15 +70,23 @@ impl FeedService {
         self
     }
 
-    /// Attach the ChromaDB holder (enables semantic search indexing).
-    pub fn with_chroma_service(mut self, chroma: ChromaHolder) -> Self {
-        self.chroma_service = chroma;
+    /// Attach the shared AI service slot (enables automatic classification).
+    /// The slot can be replaced when the user saves AI settings, so a restart
+    /// is not required before the next feed refresh uses the new config.
+    pub fn with_ai_service(mut self, ai_service: SharedAiService) -> Self {
+        self.ai_service = ai_service;
         self
     }
 
     /// Attach the shared AI activity store used by the status bar.
     pub fn with_ai_activity(mut self, activity: AiActivityStore) -> Self {
         self.ai_activity = activity;
+        self
+    }
+
+    /// Attach the ChromaDB holder (enables semantic search indexing).
+    pub fn with_chroma_service(mut self, chroma: ChromaHolder) -> Self {
+        self.chroma_service = chroma;
         self
     }
 
@@ -110,8 +120,8 @@ impl FeedService {
         fetch_parse_and_save(
             &self.repo,
             fetcher,
-            self.ai_service.as_ref(),
-            &self.ai_activity,
+            self.ai_service.clone(),
+            self.ai_activity.clone(),
             &self.chroma_service,
             subscription,
         )
@@ -225,8 +235,8 @@ impl FeedService {
                     fetch_parse_and_save(
                         &repo,
                         fetcher,
-                        ai_service.as_ref(),
-                        &ai_activity,
+                        ai_service.clone(),
+                        ai_activity.clone(),
                         &chroma_service,
                         &sub,
                     )
@@ -322,8 +332,8 @@ pub async fn revert_to_rss_markdown(
 async fn fetch_parse_and_save(
     repo: &Arc<dyn FeedItemRepository>,
     fetcher: &Arc<FeedFetcher>,
-    ai_service: Option<&Arc<dyn crate::ai::service::AiService>>,
-    ai_activity: &AiActivityStore,
+    ai_service: SharedAiService,
+    ai_activity: AiActivityStore,
     chroma_service: &ChromaHolder,
     subscription: &Subscription,
 ) -> Result<Vec<FeedItem>> {
@@ -389,12 +399,19 @@ async fn fetch_parse_and_save(
 
     // Batch classification: titles only, one LLM call per
     // CLASSIFY_BATCH_SIZE articles.
-    if let Some(ai) = ai_service {
+    // Clone the service handle before awaiting the batch calls so the read
+    // lock is never held across network I/O. Saving AI settings replaces the
+    // slot for subsequent fetches without invalidating this in-flight batch.
+    if let Some(ai) = ai_service.read().await.clone() {
         for chunk in pending_classify.chunks(crate::ai::CLASSIFY_BATCH_SIZE) {
             let task = ai_activity
                 .begin(AiTaskSpec::background_classification(chunk.len()))
                 .await;
-            let result = with_ai_task(task.clone(), classify_batch_and_save(repo, ai.as_ref(), chunk)).await;
+            let result = with_ai_task(
+                task.clone(),
+                classify_batch_and_save(repo, ai.as_ref(), chunk),
+            )
+            .await;
             task.finish().await;
             if let Err(e) = result {
                 eprintln!("Batch classification failed ({} items): {}", chunk.len(), e);
@@ -411,7 +428,7 @@ async fn fetch_parse_and_save(
 /// `content` is ever sent.
 async fn classify_batch_and_save(
     repo: &Arc<dyn FeedItemRepository>,
-    ai: &dyn crate::ai::service::AiService,
+    ai: &dyn AiService,
     items: &[FeedItem],
 ) -> Result<()> {
     let entries: Vec<crate::ai::BatchClassifyEntry> = items

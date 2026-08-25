@@ -53,19 +53,29 @@ pub async fn remove_subscription(
 ) -> Result<()> {
     // Collect item ids BEFORE the cascade delete so the ChromaDB index can
     // be cleaned up too; otherwise deleted articles stay searchable forever.
-    let item_ids = state.feed_repo.find_ids_by_subscription(id).await.unwrap_or_default();
+    let item_ids = state.feed_repo.find_ids_by_subscription(id).await?;
 
-    state.subscription_service.remove_subscription(id).await?;
+    // Persist tombstones BEFORE the cascade delete. If the process dies after
+    // SQLite commits but before Chroma cleanup, the next sync still knows what
+    // to remove. The sync pass also checks that a tombstoned row is really
+    // gone, so a crash before the SQLite delete cannot delete a live vector.
+    crate::chroma::sync::SyncState::queue_deletes_durable(&item_ids).await?;
+
+    if let Err(error) = state.subscription_service.remove_subscription(id).await {
+        // The source row is still present; retaining its tombstone would make
+        // a later sync delete a live vector, so best-effort rollback the queue.
+        let _ = crate::chroma::sync::SyncState::clear_pending_deletes(&item_ids).await;
+        return Err(error);
+    }
 
     // Best-effort: a Chroma outage must not fail the subscription removal.
-    // Failed vector deletes are queued in the sync state so the next
-    // incremental sync retries them (instead of leaking orphans forever).
+    // Failed or disabled cleanup leaves the durable tombstones for the next
+    // incremental sync; a successful direct delete clears them.
     if let Some(chroma) = state.chroma_service.get().await {
         if let Err(e) = chroma.delete_items(&item_ids).await {
             eprintln!("ChromaDB cleanup for subscription {} failed: {}", id, e);
-            for item_id in &item_ids {
-                crate::chroma::sync::SyncState::queue_delete(*item_id).await;
-            }
+        } else if let Err(e) = crate::chroma::sync::SyncState::clear_pending_deletes(&item_ids).await {
+            eprintln!("Failed to clear ChromaDB tombstones for subscription {}: {}", id, e);
         }
     }
     Ok(())

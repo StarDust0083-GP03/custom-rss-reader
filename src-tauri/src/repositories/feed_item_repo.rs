@@ -470,7 +470,10 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         let pattern = format!("%{}%", escape_like(query));
         let sql = format!(
             r#"SELECT {} FROM {}
-               WHERE (f.title LIKE $1 ESCAPE '\' OR f.description LIKE $1 ESCAPE '\' OR f.content LIKE $1 ESCAPE '\')
+               WHERE (f.title LIKE $1 ESCAPE '\'
+                  OR f.description LIKE $1 ESCAPE '\'
+                  OR f.content LIKE $1 ESCAPE '\'
+                  OR f.content_md LIKE $1 ESCAPE '\')
                ORDER BY f.published_at DESC LIMIT $2"#,
             SUMMARY_COLS, SUMMARY_FROM
         );
@@ -616,12 +619,32 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         self.toggle_flag(id, "is_ignored").await
     }
 
-    async fn get_favorites(&self, limit: i64, offset: i64) -> Result<Vec<FeedItemSummary>> {
-        self.fetch_summaries("WHERE f.is_favorite = 1", None, limit, offset).await
+    async fn get_favorites(
+        &self,
+        subscription_id: Option<i64>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<FeedItemSummary>> {
+        let where_sql = if subscription_id.is_some() {
+            "WHERE f.is_favorite = 1 AND f.subscription_id = $3"
+        } else {
+            "WHERE f.is_favorite = 1"
+        };
+        self.fetch_summaries(where_sql, subscription_id, limit, offset).await
     }
 
-    async fn get_read_later(&self, limit: i64, offset: i64) -> Result<Vec<FeedItemSummary>> {
-        self.fetch_summaries("WHERE f.is_read_later = 1", None, limit, offset).await
+    async fn get_read_later(
+        &self,
+        subscription_id: Option<i64>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<FeedItemSummary>> {
+        let where_sql = if subscription_id.is_some() {
+            "WHERE f.is_read_later = 1 AND f.subscription_id = $3"
+        } else {
+            "WHERE f.is_read_later = 1"
+        };
+        self.fetch_summaries(where_sql, subscription_id, limit, offset).await
     }
 
     async fn get_unread(

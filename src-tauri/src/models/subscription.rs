@@ -69,14 +69,14 @@ impl NewSubscription {
         if url.is_empty() {
             return Err(AppError::Validation("URL cannot be empty".into()));
         }
-        let host = url
-            .strip_prefix("https://")
-            .or_else(|| url.strip_prefix("http://"));
-        match host {
-            Some(h) if !h.trim().is_empty() => Ok(()),
-            _ => Err(AppError::Validation(
+        let parsed = reqwest::Url::parse(url).map_err(|_| {
+            AppError::Validation("URL must be a valid http(s) URL with a host".into())
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(AppError::Validation(
                 "URL must be a valid http(s) URL with a host".into(),
-            )),
+            ));
         }
+        Ok(())
     }
 }

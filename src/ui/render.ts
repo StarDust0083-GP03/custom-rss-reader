@@ -225,9 +225,9 @@ export async function loadItems() {
     if (S.currentFilter === "unread") {
       items = await itemsApi.unread(subId);
     } else if (S.currentFilter === "favorites") {
-      items = await itemsApi.favorites();
+      items = await itemsApi.favorites(subId);
     } else if (S.currentFilter === "read-later") {
-      items = await itemsApi.readLater();
+      items = await itemsApi.readLater(subId);
     } else if (S.currentFilter === "today") {
       // unreadFilterEnabled drives the "Today + Unread" combination; without
       // threading it through, the toggle had no functional effect.

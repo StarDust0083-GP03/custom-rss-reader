@@ -326,16 +326,13 @@ async function init() {
 
   // 测试 AI 连接按钮 - 测试连接并保存
   document.getElementById("test-ai-btn")?.addEventListener("click", async () => {
-    const apiKey = (document.getElementById("ai-api-key") as HTMLInputElement).value;
+    const apiKey = (document.getElementById("ai-api-key") as HTMLInputElement).value.trim() || undefined;
     const baseUrl = (document.getElementById("ai-base-url") as HTMLInputElement).value;
     const model = (document.getElementById("ai-model") as HTMLInputElement).value;
     const maxCharsPerSegment = parseInt((document.getElementById("ai-max-chars") as HTMLInputElement).value) || undefined;
 
-    if (!apiKey) {
-      toastError("Please enter an API key first");
-      return;
-    }
-
+    // A blank key means "test the saved key"; the backend reports a clear
+    // validation error if there is no saved key yet.
     const btn = document.getElementById("test-ai-btn") as HTMLButtonElement;
     const originalText = btn.textContent;
     btn.textContent = "Testing...";
@@ -356,17 +353,13 @@ async function init() {
   // AI 设置表单 - 直接保存（跳过测试）
   document.getElementById("ai-settings-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const apiKey = (document.getElementById("ai-api-key") as HTMLInputElement).value;
+    const apiKey = (document.getElementById("ai-api-key") as HTMLInputElement).value.trim() || undefined;
     const baseUrl = (document.getElementById("ai-base-url") as HTMLInputElement).value;
     const model = (document.getElementById("ai-model") as HTMLInputElement).value;
     const maxCharsPerSegment = parseInt((document.getElementById("ai-max-chars") as HTMLInputElement).value) || undefined;
 
-    if (!apiKey) {
-      toastError("Please enter an API key");
-      return;
-    }
-
     try {
+      // 空 key 由后端解释为保留已保存的 key。
       // 直接保存，跳过连接测试
       await invoke("set_ai_config", { apiKey, baseUrl: baseUrl || undefined, model: model || undefined, maxCharsPerSegment, skipTest: true });
       closeAiSettingsModal();

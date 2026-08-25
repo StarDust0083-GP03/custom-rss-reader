@@ -165,11 +165,21 @@ pub trait FeedItemRepository: Send + Sync {
     /// Toggle the ignored flag atomically. Returns the new state.
     async fn toggle_ignored(&self, id: i64) -> Result<bool>;
 
-    /// Get favorited feed item summaries.
-    async fn get_favorites(&self, limit: i64, offset: i64) -> Result<Vec<FeedItemSummary>>;
+    /// Get favorited feed item summaries, optionally scoped to a subscription.
+    async fn get_favorites(
+        &self,
+        subscription_id: Option<i64>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<FeedItemSummary>>;
 
-    /// Get read-later feed item summaries.
-    async fn get_read_later(&self, limit: i64, offset: i64) -> Result<Vec<FeedItemSummary>>;
+    /// Get read-later feed item summaries, optionally scoped to a subscription.
+    async fn get_read_later(
+        &self,
+        subscription_id: Option<i64>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<FeedItemSummary>>;
 
     /// Get unread feed item summaries, optionally filtered by subscription.
     async fn get_unread(

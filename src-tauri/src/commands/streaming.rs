@@ -423,17 +423,18 @@ fn strip_anchor_tags(s: &str) -> String {
 /// configured `max_chars_per_segment`, so the streaming pipeline can read the
 /// latter without re-loading the config.
 async fn get_or_build_ai_service(state: &AppState) -> Result<AiHandle> {
-    if let Some(ref service) = state.ai_service {
+    if let Some(service) = state.ai_service.read().await.clone() {
         let cfg_max = service.config_max_chars();
         return Ok(AiHandle {
-            service: Arc::clone(service),
+            service,
             config_max_chars: cfg_max,
         });
     }
 
     let config = load_ai_config()?;
     let max = config.max_chars_per_segment.unwrap_or(crate::ai::MAX_CHARS_PER_SEGMENT);
-    let service = Arc::new(LlmAiService::new(config)?);
+    let service: Arc<dyn AiService> = Arc::new(LlmAiService::new(config)?);
+    *state.ai_service.write().await = Some(service.clone());
     Ok(AiHandle {
         service,
         config_max_chars: max,

@@ -1,4 +1,4 @@
-use sqlx::{Executor, SqlitePool};
+use sqlx::{Executor, SqliteConnection, SqlitePool};
 
 use crate::error::{AppError, Result};
 
@@ -7,31 +7,33 @@ use crate::error::{AppError, Result};
 /// Creates tables from scratch if they don't exist, otherwise adds any
 /// missing columns incrementally. Indexes are created at the end.
 pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
     let tables_exist = sqlx::query(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='feed_items'",
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(AppError::Database)?
     .is_some();
 
     if !tables_exist {
-        create_tables(pool).await?;
+        create_tables(&mut tx).await?;
     } else {
-        add_missing_columns(pool).await?;
+        add_missing_columns(&mut tx).await?;
         // Existing databases may carry duplicate (subscription_id, guid) rows
         // from before the unique index existed; remove them so the index can
         // be created.
-        dedupe_feed_item_guids(pool).await?;
+        dedupe_feed_item_guids(&mut tx).await?;
     }
 
-    create_indexes(pool).await?;
+    create_indexes(&mut tx).await?;
+    tx.commit().await.map_err(AppError::Database)?;
 
     Ok(())
 }
 
-async fn create_tables(pool: &SqlitePool) -> Result<()> {
-    pool.execute(
+async fn create_tables(conn: &mut SqliteConnection) -> Result<()> {
+    conn.execute(
         r#"
         CREATE TABLE subscriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,7 +52,7 @@ async fn create_tables(pool: &SqlitePool) -> Result<()> {
     .await
     .map_err(AppError::Database)?;
 
-    pool.execute(
+    conn.execute(
         r#"
         CREATE TABLE feed_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,35 +86,91 @@ async fn create_tables(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
-/// Add a column if it does not exist yet. Logs (but does not fail on) errors
-/// so a single failed ALTER does not abort the whole migration.
-async fn ensure_column(pool: &SqlitePool, table: &str, column: &str, ddl: &str) {
-    let probe = format!("SELECT {} FROM {} LIMIT 1", column, table);
-    let exists = sqlx::query(&probe).fetch_optional(pool).await.is_ok();
-    if !exists {
-        if let Err(e) = sqlx::query(ddl).execute(pool).await {
-            eprintln!("[migration] failed to add column {}.{}: {}", table, column, e);
-        }
+/// Add a column if it does not exist yet. Migration errors are returned to
+/// the caller: starting with a partially migrated schema is less safe than
+/// stopping and asking for the database error to be repaired.
+async fn ensure_column(
+    conn: &mut SqliteConnection,
+    table: &str,
+    column: &str,
+    ddl: &str,
+) -> Result<()> {
+    let exists: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM pragma_table_info($1) WHERE name = $2 LIMIT 1",
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(AppError::Database)?;
+
+    if exists.is_none() {
+        sqlx::query(ddl)
+            .execute(&mut *conn)
+            .await
+            .map_err(AppError::Database)
+            .map(|_| ())?;
     }
+    Ok(())
 }
 
-async fn add_missing_columns(pool: &SqlitePool) -> Result<()> {
-    ensure_column(pool, "feed_items", "content_md",
-        "ALTER TABLE feed_items ADD COLUMN content_md TEXT").await;
-    ensure_column(pool, "feed_items", "tags",
-        "ALTER TABLE feed_items ADD COLUMN tags TEXT").await;
-    ensure_column(pool, "feed_items", "category",
-        "ALTER TABLE feed_items ADD COLUMN category TEXT").await;
-    ensure_column(pool, "feed_items", "translated_title",
-        "ALTER TABLE feed_items ADD COLUMN translated_title TEXT").await;
-    ensure_column(pool, "feed_items", "translated_content",
-        "ALTER TABLE feed_items ADD COLUMN translated_content TEXT").await;
-    ensure_column(pool, "feed_items", "translated_at",
-        "ALTER TABLE feed_items ADD COLUMN translated_at DATETIME").await;
-    ensure_column(pool, "feed_items", "is_ignored",
-        "ALTER TABLE feed_items ADD COLUMN is_ignored BOOLEAN DEFAULT 0").await;
-    ensure_column(pool, "subscriptions", "auto_classify",
-        "ALTER TABLE subscriptions ADD COLUMN auto_classify BOOLEAN DEFAULT 1").await;
+async fn add_missing_columns(conn: &mut SqliteConnection) -> Result<()> {
+    ensure_column(
+        conn,
+        "feed_items",
+        "content_md",
+        "ALTER TABLE feed_items ADD COLUMN content_md TEXT",
+    )
+    .await?;
+    ensure_column(
+        conn,
+        "feed_items",
+        "tags",
+        "ALTER TABLE feed_items ADD COLUMN tags TEXT",
+    )
+    .await?;
+    ensure_column(
+        conn,
+        "feed_items",
+        "category",
+        "ALTER TABLE feed_items ADD COLUMN category TEXT",
+    )
+    .await?;
+    ensure_column(
+        conn,
+        "feed_items",
+        "translated_title",
+        "ALTER TABLE feed_items ADD COLUMN translated_title TEXT",
+    )
+    .await?;
+    ensure_column(
+        conn,
+        "feed_items",
+        "translated_content",
+        "ALTER TABLE feed_items ADD COLUMN translated_content TEXT",
+    )
+    .await?;
+    ensure_column(
+        conn,
+        "feed_items",
+        "translated_at",
+        "ALTER TABLE feed_items ADD COLUMN translated_at DATETIME",
+    )
+    .await?;
+    ensure_column(
+        conn,
+        "feed_items",
+        "is_ignored",
+        "ALTER TABLE feed_items ADD COLUMN is_ignored BOOLEAN DEFAULT 0",
+    )
+    .await?;
+    ensure_column(
+        conn,
+        "subscriptions",
+        "auto_classify",
+        "ALTER TABLE subscriptions ADD COLUMN auto_classify BOOLEAN DEFAULT 1",
+    )
+    .await?;
 
     Ok(())
 }
@@ -120,7 +178,7 @@ async fn add_missing_columns(pool: &SqlitePool) -> Result<()> {
 /// Remove duplicate (subscription_id, guid) rows, keeping the oldest copy.
 /// Rows with NULL guid are left alone (SQLite unique indexes treat NULLs as
 /// distinct anyway).
-async fn dedupe_feed_item_guids(pool: &SqlitePool) -> Result<()> {
+async fn dedupe_feed_item_guids(conn: &mut SqliteConnection) -> Result<()> {
     let result = sqlx::query(
         r#"
         DELETE FROM feed_items
@@ -130,7 +188,7 @@ async fn dedupe_feed_item_guids(pool: &SqlitePool) -> Result<()> {
         )
         "#,
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     .map_err(AppError::Database)?;
 
@@ -143,7 +201,7 @@ async fn dedupe_feed_item_guids(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
-async fn create_indexes(pool: &SqlitePool) -> Result<()> {
+async fn create_indexes(conn: &mut SqliteConnection) -> Result<()> {
     // Drop legacy low-selectivity indexes. The boolean single-column indexes
     // are essentially never used by the query planner, and the subscription
     // index is covered by the (subscription_id, published_at) composite.
@@ -154,7 +212,10 @@ async fn create_indexes(pool: &SqlitePool) -> Result<()> {
         "DROP INDEX IF EXISTS idx_feed_items_subscription",
     ];
     for ddl in drops {
-        sqlx::query(ddl).execute(pool).await.map_err(AppError::Database)?;
+        sqlx::query(ddl)
+            .execute(&mut *conn)
+            .await
+            .map_err(AppError::Database)?;
     }
 
     let indexes = [
@@ -165,19 +226,90 @@ async fn create_indexes(pool: &SqlitePool) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_feed_items_rl_pub ON feed_items(is_read_later, published_at DESC)",
     ];
     for ddl in indexes {
-        sqlx::query(ddl).execute(pool).await.map_err(AppError::Database)?;
+        sqlx::query(ddl)
+            .execute(&mut *conn)
+            .await
+            .map_err(AppError::Database)?;
     }
 
     // The unique dedup index must not fail silently: without it the fetch
     // pipeline loses its last line of defense against duplicate rows.
     let unique = "CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_items_guid ON feed_items(subscription_id, guid)";
-    if let Err(e) = sqlx::query(unique).execute(pool).await {
-        eprintln!(
-            "[migration] WARNING: could not create unique index idx_feed_items_guid: {}. \
-             Duplicate (subscription_id, guid) rows may still exist; dedup protection is OFF.",
-            e
-        );
-    }
+    sqlx::query(unique)
+        .execute(&mut *conn)
+        .await
+        .map_err(AppError::Database)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    use super::run_migrations;
+
+    #[tokio::test]
+    async fn legacy_schema_gets_missing_columns_and_indexes() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create test database");
+
+        sqlx::query(
+            "CREATE TABLE subscriptions (id INTEGER PRIMARY KEY, url TEXT NOT NULL UNIQUE)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create legacy subscriptions table");
+        sqlx::query(
+            "CREATE TABLE feed_items (
+                id INTEGER PRIMARY KEY,
+                subscription_id INTEGER NOT NULL,
+                guid TEXT,
+                title TEXT NOT NULL,
+                link TEXT,
+                content TEXT,
+                description TEXT,
+                author TEXT,
+                published_at DATETIME,
+                fetched_at DATETIME,
+                is_website_content BOOLEAN DEFAULT 0,
+                is_read BOOLEAN DEFAULT 0,
+                is_favorite BOOLEAN DEFAULT 0,
+                is_read_later BOOLEAN DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create legacy feed_items table");
+
+        run_migrations(&pool)
+            .await
+            .expect("legacy migration should complete");
+
+        let content_md: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM pragma_table_info('feed_items') WHERE name = 'content_md'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("inspect content_md");
+        let auto_classify: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM pragma_table_info('subscriptions') WHERE name = 'auto_classify'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("inspect auto_classify");
+        let index: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_feed_items_guid'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("inspect unique index");
+
+        assert_eq!(content_md.as_deref(), Some("content_md"));
+        assert_eq!(auto_classify.as_deref(), Some("auto_classify"));
+        assert_eq!(index.as_deref(), Some("idx_feed_items_guid"));
+    }
 }

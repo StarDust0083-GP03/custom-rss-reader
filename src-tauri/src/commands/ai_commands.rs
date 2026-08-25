@@ -1,10 +1,16 @@
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::ai::activity::{with_ai_task, AiTaskSpec, AiActivitySnapshot};
+use crate::ai::activity::{with_ai_task, AiActivitySnapshot, AiTaskSpec};
 use crate::ai::{AiConfig, ClassificationRequest, ClassificationResponse};
 use crate::ai::service::{AiService, LlmAiService};
 use crate::error::{AppError, Result};
@@ -241,12 +247,19 @@ pub async fn recommend_reads(
 #[tauri::command]
 pub async fn set_ai_config(
     state: State<'_, AppState>,
-    api_key: String,
+    api_key: Option<String>,
     base_url: Option<String>,
     model: Option<String>,
     skip_test: Option<bool>,
     max_chars_per_segment: Option<usize>,
 ) -> Result<()> {
+    // The UI deliberately displays a masked key. Treat an omitted, blank, or
+    // masked value as "keep the existing secret" instead of persisting the
+    // mask itself and breaking the next LLM request.
+    let existing = load_ai_config().unwrap_or_else(|_| {
+        AiConfig::default_for(DEFAULT_BASE_URL, DEFAULT_MODEL)
+    });
+    let api_key = resolve_api_key(api_key, &existing.api_key)?;
     let config = AiConfig {
         api_key,
         base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
@@ -256,11 +269,11 @@ pub async fn set_ai_config(
         max_chars_per_segment,
     };
 
+    let service = Arc::new(LlmAiService::new(config.clone())?);
     let skip = skip_test.unwrap_or(false);
     if !skip {
-        let test_service = LlmAiService::new(config.clone())?;
         let task = state.ai_activity.begin(AiTaskSpec::connection_test()).await;
-        let connection = with_ai_task(task.clone(), test_service.test_connection()).await;
+        let connection = with_ai_task(task.clone(), service.test_connection()).await;
         task.finish().await;
         connection.map_err(|e| {
             AppError::Network(format!(
@@ -270,6 +283,7 @@ pub async fn set_ai_config(
     }
 
     save_ai_config(&config)?;
+    *state.ai_service.write().await = Some(service);
     Ok(())
 }
 
@@ -291,16 +305,33 @@ pub async fn get_ai_activity(state: State<'_, AppState>) -> Result<AiActivitySna
 
 // ---- Helpers ----
 
-/// Build a cached AI service if one is registered in state, else load from
-/// the config file. (Caching the constructed service across calls is a
-/// longer-term improvement — the AppState.ai_service field already exists
-/// for this purpose.)
+/// Load a configured service at startup. Invalid or absent configuration is
+/// intentionally non-fatal; manual AI commands still return the actionable
+/// configuration error when the user invokes them.
+pub fn load_configured_ai_service() -> Option<Arc<dyn AiService>> {
+    let config = match load_ai_config() {
+        Ok(config) => config,
+        Err(_) => return None,
+    };
+    match LlmAiService::new(config) {
+        Ok(service) => Some(Arc::new(service)),
+        Err(error) => {
+            eprintln!("[ai] configured service unavailable: {}", error);
+            None
+        }
+    }
+}
+
+/// Build or reuse the shared AI service. Saving settings replaces the slot,
+/// so all commands and the automatic feed classifier see the new config.
 async fn get_ai_service(state: &AppState) -> Result<Arc<dyn AiService>> {
-    if let Some(ref service) = state.ai_service {
-        return Ok(Arc::clone(service));
+    if let Some(service) = state.ai_service.read().await.clone() {
+        return Ok(service);
     }
     let config = load_ai_config()?;
-    Ok(Arc::new(LlmAiService::new(config)?))
+    let service: Arc<dyn AiService> = Arc::new(LlmAiService::new(config)?);
+    *state.ai_service.write().await = Some(service.clone());
+    Ok(service)
 }
 
 fn load_ai_config() -> Result<AiConfig> {
@@ -324,17 +355,62 @@ fn save_ai_config(config: &AiConfig) -> Result<()> {
         .ok_or_else(|| AppError::Internal("Failed to get home directory".into()))?;
     let app_dir = home_dir.join(".rss-reader");
 
-    std::fs::create_dir_all(&app_dir)
+    fs::create_dir_all(&app_dir)
         .map_err(|e| AppError::Internal(format!("Failed to create config dir: {}", e)))?;
+    #[cfg(unix)]
+    fs::set_permissions(&app_dir, fs::Permissions::from_mode(0o700))
+        .map_err(|e| AppError::Internal(format!("Failed to protect config dir: {}", e)))?;
 
     let config_file = app_dir.join("ai_config.json");
     let config_json = serde_json::to_string_pretty(config)
         .map_err(|e| AppError::Internal(format!("Failed to serialize config: {}", e)))?;
+    write_private_atomic(&config_file, &config_json)
+}
 
-    std::fs::write(&config_file, config_json)
+/// Write secret-bearing configuration with a private mode and atomic replace.
+fn write_private_atomic(path: &Path, contents: &str) -> Result<()> {
+    let temp_file = path.with_extension("json.tmp");
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(&temp_file)
+        .map_err(|e| AppError::Internal(format!("Failed to open config file: {}", e)))?;
+    file.write_all(contents.as_bytes())
+        .and_then(|_| file.sync_all())
         .map_err(|e| AppError::Internal(format!("Failed to write config file: {}", e)))?;
+    drop(file);
+    #[cfg(unix)]
+    fs::set_permissions(&temp_file, fs::Permissions::from_mode(0o600))
+        .map_err(|e| AppError::Internal(format!("Failed to protect config file: {}", e)))?;
+
+    // Windows cannot atomically replace an existing destination with rename;
+    // remove it only on that platform, while Unix keeps the atomic replace.
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path)
+            .map_err(|e| AppError::Internal(format!("Failed to replace config file: {}", e)))?;
+    }
+    fs::rename(&temp_file, path)
+        .map_err(|e| AppError::Internal(format!("Failed to replace config file: {}", e)))?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|e| AppError::Internal(format!("Failed to protect config file: {}", e)))?;
 
     Ok(())
+}
+
+fn resolve_api_key(input: Option<String>, existing: &str) -> Result<String> {
+    let candidate = input.map(|key| key.trim().to_string());
+    let existing = if existing.contains("****") { "" } else { existing };
+    match candidate.filter(|key| !key.is_empty()) {
+        Some(key) if !key.contains("****") => Ok(key),
+        Some(_) | None if !existing.is_empty() => Ok(existing.to_string()),
+        Some(_) | None => Err(AppError::Validation(
+            "API key cannot be empty; enter a key before saving".into(),
+        )),
+    }
 }
 
 /// Mask an API key for safe transport to the frontend.
@@ -373,5 +449,39 @@ mod tests {
     #[test]
     fn test_mask_api_key_long() {
         assert_eq!(mask_api_key("sk-proj-1234567890abcdef"), "sk-p****cdef");
+    }
+
+    #[test]
+    fn test_resolve_api_key_keeps_existing_for_blank_or_masked_input() {
+        assert_eq!(resolve_api_key(None, "sk-live-secret").unwrap(), "sk-live-secret");
+        assert_eq!(
+            resolve_api_key(Some("sk-****cret".into()), "sk-live-secret").unwrap(),
+            "sk-live-secret"
+        );
+    }
+
+    #[test]
+    fn test_resolve_api_key_accepts_new_key_and_rejects_missing_key() {
+        assert_eq!(resolve_api_key(Some(" sk-new ".into()), "old").unwrap(), "sk-new");
+        assert!(resolve_api_key(None, "").is_err());
+        assert!(resolve_api_key(Some("sk-****".into()), "").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_private_file_mode_is_restrictive() {
+        let path = std::env::temp_dir().join(format!(
+            "rss-reader-ai-permissions-{}.json",
+            std::process::id()
+        ));
+        write_private_atomic(&path, "secret").expect("write test config");
+        let mode = fs::metadata(&path)
+            .expect("stat test config")
+            .permissions()
+            .mode()
+            & 0o777;
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("json.tmp"));
+        assert_eq!(mode, 0o600);
     }
 }

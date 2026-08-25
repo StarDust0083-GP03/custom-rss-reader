@@ -29,6 +29,7 @@
 //! and the manual `chroma_sync` command. The "Re-Index All" button resets
 //! the state and runs the same loop — one mechanism, no special cases.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -143,19 +144,34 @@ impl SyncState {
         Ok(())
     }
 
-    /// Queue an item for deletion on the next sync (called when the live
-    /// delete fails, e.g. ChromaDB briefly unreachable).
-    ///
-    /// Serialized with [`STATE_LOCK`] so a concurrent sync run's save can't
-    /// overwrite the freshly queued id with stale state.
-    pub async fn queue_delete(id: i64) {
+    /// Persist a group of deletion tombstones before deleting their database
+    /// rows. Unlike the fire-and-forget upsert queue, this path propagates a
+    /// state-file error so callers can refuse to delete the source rows.
+    pub async fn queue_deletes_durable(ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
         let _guard = STATE_LOCK.lock().await;
-        Self::mutate_locked(|s| {
-            if !s.pending_deletes.contains(&id) {
-                s.pending_deletes.push(id);
+        Self::mutate_locked_result(|s| {
+            for &id in ids {
+                if !s.pending_deletes.contains(&id) {
+                    s.pending_deletes.push(id);
+                }
+                s.pending_upserts.retain(|&x| x != id);
             }
-            s.pending_upserts.retain(|&x| x != id);
-        });
+        })
+    }
+
+    /// Remove deletion tombstones after a direct Chroma delete succeeds, or
+    /// after sync proves that the source rows still exist.
+    pub async fn clear_pending_deletes(ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let _guard = STATE_LOCK.lock().await;
+        Self::mutate_locked_result(|s| {
+            s.pending_deletes.retain(|id| !ids.contains(id));
+        })
     }
 
     /// Queue an item for (re)indexing on the next sync.
@@ -176,11 +192,15 @@ impl SyncState {
     /// Callers must hold [`STATE_LOCK`] so the load → save round-trip is
     /// atomic with respect to sync runs and other queue mutations.
     fn mutate_locked(f: impl FnOnce(&mut SyncState)) {
-        let mut state = Self::load();
-        f(&mut state);
-        if let Err(e) = state.save() {
+        if let Err(e) = Self::mutate_locked_result(f) {
             eprintln!("[chroma-sync] failed to persist sync state: {}", e);
         }
+    }
+
+    fn mutate_locked_result(f: impl FnOnce(&mut SyncState)) -> Result<()> {
+        let mut state = Self::load();
+        f(&mut state);
+        state.save()
     }
 }
 
@@ -242,12 +262,24 @@ async fn sync_pass(
 
     let mut processed: i64 = 0;
 
-    // 2. Pending deletes — deleting an id that isn't in the index is a
-    //    no-op server-side, so blind batched deletes are safe.
+    // 2. Pending deletes. Tombstones can be written just before a database
+    //    delete. If the process crashed before that delete committed, the
+    //    source row still exists; clear that tombstone instead of deleting a
+    //    live vector and creating an index hole.
     if !state.pending_deletes.is_empty() {
         update_progress(|p| p.phase = "deletes");
-        chroma.delete_items(&state.pending_deletes).await?;
-        report.deleted = state.pending_deletes.len();
+        let existing_rows = repo.find_index_rows_by_ids(&state.pending_deletes).await?;
+        let existing_ids: HashSet<i64> = existing_rows.into_iter().map(|row| row.id).collect();
+        let delete_ids: Vec<i64> = state
+            .pending_deletes
+            .iter()
+            .copied()
+            .filter(|id| !existing_ids.contains(id))
+            .collect();
+        if !delete_ids.is_empty() {
+            chroma.delete_items(&delete_ids).await?;
+        }
+        report.deleted = delete_ids.len();
         processed += report.deleted as i64;
         state.pending_deletes.clear();
         state.save()?;
@@ -390,8 +422,19 @@ mod tests {
         assert!(s.pending_upserts.is_empty());
     }
 
-    // NOTE: queue_delete/queue_upsert/save touch the REAL ~/.rss-reader
-    // state file and are exercised implicitly by the sync flow; unit-testing
-    // them in CI would mutate a developer's app data, so their dedup/mutex
-    // logic is kept trivial instead.
+    #[test]
+    fn test_pending_delete_filter_preserves_live_rows() {
+        let pending = [1, 2, 3];
+        let existing = HashSet::from([2]);
+        let to_delete: Vec<i64> = pending
+            .iter()
+            .copied()
+            .filter(|id| !existing.contains(id))
+            .collect();
+        assert_eq!(to_delete, vec![1, 3]);
+    }
+
+    // NOTE: queue_upsert/save touch the REAL ~/.rss-reader state file and
+    // are exercised implicitly by the sync flow; durable queue operations are
+    // covered by the sync state serialization tests.
 }

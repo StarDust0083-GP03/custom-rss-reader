@@ -1,6 +1,7 @@
 use crate::error::{AppError, Result};
 use reqwest::Client;
 use scraper::{Html, Selector};
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -12,6 +13,9 @@ use tokio::time::sleep;
 /// `brotli` features are enabled in `Cargo.toml`).
 pub struct FeedFetcher {
     client: Client,
+    /// Separate client for article pages so redirects cannot turn a public
+    /// feed link into a request to localhost or a private network.
+    website_client: Client,
 }
 
 impl Default for FeedFetcher {
@@ -23,18 +27,10 @@ impl Default for FeedFetcher {
 impl FeedFetcher {
     /// Create a new fetcher with sensible defaults.
     pub fn new() -> Result<Self> {
-        let client = Client::builder()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-            .timeout(Duration::from_secs(60))
-            .connect_timeout(Duration::from_secs(30))
-            .pool_idle_timeout(Duration::from_secs(90))
-            .tcp_keepalive(Duration::from_secs(60))
-            .http2_keep_alive_interval(Duration::from_secs(30))
-            .http2_keep_alive_timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {}", e)))?;
-
-        Ok(Self { client })
+        Ok(Self {
+            client: build_client(false)?,
+            website_client: build_client(true)?,
+        })
     }
 
     /// Fetch and decompress a feed (RSS/Atom) from a URL.
@@ -62,8 +58,9 @@ impl FeedFetcher {
 
     /// Fetch website HTML content and extract the main article.
     pub async fn fetch_website_content(&self, url: &str) -> Result<String> {
+        let url = validate_website_url(url)?;
         let response = self
-            .client
+            .website_client
             .get(url)
             .header("Accept", "text/html")
             .send()
@@ -235,6 +232,90 @@ impl FeedFetcher {
     }
 }
 
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+fn build_client(website_only: bool) -> Result<Client> {
+    let mut builder = Client::builder()
+        .user_agent(USER_AGENT)
+        .timeout(Duration::from_secs(60))
+        .connect_timeout(Duration::from_secs(30))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(60))
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .http2_keep_alive_timeout(Duration::from_secs(10));
+
+    if website_only {
+        builder = builder.redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if is_safe_website_url(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }));
+    }
+
+    builder
+        .build()
+        .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {}", e)))
+}
+
+fn validate_website_url(raw: &str) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(raw.trim()).map_err(|_| {
+        AppError::Validation("Website URL must be a valid public http(s) URL".into())
+    })?;
+    if !is_safe_website_url(&url) {
+        return Err(AppError::Validation(
+            "Website URL must be a valid public http(s) URL".into(),
+        ));
+    }
+    Ok(url)
+}
+
+fn is_safe_website_url(url: &reqwest::Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host
+        .trim_end_matches('.')
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    if host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host == "metadata.google.internal"
+    {
+        return false;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(ip) => !is_non_public_ip(ip),
+        Err(_) => true,
+    }
+}
+
+fn is_non_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip == Ipv4Addr::BROADCAST
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+        }
+    }
+}
+
 /// Rewrite RSSHub URLs to use the preferred mirror.
 fn rewrite_rsshub_url(url: &str) -> String {
     if url.contains("rsshub.app") {
@@ -343,5 +424,27 @@ mod tests {
         "#;
         let result = FeedFetcher::extract_main_content(html);
         assert!(result.is_err()); // content < 200 chars
+    }
+
+    #[test]
+    fn test_website_url_blocks_local_and_private_destinations() {
+        for raw in [
+            "http://localhost/article",
+            "http://127.0.0.1/article",
+            "http://10.0.0.5/article",
+            "http://[::1]/article",
+            "http://169.254.169.254/latest/meta-data",
+        ] {
+            let url = reqwest::Url::parse(raw).unwrap();
+            assert!(!is_safe_website_url(&url), "should block {raw}");
+        }
+    }
+
+    #[test]
+    fn test_website_url_allows_public_http_and_https() {
+        for raw in ["https://example.com/article", "http://198.51.100.10/article"] {
+            let url = reqwest::Url::parse(raw).unwrap();
+            assert!(is_safe_website_url(&url), "should allow {raw}");
+        }
     }
 }

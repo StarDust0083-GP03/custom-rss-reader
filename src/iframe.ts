@@ -21,6 +21,52 @@ import { configureMarked, renderMarkdown } from "./markdown";
 configureMarked();
 
 const IFRAME_STYLE_ID = "rss-reader-iframe-style";
+
+/** Return a normalized URL only for network-safe article pages. */
+export function safeHttpUrl(raw: string): string | null {
+  try {
+    const parsed = new URL(raw.trim());
+    if (
+      !((parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname) ||
+      isPrivateOrLocalHost(parsed.hostname)
+    ) {
+      return null;
+    }
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
+function isPrivateOrLocalHost(rawHost: string): boolean {
+  const host = rawHost.replace(/^\[|\]$/g, "").toLowerCase().replace(/\.$/, "");
+  if (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host === "metadata.google.internal"
+  ) {
+    return true;
+  }
+
+  const octets = host.split(".").map(Number);
+  if (octets.length === 4 && octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)) {
+    const [first, second] = octets;
+    return (
+      first === 0 ||
+      first === 10 ||
+      first === 127 ||
+      (first === 169 && second === 254) ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168) ||
+      first >= 224
+    );
+  }
+
+  // IPv6 loopback, link-local, unique-local and multicast ranges.
+  return host === "::1" || /^(fc|fd|fe8|fe9|fea|feb)/i.test(host) || host.startsWith("ff");
+}
+
 function ensureIframeCss(): void {
   if (document.getElementById(IFRAME_STYLE_ID)) return;
   const style = document.createElement("style");
@@ -91,7 +137,14 @@ export class IframeManager {
     if (!container.isConnected) return;
 
     if (url) {
-      this.renderDirectUrl(request, url, gen);
+      const safeUrl = safeHttpUrl(url);
+      if (!safeUrl) {
+        const message = "Refused to load a non-http(s) article URL";
+        if (loadingEl?.isConnected) loadingEl.textContent = message;
+        onError?.(message);
+        return;
+      }
+      this.renderDirectUrl(request, safeUrl, gen);
       return;
     }
 

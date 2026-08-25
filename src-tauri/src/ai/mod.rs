@@ -24,6 +24,11 @@ impl AiConfig {
         if self.api_key.is_empty() {
             return Err(AppError::Validation("API key cannot be empty".into()));
         }
+        if self.api_key.contains("****") {
+            return Err(AppError::Validation(
+                "API key is masked; enter the real key again".into(),
+            ));
+        }
         if self.base_url.is_empty() {
             return Err(AppError::Validation("Base URL cannot be empty".into()));
         }

@@ -93,8 +93,8 @@ Useful scripts:
 
 ```bash
 npm run typecheck     # tsc --noEmit over the strict TS config
-npm test              # Frontend regression tests
-npm run verify        # Frontend build plus Rust tests
+npm test              # frontend contract/security tests
+npm run verify        # frontend build + tests + Clippy + Rust tests
 cargo test --lib      # Rust unit tests (in src-tauri/)
 ```
 
@@ -163,7 +163,7 @@ Configure an OpenAI-compatible API (default: DeepSeek) via the **AI** button in 
 - **Tags** — classify the selected article into tags/category
 - **Auto-classify** — new items are tagged automatically when the subscription has AI enabled; requests are batched (20 titles per LLM call) and globally rate-limited (serialized, ≥1.2s spacing) to avoid API 429s
 
-Configuration is stored in `~/.rss-reader/ai_config.json` (API key included — protect the file).
+Configuration is stored in `~/.rss-reader/ai_config.json`. On Unix, the directory is protected as `0700` and the API-key file is written atomically as `0600`; the file still contains a secret and should not be copied or committed.
 
 ## Semantic Search with ChromaDB (optional)
 
@@ -174,14 +174,14 @@ Semantic search ("search by meaning" and "Similar articles") requires a running 
 Docker (recommended):
 
 ```bash
-docker run -d --name chromadb -p 8000:8000 chromadb/chroma
+docker run -d --name chromadb -p 127.0.0.1:8000:8000 chromadb/chroma:1.5.9
 ```
 
-Or via pip:
+Or via pip (the helper script pins the same version):
 
 ```bash
-pip install chromadb
-chroma run --host 0.0.0.0 --port 8000
+pip install chromadb==1.5.9
+chroma run --host 127.0.0.1 --port 8000
 ```
 
 ### 2. Enable in the app
@@ -194,7 +194,7 @@ The app maintains the index automatically — no manual maintenance:
 
 - **At fetch time** — every new item is indexed immediately (subscription refresh).
 - **Incremental sync** — on every app start and after each bulk refresh, a watermark-based sync (`~/.rss-reader/chroma_sync.json`) indexes anything newer than the last synced id. If ChromaDB was down during a fetch, those items are queued and picked up on the next sync — nothing is lost silently.
-- **Deletions** — removing a subscription deletes its vectors; failed deletions are queued and retried by the next sync.
+- **Deletions** — removing a subscription writes durable tombstones before the SQLite cascade; vectors are deleted immediately when possible and retried by the next sync when Chroma is unavailable.
 - **Memory-safe** — sync pages through a lightweight projection (keyset pagination, text columns truncated to 2000 chars), so index rebuilds stay bounded regardless of library size.
 - **Re-Index All Items** — the button in the ChromaDB settings dialog performs a full rebuild via the same mechanism (idempotent upserts).
 

@@ -11,6 +11,8 @@
 #   ./scripts/setup-chroma.sh --status   # check if it's running
 #
 # Env overrides:
+#   CHROMA_HOST   address to listen on             (default 127.0.0.1)
+#   CHROMA_VERSION server package version          (default 1.5.9)
 #   CHROMA_PORT   port to listen on                (default 8000)
 #   CHROMA_DATA   data directory                   (default ~/chroma-data)
 #   CHROMA_VENV   python venv location             (default ~/chroma-venv)
@@ -18,9 +20,10 @@
 set -e
 
 PORT="${CHROMA_PORT:-8000}"
+CHROMA_VERSION="${CHROMA_VERSION:-1.5.9}"
 DATA_DIR="${CHROMA_DATA:-$HOME/chroma-data}"
 VENV_DIR="${CHROMA_VENV:-$HOME/chroma-venv}"
-HOST="0.0.0.0"
+HOST="${CHROMA_HOST:-127.0.0.1}"
 PID_FILE="$HOME/.chroma-server.pid"
 LOG_FILE="$HOME/.chroma-server.log"
 
@@ -116,12 +119,16 @@ echo "Venv ready at ${VENV_DIR}."
 # ~120 MB, downloaded into ~/.rss-reader/models on first semantic use) —
 # ChromaDB 1.x has no server-side embedding function anymore, so nothing
 # model-related is downloaded here.
-if ! "$VENV_DIR/bin/python" -c "import chromadb" >/dev/null 2>&1; then
-    echo "Installing chromadb..."
+chroma_version_ok() {
+    "$VENV_DIR/bin/python" -c "import chromadb; raise SystemExit(0 if chromadb.__version__ == '${CHROMA_VERSION}' else 1)" >/dev/null 2>&1
+}
+
+if ! chroma_version_ok; then
+    echo "Installing chromadb==${CHROMA_VERSION}..."
     "$VENV_DIR/bin/pip" install --upgrade pip
-    "$VENV_DIR/bin/pip" install chromadb
+    "$VENV_DIR/bin/pip" install "chromadb==${CHROMA_VERSION}"
 else
-    echo "chromadb already installed."
+    echo "chromadb==${CHROMA_VERSION} already installed."
 fi
 
 # --- 4. Start the server ---------------------------------------------------

@@ -132,16 +132,16 @@ export const items = {
       { subscriptionId: subscriptionId ?? null, unreadOnly, limit: 50, offset: 0 },
       "items.today",
     ),
-  favorites: () =>
+  favorites: (subscriptionId?: number | null) =>
     call<FeedItemSummary[]>(
       "get_favorites",
-      { limit: 50, offset: 0 },
+      { subscriptionId: subscriptionId ?? null, limit: 50, offset: 0 },
       "items.favorites",
     ),
-  readLater: () =>
+  readLater: (subscriptionId?: number | null) =>
     call<FeedItemSummary[]>(
       "get_read_later",
-      { limit: 50, offset: 0 },
+      { subscriptionId: subscriptionId ?? null, limit: 50, offset: 0 },
       "items.readLater",
     ),
   tags: (subscriptionId?: number | null) =>
@@ -153,7 +153,7 @@ export const items = {
   toggleFavorite: (id: number) => call<boolean>("toggle_favorite", { itemId: id }, "items.toggleFavorite"),
   toggleReadLater: (id: number) =>
     call<boolean>("toggle_read_later", { itemId: id }, "items.toggleReadLater"),
-  saveTags: (id: number, tags: string, category: string) =>
+  saveTags: (id: number, tags: string[], category: string | null) =>
     call<FeedItem>(
       "save_item_tags",
       { itemId: id, tags, category },
@@ -214,7 +214,8 @@ export const ai = {
   getConfig: () => call<AiConfigResponse>("get_ai_config", undefined, "ai.getConfig"),
   getActivity: () => call<AiActivitySnapshot>("get_ai_activity", undefined, "ai.getActivity"),
   setConfig: (config: {
-    apiKey: string;
+    /** Omit/blank to keep the existing key shown as a mask in the UI. */
+    apiKey?: string;
     baseUrl?: string;
     model?: string;
     skipTest?: boolean;
@@ -223,7 +224,7 @@ export const ai = {
     call<void>(
       "set_ai_config",
       {
-        apiKey: config.apiKey,
+        apiKey: config.apiKey ?? null,
         baseUrl: config.baseUrl ?? null,
         model: config.model ?? null,
         skipTest: config.skipTest ?? false,

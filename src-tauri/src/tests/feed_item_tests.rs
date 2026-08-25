@@ -85,6 +85,31 @@ async fn test_create_feed_item_with_content_md() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn test_search_includes_cached_markdown() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+
+    env.feed_service
+        .create_item(NewFeedItem {
+            subscription_id: sub_id,
+            title: "Search title".into(),
+            content: Some("RSS teaser".into()),
+            content_md: Some("Full body contains markdown-only phrase".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let results = env
+        .feed_repo
+        .search("markdown-only phrase", 50)
+        .await
+        .expect("search should include content_md");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].title, "Search title");
+}
+
+#[tokio::test]
 async fn test_find_feed_item_by_id() {
     let env = TestEnv::new().await;
     let sub_id = seed_sub(&env).await;
@@ -121,6 +146,36 @@ async fn test_find_feed_items_by_subscription() {
     let items = env.feed_repo.find_all(Some(sub_id), 50, 0).await.unwrap();
     assert_eq!(items.len(), 2);
     assert!(items.iter().all(|i| i.subscription_id == sub_id));
+}
+
+#[tokio::test]
+async fn test_favorites_and_read_later_can_filter_by_subscription() {
+    let env = TestEnv::new().await;
+    let sub_a = seed_sub(&env).await;
+    let sub_b = env
+        .service
+        .add_subscription(NewSubscription {
+            url: "https://example.com/other.xml".into(),
+            title: Some("Other Sub".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .id;
+    let favorite_a = create_item(&env, sub_a, "Favorite A").await;
+    let favorite_b = create_item(&env, sub_b, "Favorite B").await;
+    let later_a = create_item(&env, sub_a, "Later A").await;
+    let later_b = create_item(&env, sub_b, "Later B").await;
+
+    env.feed_repo.toggle_favorite(favorite_a).await.unwrap();
+    env.feed_repo.toggle_favorite(favorite_b).await.unwrap();
+    env.feed_repo.toggle_read_later(later_a).await.unwrap();
+    env.feed_repo.toggle_read_later(later_b).await.unwrap();
+
+    let favorites = env.feed_repo.get_favorites(Some(sub_a), 50, 0).await.unwrap();
+    assert_eq!(favorites.iter().map(|item| item.id).collect::<Vec<_>>(), vec![favorite_a]);
+    let read_later = env.feed_repo.get_read_later(Some(sub_a), 50, 0).await.unwrap();
+    assert_eq!(read_later.iter().map(|item| item.id).collect::<Vec<_>>(), vec![later_a]);
 }
 
 // ---------------------------------------------------------------------------

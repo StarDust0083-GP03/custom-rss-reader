@@ -1765,4 +1765,17 @@ mod tests {
         };
         assert!(config.is_valid().is_err());
     }
+
+    #[test]
+    fn test_ai_config_masked_key_fails() {
+        let config = AiConfig {
+            api_key: "sk-****1234".into(),
+            base_url: "https://api.example.com".into(),
+            model: "gpt-4".into(),
+            max_tokens: None,
+            temperature: None,
+            max_chars_per_segment: None,
+        };
+        assert!(config.is_valid().is_err());
+    }
 }

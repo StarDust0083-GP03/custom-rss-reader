@@ -22,10 +22,10 @@ pub async fn open_url_in_browser(app_handle: tauri::AppHandle, url: String) -> R
 }
 
 fn is_safe_external_url(url: &str) -> bool {
-    // Case-insensitive (JS can hand us `HTTPS://...`) and tolerant of
-    // surrounding whitespace. Still only ever http(s).
-    let lower = url.trim().to_ascii_lowercase();
-    lower.starts_with("http://") || lower.starts_with("https://")
+    let Ok(parsed) = reqwest::Url::parse(url.trim()) else {
+        return false;
+    };
+    matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some()
 }
 
 #[cfg(test)]
@@ -36,6 +36,7 @@ mod tests {
     fn test_safe_url() {
         assert!(is_safe_external_url("https://example.com"));
         assert!(is_safe_external_url("http://example.com"));
+        assert!(is_safe_external_url(" HTTPS://EXAMPLE.COM/path "));
     }
 
     #[test]
@@ -45,5 +46,7 @@ mod tests {
         assert!(!is_safe_external_url("data:text/html,xxx"));
         assert!(!is_safe_external_url(""));
         assert!(!is_safe_external_url("JAVASCRIPT:alert(1)"));
+        assert!(!is_safe_external_url("http://?"));
+        assert!(!is_safe_external_url("https://#fragment"));
     }
 }

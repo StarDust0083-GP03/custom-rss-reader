@@ -276,6 +276,44 @@ async fn test_update_subscription_not_found() {
 }
 
 #[tokio::test]
+async fn test_add_subscription_rejects_malformed_http_url() {
+    let env = TestEnv::new().await;
+
+    for url in ["http://?", "https://#fragment", "http://"] {
+        let result = env.service.add_subscription(new_sub(url)).await;
+        assert!(
+            matches!(result, Err(AppError::Validation(_))),
+            "expected validation error for {url:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_update_subscription_rejects_malformed_optional_http_url() {
+    let env = TestEnv::new().await;
+    let sub = env
+        .service
+        .add_subscription(new_sub("https://example.com/rss"))
+        .await
+        .unwrap();
+
+    let result = env
+        .service
+        .update_subscription(
+            sub.id,
+            UpdateSubscription {
+                title: None,
+                website_url: Some(Some("http://?".into())),
+                use_website: None,
+                rsshub_url: None,
+            },
+        )
+        .await;
+
+    assert!(matches!(result, Err(AppError::Validation(msg)) if msg.contains("website_url")));
+}
+
+#[tokio::test]
 async fn test_update_subscription_invalid_website_url_fails() {
     let env = TestEnv::new().await;
 

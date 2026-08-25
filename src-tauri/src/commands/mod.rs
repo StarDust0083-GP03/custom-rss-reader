@@ -23,7 +23,7 @@ pub use debug::*;
 use std::sync::Arc;
 
 use crate::ai::activity::AiActivityStore;
-use crate::ai::service::AiService;
+use crate::ai::service::SharedAiService;
 use crate::feed::FeedFetcher;
 use crate::repositories::FeedItemRepository;
 use crate::{FeedService, SubscriptionService};
@@ -32,13 +32,13 @@ use crate::{FeedService, SubscriptionService};
 ///
 /// Holds all service instances and shared infrastructure.
 /// Services are the canonical way to access business logic;
-/// repositories are exposed for command convenience.
+/// repositories and the pool are exposed for command convenience.
 pub struct AppState {
     pub subscription_service: SubscriptionService,
     pub feed_service: FeedService,
     pub feed_repo: Arc<dyn FeedItemRepository>,
     pub fetcher: Arc<FeedFetcher>,
-    pub ai_service: Option<Arc<dyn AiService>>,
+    pub ai_service: SharedAiService,
     pub ai_activity: AiActivityStore,
     /// Lazily-connected ChromaDB service (auto-reconnects).
     pub chroma_service: crate::chroma::ChromaHolder,

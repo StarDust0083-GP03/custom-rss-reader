@@ -23,6 +23,8 @@ use tauri::Manager;
 
 use database::init_database;
 use feed::FeedFetcher;
+use ai::activity::AiActivityStore;
+use ai::service::SharedAiService;
 use repositories::feed_item_repo::SqliteFeedItemRepository;
 use repositories::subscription_repo::SqliteSubscriptionRepository;
 use services::{FeedService, SubscriptionService};
@@ -44,7 +46,7 @@ pub fn run() {
             });
 
             // Wire up services with repository pattern
-            let ai_activity = crate::ai::activity::AiActivityStore::new();
+            let ai_activity = AiActivityStore::new();
             ai_activity.attach_app(app.handle().clone());
             let feed_repo = Arc::new(SqliteFeedItemRepository::new(pool.clone()));
             let sub_repo = Arc::new(SqliteSubscriptionRepository::new(pool.clone()));
@@ -59,9 +61,13 @@ pub fn run() {
             // sync) and auto-reconnects — the app must not stay broken just
             // because the server was down when it launched.
             let chroma_service = crate::chroma::ChromaHolder::default();
+            let ai_service: SharedAiService = Arc::new(tokio::sync::RwLock::new(
+                commands::ai_commands::load_configured_ai_service(),
+            ));
             let feed_service = FeedService::new(feed_repo.clone())
                 .with_subscription_repo(sub_repo.clone())
                 .with_fetcher(fetcher.clone())
+                .with_ai_service(ai_service.clone())
                 .with_chroma_service(chroma_service.clone())
                 .with_ai_activity(ai_activity.clone());
 
@@ -73,7 +79,7 @@ pub fn run() {
                 feed_service,
                 feed_repo,
                 fetcher,
-                ai_service: None,
+                ai_service,
                 ai_activity,
                 chroma_service,
             };

@@ -5,8 +5,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { FeedItem, AiClassificationResponse, Recommendation } from "../types";
-import { ai as aiApi } from "../api";
+import type { FeedItem, Recommendation } from "../types";
+import { ai as aiApi, items as itemsApi } from "../api";
 import { state, type TranslationState } from "../state";
 import { renderItems, renderItemDetail } from "../ui/render";
 import { markAsRead, selectItem } from "./actions";
@@ -368,18 +368,15 @@ export async function classifyItem(item: FeedItem) {
     const contentSnippet = item.content ? item.content.slice(0, 500) : null;
 
     toastSuccess("Classifying...");
-    const result = await invoke<AiClassificationResponse>("classify_item", {
+    const result = await aiApi.classify({
       title: item.title,
       description: item.description,
       contentSnippet,
     });
 
-    // Save tags to database
-    await invoke("save_item_tags", {
-      itemId: item.id,
-      tags: result.tags,
-      category: result.category,
-    });
+    // Save through the typed API boundary. The adapter serializes the
+    // structured tags to the Rust command's JSON contract.
+    await itemsApi.saveTags(item.id, result.tags, result.category);
 
     // Update local state
     item.tags = JSON.stringify(result.tags);
@@ -405,7 +402,13 @@ export async function openAiSettingsModal() {
   // Load current AI config and fill the form
   try {
     const config = await invoke<{ api_key: string; base_url: string; model: string; max_chars_per_segment: number | null }>("get_ai_config");
-    (document.getElementById("ai-api-key") as HTMLInputElement).value = config.api_key || "";
+    // The backend returns only a mask. Never put that mask into the editable
+    // field: blank means "keep the existing key" on save.
+    const apiKeyInput = document.getElementById("ai-api-key") as HTMLInputElement;
+    apiKeyInput.value = "";
+    apiKeyInput.placeholder = config.api_key
+      ? "Leave blank to keep the saved API key"
+      : "Enter API key";
     (document.getElementById("ai-base-url") as HTMLInputElement).value = config.base_url || "";
     (document.getElementById("ai-model") as HTMLInputElement).value = config.model || "";
     (document.getElementById("ai-max-chars") as HTMLInputElement).value = config.max_chars_per_segment?.toString() || "3000";
