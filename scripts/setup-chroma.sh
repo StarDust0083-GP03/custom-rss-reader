@@ -14,6 +14,9 @@
 #   CHROMA_HOST   address to listen on             (default 127.0.0.1)
 #   CHROMA_VERSION server package version          (default 1.5.9)
 #   CHROMA_PORT   port to listen on                (default 8000)
+#   CHROMA_COLLECTION collection to create          (default rss_articles)
+#   CHROMA_TENANT tenant override                   (default from server identity)
+#   CHROMA_DATABASE database override               (default_database, then default)
 #   CHROMA_DATA   data directory                   (default ~/chroma-data)
 #   CHROMA_VENV   python venv location             (default ~/chroma-venv)
 
@@ -21,6 +24,7 @@ set -e
 
 PORT="${CHROMA_PORT:-8000}"
 CHROMA_VERSION="${CHROMA_VERSION:-1.5.9}"
+COLLECTION="${CHROMA_COLLECTION:-rss_articles}"
 DATA_DIR="${CHROMA_DATA:-$HOME/chroma-data}"
 VENV_DIR="${CHROMA_VENV:-$HOME/chroma-venv}"
 HOST="${CHROMA_HOST:-127.0.0.1}"
@@ -67,9 +71,84 @@ echo "=================================="
 echo "ChromaDB setup — RSS Reader"
 echo "=================================="
 
+# Ensure the app's collection exists in the server's v2 database. The Rust
+# client does the same lazily, but creating it here makes a freshly initialized
+# server immediately inspectable and keeps Docker/manual server setups equal
+# to the local helper.
+url_encode() {
+    python3 - "$1" <<'PY'
+import sys
+from urllib.parse import quote
+print(quote(sys.argv[1], safe=""))
+PY
+}
+
+ensure_collection() {
+    local base_url="http://localhost:${PORT}"
+    local identity tenant payload tenant_path database_path database
+
+    identity=$(curl -fsS -m 5 "${base_url}/api/v2/auth/identity") || return 1
+    if [ -n "${CHROMA_TENANT:-}" ]; then
+        tenant="$CHROMA_TENANT"
+    else
+        tenant=$(printf '%s' "$identity" | python3 -c '
+import json
+import sys
+info = json.load(sys.stdin)
+tenant = info.get("tenant") or "default_tenant"
+print("default_tenant" if tenant == "*" else tenant)
+') || return 1
+    fi
+
+    payload=$(python3 - "$COLLECTION" <<'PY'
+import json
+import sys
+print(json.dumps({"name": sys.argv[1], "metadata": None, "get_or_create": True}))
+PY
+    ) || return 1
+    tenant_path=$(url_encode "$tenant") || return 1
+
+    local databases=("${CHROMA_DATABASE:-default_database}")
+    if [ -z "${CHROMA_DATABASE:-}" ]; then
+        databases+=("default")
+    fi
+
+    for database in "${databases[@]}"; do
+        database_path=$(url_encode "$database") || return 1
+        if curl -fsS -m 10 -X POST \
+            -H "Content-Type: application/json" \
+            --data "$payload" \
+            "${base_url}/api/v2/tenants/${tenant_path}/databases/${database_path}/collections" \
+            >/dev/null 2>&1; then
+            green "Collection '${COLLECTION}' is ready (database: ${database})."
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+ensure_collection_with_retry() {
+    for _ in $(seq 1 10); do
+        if ensure_collection; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 # --- 0. Already running? ---------------------------------------------------
 if is_running; then
-    green "ChromaDB is already running on port ${PORT}. Nothing to do."
+    green "ChromaDB is already running on port ${PORT}."
+    if ! command -v python3 >/dev/null 2>&1; then
+        red "python3 is required to initialize the ChromaDB collection."
+        exit 1
+    fi
+    if ! ensure_collection_with_retry; then
+        red "Failed to initialize collection '${COLLECTION}'."
+        exit 1
+    fi
     exit 0
 fi
 
@@ -161,12 +240,18 @@ if ! is_running; then
     exit 1
 fi
 
+if ! ensure_collection_with_retry; then
+    red "ChromaDB is running, but collection '${COLLECTION}' could not be initialized."
+    red "Check the server log and CHROMA_TENANT/CHROMA_DATABASE overrides."
+    exit 1
+fi
+
 cat <<EOF
 
 --------------------------------------------------------------
 Next steps in the app:
   1. Click "Semantic DB" in the items-panel header
-  2. Host: http://localhost   Port: ${PORT}   Collection: rss_articles
+  2. Host: http://localhost   Port: ${PORT}   Collection: ${COLLECTION}
   3. Check "Enable ChromaDB" → Save → Restart the app
   4. On restart, ALL downloaded articles are indexed automatically
      (watermark sync); "Re-Index All Items" rebuilds from scratch.

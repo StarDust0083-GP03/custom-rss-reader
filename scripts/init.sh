@@ -17,6 +17,10 @@
 #
 # Env overrides (passed through to setup-chroma.sh / the Rust backend):
 #   CHROMA_PORT        ChromaDB port           (default 8000)
+#   CHROMA_VERSION     server package version  (default 1.5.9)
+#   CHROMA_COLLECTION  collection to create    (default rss_articles)
+#   CHROMA_TENANT      tenant override         (default from server identity)
+#   CHROMA_DATABASE    database override       (default_database, then default)
 #   CHROMA_VENV        ChromaDB venv location  (default ~/chroma-venv)
 #   CHROMA_DATA        ChromaDB data dir       (default ~/chroma-data)
 #   CHROMA_MODEL_DIR   embedding model dir     (default ~/.rss-reader/models)
@@ -303,6 +307,7 @@ echo "  npm run dev           - Start frontend dev server"
 echo ""
 echo "Semantic search:"
 echo "  ChromaDB server:      http://localhost:${CHROMA_PORT:-8000}"
+echo "  ChromaDB collection:  ${CHROMA_COLLECTION:-rss_articles}"
 echo "  Model location:       ${CHROMA_MODEL_DIR:-$HOME/.rss-reader/models}"
 echo "  Stop/status ChromaDB: bash scripts/setup-chroma.sh --stop | --status"
 echo ""

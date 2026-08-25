@@ -16,7 +16,7 @@ This script will:
 - Install npm dependencies
 - Build the frontend (`npm run build`)
 - Validate the Rust backend with `cargo check` (proves `npm run tauri dev/build` will compile)
-- Set up and start the ChromaDB server (venv + `pip install chromadb` + server on port 8000)
+- Set up and start the pinned ChromaDB server and idempotently create the `rss_articles` collection (server on port 8000)
 - Pre-download the multilingual embedding model (~/.rss-reader/models) with mirror fallback
 
 Options:
@@ -30,6 +30,10 @@ Environment overrides (also understood by the app and `setup-chroma.sh`):
 | Variable | Default | Purpose |
 |---|---|---|
 | `CHROMA_PORT` | `8000` | ChromaDB port |
+| `CHROMA_VERSION` | `1.5.9` | ChromaDB server package version |
+| `CHROMA_COLLECTION` | `rss_articles` | Collection to create |
+| `CHROMA_TENANT` | server identity | Optional Chroma tenant override |
+| `CHROMA_DATABASE` | `default_database`, then `default` | Optional database override |
 | `CHROMA_VENV` | `~/chroma-venv` | ChromaDB Python venv location |
 | `CHROMA_DATA` | `~/chroma-data` | ChromaDB data directory |
 | `CHROMA_MODEL_DIR` | `~/.rss-reader/models` | Embedding model directory |
@@ -49,7 +53,7 @@ This script will:
 - Install npm dependencies
 - Build the frontend (`npm run build`)
 - Validate the Rust backend with `cargo check`
-- Set up and start the ChromaDB server (venv + `pip install chromadb` + server on port 8000)
+- Set up and start the ChromaDB server and idempotently create the configured collection
 - Pre-download the multilingual embedding model (~\.rss-reader\models)
 
 Options:
@@ -57,9 +61,9 @@ Options:
 .\scripts\init.ps1 -Build   # also run the full production build (npm run tauri build)
 ```
 
-The same `CHROMA_PORT`, `CHROMA_VENV`, `CHROMA_DATA`, `CHROMA_MODEL_DIR`,
-`HF_ENDPOINT`, `SKIP_CARGO_CHECK`, `SKIP_CHROMA`, and `SKIP_MODEL` environment
-overrides apply.
+The same `CHROMA_PORT`, `CHROMA_VERSION`, `CHROMA_COLLECTION`, `CHROMA_TENANT`,
+`CHROMA_DATABASE`, `CHROMA_VENV`, `CHROMA_DATA`, `CHROMA_MODEL_DIR`, `HF_ENDPOINT`,
+`SKIP_CARGO_CHECK`, `SKIP_CHROMA`, and `SKIP_MODEL` environment overrides apply.
 
 ## What the initialization does, in detail
 
@@ -71,10 +75,11 @@ overrides apply.
 3. **cargo check** — compiles the Rust side of `src-tauri/` (fast "does it
    compile?" check) so that `npm run tauri dev` / `npm run tauri build` won't
    fail mid-way through on a missing dependency.
-4. **ChromaDB** — creates the Python venv, installs `chromadb`, and starts the
-   server on port 8000 (`scripts/setup-chroma.sh` on Linux/macOS; equivalent
-   inline logic on Windows). Idempotent: a running server is detected and left
-   alone. The server is not managed by npm/tauri; start/stop it with
+4. **ChromaDB** — creates the Python venv, installs pinned `chromadb`, starts the
+   server on port 8000, and creates the `rss_articles` collection through the
+   Chroma v2 API (`scripts/setup-chroma.sh` on Linux/macOS; equivalent inline
+   logic on Windows). Idempotent: a running server is detected, left alone,
+   and its collection is ensured. The server is not managed by npm/tauri; start/stop it with
    `bash scripts/setup-chroma.sh --stop | --status` (Linux/macOS) or kill the
    process whose PID is in `~/.chroma-server.pid` (Windows).
 5. **Embedding model** — pre-downloads the quantized ONNX

@@ -13,6 +13,10 @@
 #
 # Env overrides:
 #   CHROMA_PORT        ChromaDB port           (default 8000)
+#   CHROMA_VERSION     server package version  (default 1.5.9)
+#   CHROMA_COLLECTION  collection to create    (default rss_articles)
+#   CHROMA_TENANT      tenant override         (default from server identity)
+#   CHROMA_DATABASE    database override       (default_database, then default)
 #   CHROMA_VENV        ChromaDB venv location  (default ~\chroma-venv)
 #   CHROMA_DATA        ChromaDB data dir       (default ~\chroma-data)
 #   CHROMA_MODEL_DIR   embedding model dir     (default ~\.rss-reader\models)
@@ -224,6 +228,8 @@ if ($env:SKIP_CHROMA -eq "1") {
     $venvDir  = if ($env:CHROMA_VENV)      { $env:CHROMA_VENV }      else { "$HOME\chroma-venv" }
     $dataDir  = if ($env:CHROMA_DATA)      { $env:CHROMA_DATA }      else { "$HOME\chroma-data" }
     $port     = if ($env:CHROMA_PORT)      { $env:CHROMA_PORT }      else { 8000 }
+    $version  = if ($env:CHROMA_VERSION)   { $env:CHROMA_VERSION }   else { "1.5.9" }
+    $collection = if ($env:CHROMA_COLLECTION) { $env:CHROMA_COLLECTION } else { "rss_articles" }
     $python   = "$venvDir\Scripts\python.exe"
     $chromaExe = "$venvDir\Scripts\chroma.exe"
     $heartbeat = "http://localhost:${port}/api/v2/heartbeat"
@@ -240,12 +246,12 @@ if ($env:SKIP_CHROMA -eq "1") {
             if ($LASTEXITCODE -ne 0) { throw "Failed to create venv — is Python 3 on PATH?" }
         }
 
-        & $python -c "import chromadb" 2>$null
+        & $python -c "import chromadb, sys; sys.exit(0 if chromadb.__version__ == '$version' else 1)" 2>$null
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "Installing chromadb..." -ForegroundColor White
+            Write-Host "Installing chromadb==$version..." -ForegroundColor White
             & $python -m pip install --upgrade --quiet pip
-            & $python -m pip install --quiet chromadb
-            if ($LASTEXITCODE -ne 0) { throw "pip install chromadb failed" }
+            & $python -m pip install --quiet "chromadb==$version"
+            if ($LASTEXITCODE -ne 0) { throw "pip install chromadb==$version failed" }
         }
 
         if (Test-Path $chromaExe) {
@@ -275,6 +281,48 @@ if ($env:SKIP_CHROMA -eq "1") {
         } else {
             Write-Host "⚠️  chroma.exe not found after install — rerun this script." -ForegroundColor Yellow
         }
+    }
+
+    function Ensure-ChromaCollection {
+        param(
+            [int]$Port,
+            [string]$Collection
+        )
+
+        $baseUrl = "http://localhost:$Port"
+        try {
+            $identity = Invoke-RestMethod -Uri "$baseUrl/api/v2/auth/identity" -TimeoutSec 5
+        } catch {
+            return $false
+        }
+
+        $tenant = if ($env:CHROMA_TENANT) { $env:CHROMA_TENANT } else { $identity.tenant }
+        if (-not $tenant -or $tenant -eq "*") { $tenant = "default_tenant" }
+        $databases = if ($env:CHROMA_DATABASE) { @($env:CHROMA_DATABASE) } else { @("default_database", "default") }
+        $payload = @{
+            name = $Collection
+            metadata = $null
+            get_or_create = $true
+        } | ConvertTo-Json -Compress
+
+        foreach ($database in $databases) {
+            $tenantPath = [Uri]::EscapeDataString($tenant)
+            $databasePath = [Uri]::EscapeDataString($database)
+            $collectionUrl = "$baseUrl/api/v2/tenants/$tenantPath/databases/$databasePath/collections"
+            try {
+                Invoke-RestMethod -Method Post -Uri $collectionUrl `
+                    -ContentType "application/json" -Body $payload -TimeoutSec 10 | Out-Null
+                Write-Host "✅ ChromaDB collection '$Collection' is ready (database: $database)." -ForegroundColor Green
+                return $true
+            } catch {
+                # Chroma 1.x uses default_database; older v2 servers use default.
+            }
+        }
+        return $false
+    }
+
+    if (-not (Ensure-ChromaCollection -Port $port -Collection $collection)) {
+        throw "ChromaDB is running, but collection '$collection' could not be initialized. Check CHROMA_TENANT/CHROMA_DATABASE."
     }
 }
 
@@ -349,7 +397,9 @@ Write-Host "  npm run dev           - Start frontend dev server" -ForegroundColo
 Write-Host ""
 Write-Host "Semantic search:" -ForegroundColor White
 $finalPort = if ($env:CHROMA_PORT) { $env:CHROMA_PORT } else { 8000 }
+$finalCollection = if ($env:CHROMA_COLLECTION) { $env:CHROMA_COLLECTION } else { "rss_articles" }
 Write-Host "  ChromaDB server:      http://localhost:$finalPort" -ForegroundColor Cyan
+Write-Host "  ChromaDB collection:  $finalCollection" -ForegroundColor Cyan
 Write-Host "  Model location:       $modelBase" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "For more information, see README.md" -ForegroundColor White

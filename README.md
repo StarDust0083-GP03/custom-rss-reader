@@ -184,9 +184,19 @@ pip install chromadb==1.5.9
 chroma run --host 127.0.0.1 --port 8000
 ```
 
+Repository helper (also works against an already-running local server):
+
+```bash
+./scripts/setup-chroma.sh
+```
+
+The helper pins ChromaDB `1.5.9` and idempotently creates the `rss_articles`
+collection through the v2 API. Set `CHROMA_COLLECTION` when using a different
+collection name.
+
 ### 2. Enable in the app
 
-Open **Semantic DB** in the items-panel header, set host/port/collection (defaults `http://localhost:8000`, collection `rss_articles`), check **Enable ChromaDB**, save, and **restart the app**.
+Open **Semantic DB** in the items-panel header, set host/port/collection (defaults `http://localhost:8000`, collection `rss_articles`), check **Enable ChromaDB**, save, and **restart the app**. The configured collection must match the one initialized by the helper.
 
 ### 3. How indexing stays in sync
 
