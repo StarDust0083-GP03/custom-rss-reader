@@ -16,8 +16,15 @@ pub struct ChromaConfigResponse {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChromaInitializationResponse {
+    pub config: ChromaConfigResponse,
+    pub sync: crate::chroma::sync::SyncReport,
+}
+
 #[tauri::command]
 pub async fn set_chroma_config(
+    state: State<'_, AppState>,
     host: Option<String>,
     port: Option<u16>,
     collection_name: Option<String>,
@@ -25,19 +32,61 @@ pub async fn set_chroma_config(
 ) -> Result<()> {
     let mut config = ChromaConfig::load();
     if let Some(host) = host {
-        config.host = host;
+        config.host = host.trim().trim_end_matches('/').to_string();
     }
     if let Some(port) = port {
         config.port = port;
     }
     if let Some(collection_name) = collection_name {
-        config.collection_name = collection_name;
+        config.collection_name = collection_name.trim().to_string();
     }
     if let Some(enabled) = enabled {
         config.enabled = enabled;
     }
+    config.validate()?;
     config.save()?;
+    state.chroma_service.invalidate().await;
     Ok(())
+}
+
+/// Enable ChromaDB, ensure its collection exists, and index all existing
+/// articles in one user-facing operation. The configuration is saved only
+/// after the server and collection have been validated.
+#[tauri::command]
+pub async fn enable_chroma_and_index(
+    state: State<'_, AppState>,
+    host: String,
+    port: u16,
+    collection_name: String,
+) -> Result<ChromaInitializationResponse> {
+    let config = ChromaConfig {
+        host: host.trim().trim_end_matches('/').to_string(),
+        port,
+        collection_name: collection_name.trim().to_string(),
+        enabled: true,
+    };
+    config.validate()?;
+
+    // ChromaService::new performs the v2 identity lookup and get-or-create
+    // collection call. Do this before persisting enabled=true, so an
+    // unreachable server cannot leave the app looking successfully enabled.
+    let chroma = ChromaService::new(&config).await?;
+    config.save()?;
+    state.chroma_service.invalidate().await;
+
+    // Full resync is intentional for first-use: the persisted watermark may
+    // belong to a previous collection, while every existing article must be
+    // searchable after this one-click setup.
+    let sync = crate::chroma::sync::full_resync(&state.feed_repo, &chroma).await?;
+    Ok(ChromaInitializationResponse {
+        config: ChromaConfigResponse {
+            host: config.host,
+            port: config.port,
+            collection_name: config.collection_name,
+            enabled: config.enabled,
+        },
+        sync,
+    })
 }
 
 #[tauri::command]

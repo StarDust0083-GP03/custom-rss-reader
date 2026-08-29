@@ -16,6 +16,7 @@ import type {
   Recommendation,
   SemanticSearchResult,
   ChromaConfigResponse,
+  ChromaInitializationResponse,
   AiConfigResponse,
   AiActivitySnapshot,
   OpmlImportResult,
@@ -296,6 +297,12 @@ export const chroma = {
         enabled: config.enabled ?? null,
       },
       "chroma.setConfig",
+    ),
+  enableAndIndex: (config: { host: string; port: number; collectionName: string }) =>
+    call<ChromaInitializationResponse>(
+      "enable_chroma_and_index",
+      config,
+      "chroma.enableAndIndex",
     ),
   search: (query: string, limit = 10) =>
     call<SemanticSearchResult[]>("semantic_search", { query, limit }, "chroma.search"),

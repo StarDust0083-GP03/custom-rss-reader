@@ -4,7 +4,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import type { ChromaConfigResponse, SyncProgress } from "../types";
+import type { SyncProgress } from "../types";
 import { chroma as chromaApi } from "../api";
 import { state } from "../state";
 import { renderItems } from "../ui/render";
@@ -13,19 +13,28 @@ import { success as toastSuccess, error as toastError, info as toastInfo } from 
 import { searchItems } from "./actions";
 
 const S = state;
+let chromaEnableInProgress = false;
 
 export async function loadChromaConfig(): Promise<void> {
   try {
-    const config = await invoke<ChromaConfigResponse>("get_chroma_config");
+    const config = await chromaApi.getConfig();
     S.chromaEnabled = config.enabled;
     (document.getElementById("chroma-host") as HTMLInputElement).value = config.host;
     (document.getElementById("chroma-port") as HTMLInputElement).value = config.port.toString();
     (document.getElementById("chroma-collection") as HTMLInputElement).value = config.collection_name;
     (document.getElementById("chroma-enabled") as HTMLInputElement).checked = config.enabled;
     updateSearchModeBtn();
+    updateChromaSaveButton();
   } catch (error) {
     console.log("No ChromaDB config found, using defaults");
   }
+}
+
+export function updateChromaSaveButton() {
+  const button = document.getElementById("chroma-save-btn") as HTMLButtonElement | null;
+  const enabled = (document.getElementById("chroma-enabled") as HTMLInputElement | null)?.checked;
+  if (!button || enabled === undefined) return;
+  button.textContent = enabled && !S.chromaEnabled ? "Enable & Index" : "Save Configuration";
 }
 
 export function updateSearchModeBtn() {
@@ -66,7 +75,7 @@ export async function findSimilarArticles() {
 
 export async function saveChromaConfig(data: { host: string; port: number; collection_name: string; enabled: boolean }) {
   try {
-    await invoke("set_chroma_config", {
+    await chromaApi.setConfig({
       host: data.host,
       port: data.port,
       collectionName: data.collection_name,
@@ -74,11 +83,72 @@ export async function saveChromaConfig(data: { host: string; port: number; colle
     });
     S.chromaEnabled = data.enabled;
     updateSearchModeBtn();
-    toastSuccess("ChromaDB configuration saved. Restart the app for changes to take effect.");
+    updateChromaSaveButton();
+    toastSuccess("ChromaDB configuration saved.");
     return true;
   } catch (error) {
     toastError(`Failed to save ChromaDB configuration: ${error}`);
     return false;
+  }
+}
+
+function startChromaProgressPolling(label: string): ReturnType<typeof setInterval> {
+  return setInterval(async () => {
+    try {
+      const p = await invoke<SyncProgress>("chroma_sync_progress");
+      if (p.running) {
+        const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : 0;
+        setLoadingWithStatus(
+          "",
+          `${label} (${p.phase || "walk"})... ${p.done}/${p.total} items ${pct}%, ` +
+            `page ${p.pages}, ${p.elapsed_ms}ms`,
+        );
+      }
+    } catch {
+      // transient polling errors are harmless — keep trying
+    }
+  }, 400);
+}
+
+export async function enableAndIndexChroma(data: {
+  host: string;
+  port: number;
+  collection_name: string;
+}): Promise<boolean> {
+  if (chromaEnableInProgress) return false;
+  chromaEnableInProgress = true;
+  const saveButton = document.getElementById("chroma-save-btn") as HTMLButtonElement | null;
+  if (saveButton) saveButton.disabled = true;
+  setLoadingWithStatus("", "Connecting to ChromaDB and preparing semantic search...");
+  let poll: ReturnType<typeof setInterval> | undefined;
+  try {
+    poll = startChromaProgressPolling("Indexing");
+    const result = await chromaApi.enableAndIndex({
+      host: data.host,
+      port: data.port,
+      collectionName: data.collection_name,
+    });
+    S.chromaEnabled = true;
+    updateSearchModeBtn();
+    updateChromaSaveButton();
+    clearLoadingStatus(
+      true,
+      `Semantic search enabled: indexed ${result.sync.indexed} items in ${result.sync.duration_ms}ms`,
+    );
+    toastSuccess(`Semantic search enabled; indexed ${result.sync.indexed} items.`);
+    return true;
+  } catch (error) {
+    await loadChromaConfig();
+    clearLoadingStatus(false, "Semantic search setup failed");
+    toastError(`Could not enable semantic search: ${error}. Is ChromaDB running?`);
+    return false;
+  } finally {
+    if (poll !== undefined) clearInterval(poll);
+    chromaEnableInProgress = false;
+    if (saveButton) {
+      saveButton.disabled = false;
+      updateChromaSaveButton();
+    }
   }
 }
 
@@ -100,21 +170,7 @@ export async function reindexChroma() {
     toastSuccess("Re-indexing started...");
     // Poll live progress while the (potentially long) reindex runs, so the
     // status bar shows movement instead of sitting on "Re-indexing...".
-    poll = setInterval(async () => {
-      try {
-        const p = await invoke<SyncProgress>("chroma_sync_progress");
-        if (p.running) {
-          const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : 0;
-          setLoadingWithStatus(
-            "",
-            `Re-indexing (${p.phase || "walk"})... ${p.done}/${p.total} items ${pct}%, ` +
-              `page ${p.pages}, ${p.elapsed_ms}ms`,
-          );
-        }
-      } catch {
-        // transient polling errors are harmless — keep trying
-      }
-    }, 400);
+    poll = startChromaProgressPolling("Re-indexing");
     const result = await invoke<string>("reindex_chromadb");
     clearInterval(poll);
     poll = undefined;

@@ -82,6 +82,32 @@ impl Default for ChromaConfig {
 }
 
 impl ChromaConfig {
+    /// Validate configuration before it is persisted or used to connect.
+    pub fn validate(&self) -> Result<()> {
+        if self.host.trim().is_empty() {
+            return Err(AppError::Validation("ChromaDB host cannot be empty".into()));
+        }
+        if self.port == 0 {
+            return Err(AppError::Validation(
+                "ChromaDB port must be greater than zero".into(),
+            ));
+        }
+        if self.collection_name.trim().is_empty() {
+            return Err(AppError::Validation(
+                "ChromaDB collection name cannot be empty".into(),
+            ));
+        }
+        let url = reqwest::Url::parse(&self.url()).map_err(|_| {
+            AppError::Validation("ChromaDB host must be a valid http(s) URL".into())
+        })?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return Err(AppError::Validation(
+                "ChromaDB host must be a valid http(s) URL".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Path to the chroma config file.
     ///
     /// Returns an error if the user's home directory is unavailable — the
@@ -120,5 +146,45 @@ impl ChromaConfig {
     pub fn url(&self) -> String {
         let host = self.host.trim_end_matches('/');
         format!("{}:{}", host, self.port)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChromaConfig;
+
+    #[test]
+    fn valid_config_accepts_http_url() {
+        let config = ChromaConfig {
+            host: "http://localhost".into(),
+            port: 8000,
+            collection_name: "rss_articles".into(),
+            enabled: true,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn invalid_config_rejects_empty_fields_and_non_http_urls() {
+        for config in [
+            ChromaConfig {
+                host: "".into(),
+                ..ChromaConfig::default()
+            },
+            ChromaConfig {
+                port: 0,
+                ..ChromaConfig::default()
+            },
+            ChromaConfig {
+                collection_name: "".into(),
+                ..ChromaConfig::default()
+            },
+            ChromaConfig {
+                host: "ftp://localhost".into(),
+                ..ChromaConfig::default()
+            },
+        ] {
+            assert!(config.validate().is_err());
+        }
     }
 }

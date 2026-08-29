@@ -144,6 +144,7 @@ pub fn run() {
             get_ai_activity,
             // ChromaDB commands
             set_chroma_config,
+            enable_chroma_and_index,
             get_chroma_config,
             semantic_search,
             find_similar_items,

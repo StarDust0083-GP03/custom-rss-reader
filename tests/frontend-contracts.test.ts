@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
-import { items } from "../src/api";
+import { chroma, items } from "../src/api";
 import { safeHttpUrl } from "../src/iframe";
 
 afterEach(() => {
@@ -43,5 +43,37 @@ describe("frontend security and IPC contracts", () => {
       command: "get_favorites",
       args: { subscriptionId: 42, limit: 50, offset: 0 },
     });
+  });
+
+  it("uses the one-click Chroma initialization command contract", async () => {
+    let request: { command: string; args: Record<string, unknown> } | undefined;
+    mockIPC((command, args) => {
+      request = { command, args: args as Record<string, unknown> };
+      return {
+        config: {
+          host: "http://localhost",
+          port: 8000,
+          collection_name: "rss_articles",
+          enabled: true,
+        },
+        sync: { indexed: 3, deleted: 0, pages: 1, duration_ms: 42 },
+      };
+    });
+
+    const result = await chroma.enableAndIndex({
+      host: "http://localhost",
+      port: 8000,
+      collectionName: "rss_articles",
+    });
+
+    expect(request).toEqual({
+      command: "enable_chroma_and_index",
+      args: {
+        host: "http://localhost",
+        port: 8000,
+        collectionName: "rss_articles",
+      },
+    });
+    expect(result.sync.indexed).toBe(3);
   });
 });

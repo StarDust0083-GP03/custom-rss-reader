@@ -103,17 +103,16 @@ export interface ChromaConfigResponse {
   enabled: boolean;
 }
 
-export interface AiActivitySnapshot {
-  version: number;
-  task_id: number | null;
-  phase: "idle" | "waiting" | "running";
-  kind: string;
-  title: string | null;
-  current: number | null;
-  total: number | null;
-  candidate_count: number | null;
-  queue_length: number;
-  started_at_ms: number | null;
+export interface ChromaSyncReport {
+  indexed: number;
+  deleted: number;
+  pages: number;
+  duration_ms: number;
+}
+
+export interface ChromaInitializationResponse {
+  config: ChromaConfigResponse;
+  sync: ChromaSyncReport;
 }
 
 /** Live progress of an in-flight ChromaDB reindex/sync, polled by the UI. */
@@ -135,6 +134,19 @@ export interface MarkdownBackfillReport {
   hosts_skipped: number;
   more_pending: boolean;
   duration_ms: number;
+}
+
+export interface AiActivitySnapshot {
+  version: number;
+  task_id: number | null;
+  phase: "idle" | "waiting" | "running";
+  kind: string;
+  title: string | null;
+  current: number | null;
+  total: number | null;
+  candidate_count: number | null;
+  queue_length: number;
+  started_at_ms: number | null;
 }
 
 export interface AiConfigResponse {

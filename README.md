@@ -196,7 +196,7 @@ collection name.
 
 ### 2. Enable in the app
 
-Open **Semantic DB** in the items-panel header, set host/port/collection (defaults `http://localhost:8000`, collection `rss_articles`), check **Enable ChromaDB**, save, and **restart the app**. The configured collection must match the one initialized by the helper.
+Open **Semantic DB** in the items-panel header, set host/port/collection (defaults `http://localhost:8000`, collection `rss_articles`), check **Enable ChromaDB**, and click **Enable & Index**. The app verifies the server, ensures the collection exists, saves the configuration, and performs a full initial index — no restart is required. If ChromaDB is unavailable, the configuration remains disabled. The configured collection must match the one initialized by the helper.
 
 ### 3. How indexing stays in sync
 
@@ -206,7 +206,8 @@ The app maintains the index automatically — no manual maintenance:
 - **Incremental sync** — on every app start and after each bulk refresh, a watermark-based sync (`~/.rss-reader/chroma_sync.json`) indexes anything newer than the last synced id. If ChromaDB was down during a fetch, those items are queued and picked up on the next sync — nothing is lost silently.
 - **Deletions** — removing a subscription writes durable tombstones before the SQLite cascade; vectors are deleted immediately when possible and retried by the next sync when Chroma is unavailable.
 - **Memory-safe** — sync pages through a lightweight projection (keyset pagination, text columns truncated to 2000 chars), so index rebuilds stay bounded regardless of library size.
-- **Re-Index All Items** — the button in the ChromaDB settings dialog performs a full rebuild via the same mechanism (idempotent upserts).
+- **Enable & Index** — the first enable validates the server, ensures the collection, and performs a full rebuild via the same mechanism (idempotent upserts); live progress is shown in the status bar.
+- **Re-Index All Items** — the button in the ChromaDB settings dialog repeats that full rebuild when needed; configuration changes apply without restarting.
 
 ## Database Schema
 

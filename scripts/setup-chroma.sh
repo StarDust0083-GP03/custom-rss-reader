@@ -252,9 +252,10 @@ cat <<EOF
 Next steps in the app:
   1. Click "Semantic DB" in the items-panel header
   2. Host: http://localhost   Port: ${PORT}   Collection: ${COLLECTION}
-  3. Check "Enable ChromaDB" → Save → Restart the app
-  4. On restart, ALL downloaded articles are indexed automatically
-     (watermark sync); "Re-Index All Items" rebuilds from scratch.
+  3. Check "Enable ChromaDB" → click "Enable & Index"
+  4. The app verifies the server, creates the collection if needed,
+     and indexes all downloaded articles without a restart.
+     "Re-Index All Items" rebuilds from scratch.
 
 To stop:  ./scripts/setup-chroma.sh --stop
 To check: ./scripts/setup-chroma.sh --status

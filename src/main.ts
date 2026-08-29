@@ -42,6 +42,8 @@ import {
   loadChromaConfig,
   findSimilarArticles,
   saveChromaConfig,
+  enableAndIndexChroma,
+  updateChromaSaveButton,
   openChromaSettingsModal,
   closeChromaSettingsModal,
   reindexChroma,
@@ -186,9 +188,13 @@ async function init() {
     const port = parseInt((document.getElementById("chroma-port") as HTMLInputElement).value) || 8000;
     const collection_name = (document.getElementById("chroma-collection") as HTMLInputElement).value;
     const enabled = (document.getElementById("chroma-enabled") as HTMLInputElement).checked;
-    closeChromaSettingsModal();
-    await saveChromaConfig({ host, port, collection_name, enabled });
+    const data = { host, port, collection_name, enabled };
+    const saved = enabled && !S.chromaEnabled
+      ? await enableAndIndexChroma(data)
+      : await saveChromaConfig(data);
+    if (saved) closeChromaSettingsModal();
   });
+  document.getElementById("chroma-enabled")?.addEventListener("change", updateChromaSaveButton);
   document.getElementById("reindex-chroma-btn")?.addEventListener("click", reindexChroma);
   document.getElementById("chroma-health-btn")?.addEventListener("click", chromaHealthCheck);
   // Initialize search mode button
