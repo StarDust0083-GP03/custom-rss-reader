@@ -376,16 +376,23 @@ export async function classifyItem(item: FeedItem) {
 
     // Save through the typed API boundary. The adapter serializes the
     // structured tags to the Rust command's JSON contract.
-    await itemsApi.saveTags(item.id, result.tags, result.category);
+    const saved = await itemsApi.saveTags(item.id, result.tags, result.category);
 
-    // Update local state
-    item.tags = JSON.stringify(result.tags);
-    item.category = result.category || null;
+    // The backend normalizes, resolves aliases, removes blocked names, and
+    // caps article tags. Use its returned row as the local source of truth.
+    item.tags = saved.tags;
+    item.category = saved.category;
 
     // Re-render detail and list items to show updated tags
     renderItemDetail(item);
     renderItems(true); // Preserve scroll position
-    toastSuccess(`Classified: ${result.tags.join(", ")}`);
+    let savedTagNames: string[] = [];
+    try {
+      savedTagNames = saved.tags ? JSON.parse(saved.tags) as string[] : [];
+    } catch {
+      // The backend owns the tag JSON contract; keep the success message safe.
+    }
+    toastSuccess(`Classified: ${savedTagNames.join(", ") || "no subject tags"}`);
   } catch (error) {
     toastError(`Classification failed: ${error}`);
   }

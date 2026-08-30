@@ -130,6 +130,15 @@ pub fn run() {
             get_unread,
             get_today_items,
             save_item_tags,
+            // Tag management
+            get_tag_catalog,
+            get_blocked_tags,
+            create_tag,
+            rename_tag,
+            merge_tags,
+            delete_tag,
+            restore_tag,
+            cluster_tags,
             // Webview / browser
             open_url_in_browser,
             // AI commands

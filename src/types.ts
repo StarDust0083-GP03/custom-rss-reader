@@ -78,6 +78,16 @@ export interface AiClassificationResponse {
   category: string | null;
 }
 
+export interface TagCatalogEntry {
+  name: string;
+  usage_count: number;
+  aliases: string[];
+}
+
+export interface TagCluster {
+  members: TagCatalogEntry[];
+}
+
 /** One AI-recommended article (manual "Picks" feature). */
 export interface Recommendation {
   item_id: number;

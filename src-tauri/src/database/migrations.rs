@@ -1,6 +1,7 @@
 use sqlx::{Executor, SqliteConnection, SqlitePool};
 
 use crate::error::{AppError, Result};
+use crate::models::tag::{normalize_tag, MAX_TAGS_PER_ITEM};
 
 /// Run all pending database migrations.
 ///
@@ -26,6 +27,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         dedupe_feed_item_guids(&mut tx).await?;
     }
 
+    create_tag_tables(&mut tx).await?;
+    backfill_tag_catalog(&mut tx).await?;
     create_indexes(&mut tx).await?;
     tx.commit().await.map_err(AppError::Database)?;
 
@@ -82,6 +85,99 @@ async fn create_tables(conn: &mut SqliteConnection) -> Result<()> {
     )
     .await
     .map_err(AppError::Database)?;
+
+    Ok(())
+}
+
+async fn create_tag_tables(conn: &mut SqliteConnection) -> Result<()> {
+    conn.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS tag_catalog (
+            name TEXT PRIMARY KEY COLLATE NOCASE,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .await
+    .map_err(AppError::Database)?;
+
+    conn.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS tag_aliases (
+            alias TEXT PRIMARY KEY COLLATE NOCASE,
+            canonical_name TEXT NOT NULL COLLATE NOCASE,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .await
+    .map_err(AppError::Database)?;
+
+    conn.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS blocked_tags (
+            name TEXT PRIMARY KEY COLLATE NOCASE,
+            blocked_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .await
+    .map_err(AppError::Database)?;
+
+    Ok(())
+}
+
+/// Seed the catalog when upgrading a database that predates controlled tags.
+/// The catalog count guard keeps subsequent startups cheap.
+async fn backfill_tag_catalog(conn: &mut SqliteConnection) -> Result<()> {
+    let catalog_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tag_catalog")
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(AppError::Database)?;
+    if catalog_count > 0 {
+        return Ok(());
+    }
+
+    let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
+        "SELECT id, tags FROM feed_items WHERE tags IS NOT NULL AND json_valid(tags)",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(AppError::Database)?;
+
+    for (item_id, raw_tags) in rows {
+        let Some(raw_tags) = raw_tags else { continue };
+        let Ok(tags) = serde_json::from_str::<Vec<String>>(&raw_tags) else {
+            continue;
+        };
+        let mut normalized = Vec::new();
+        for raw in tags {
+            let Some(tag) = normalize_tag(&raw) else { continue };
+            if normalized.len() >= MAX_TAGS_PER_ITEM {
+                break;
+            }
+            if !normalized.contains(&tag) {
+                sqlx::query("INSERT OR IGNORE INTO tag_catalog (name) VALUES ($1)")
+                    .bind(&tag)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                normalized.push(tag);
+            }
+        }
+
+        let normalized_json = serde_json::to_string(&normalized)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize tags: {}", e)))?;
+        if normalized_json != raw_tags {
+            sqlx::query("UPDATE feed_items SET tags = $2 WHERE id = $1")
+                .bind(item_id)
+                .bind(normalized_json)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+        }
+    }
 
     Ok(())
 }
@@ -278,12 +374,18 @@ mod tests {
                 is_website_content BOOLEAN DEFAULT 0,
                 is_read BOOLEAN DEFAULT 0,
                 is_favorite BOOLEAN DEFAULT 0,
-                is_read_later BOOLEAN DEFAULT 0
+                is_read_later BOOLEAN DEFAULT 0,
+                tags TEXT
             )",
         )
         .execute(&pool)
         .await
         .expect("create legacy feed_items table");
+        sqlx::query("INSERT INTO feed_items (subscription_id, title, tags) VALUES (1, 'legacy', ?)")
+            .bind(r#"["Machine Learning","machine-learning","AI"]"#)
+            .execute(&pool)
+            .await
+            .expect("seed legacy tagged item");
 
         run_migrations(&pool)
             .await
@@ -311,5 +413,16 @@ mod tests {
         assert_eq!(content_md.as_deref(), Some("content_md"));
         assert_eq!(auto_classify.as_deref(), Some("auto_classify"));
         assert_eq!(index.as_deref(), Some("idx_feed_items_guid"));
+
+        let normalized_tags: (String,) = sqlx::query_as("SELECT tags FROM feed_items WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .expect("inspect migrated tags");
+        assert_eq!(normalized_tags.0, r#"["machine_learning","ai"]"#);
+        let catalog_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tag_catalog")
+            .fetch_one(&pool)
+            .await
+            .expect("inspect tag catalog");
+        assert_eq!(catalog_count.0, 2);
     }
 }

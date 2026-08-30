@@ -4,6 +4,7 @@ pub mod subscription_repo;
 use std::collections::HashSet;
 
 use async_trait::async_trait;
+use serde::Serialize;
 
 use crate::error::Result;
 use crate::models::{NewFeedItem, FeedItem, FeedItemSummary, NewSubscription, Subscription, UpdateSubscription};
@@ -31,6 +32,14 @@ pub struct IndexRow {
     pub category: Option<String>,
     pub description: Option<String>,
     pub content: Option<String>,
+}
+
+/// One active canonical tag and its existing usage/mappings.
+#[derive(Debug, Clone, Serialize)]
+pub struct TagCatalogEntry {
+    pub name: String,
+    pub usage_count: i64,
+    pub aliases: Vec<String>,
 }
 
 /// Repository trait for feed item data access.
@@ -147,8 +156,32 @@ pub trait FeedItemRepository: Send + Sync {
         offset: i64,
     ) -> Result<Vec<FeedItemSummary>>;
 
-    /// Collect unique tags across feed items (computed in the database).
+    /// Collect unique tags used by feed items (computed in the database).
     async fn find_all_tags(&self, subscription_id: Option<i64>) -> Result<Vec<String>>;
+
+    /// List every active canonical tag, including unused manually-created tags.
+    async fn find_tag_catalog(&self) -> Result<Vec<TagCatalogEntry>>;
+
+    /// List active canonical names for the classifier and clustering logic.
+    async fn find_active_tag_names(&self) -> Result<Vec<String>>;
+
+    /// List names that a user has removed and blocked from future writes.
+    async fn find_blocked_tags(&self) -> Result<Vec<String>>;
+
+    /// Create an unused canonical tag.
+    async fn create_tag(&self, name: &str) -> Result<()>;
+
+    /// Rename a canonical tag and preserve the old name as an alias.
+    async fn rename_tag(&self, old_name: &str, new_name: &str) -> Result<()>;
+
+    /// Map several canonical tags to the selected canonical head.
+    async fn merge_tags(&self, canonical_name: &str, members: &[String]) -> Result<()>;
+
+    /// Remove a tag from all articles and block its name and aliases.
+    async fn delete_tag(&self, name: &str) -> Result<()>;
+
+    /// Restore a blocked name as an unused canonical tag.
+    async fn restore_tag(&self, name: &str) -> Result<()>;
 
     /// Mark a feed item as read or unread.
     async fn mark_read(&self, id: i64, is_read: bool) -> Result<FeedItem>;

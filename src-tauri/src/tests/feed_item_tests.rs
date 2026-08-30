@@ -752,3 +752,122 @@ async fn test_summaries_carry_source_title() {
     assert_eq!(bare.source_url.as_deref(), Some("https://bare.com/rss"));
 }
 
+// ---------------------------------------------------------------------------
+// TAG CATALOG
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_tag_catalog_canonicalizes_and_manages_mappings() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+    let first = create_item(&env, sub_id, "First tagged item").await;
+    let second = create_item(&env, sub_id, "Second tagged item").await;
+
+    env.feed_repo
+        .save_tags(
+            first,
+            r#"["Machine Learning", "machine-learning", "AI", "Extra"]"#,
+            "technology",
+        )
+        .await
+        .unwrap();
+    env.feed_repo.create_tag("Database").await.unwrap();
+
+    let tags: Vec<String> = serde_json::from_str(
+        &env.feed_repo.find_by_id(first).await.unwrap().tags.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(tags, vec!["machine_learning", "ai", "extra"]);
+    assert!(env.feed_repo.create_tag("machine-learning").await.is_err());
+
+    env.feed_repo
+        .merge_tags("machine_learning", &["ai".into()])
+        .await
+        .unwrap();
+    let after_merge: Vec<String> = serde_json::from_str(
+        &env.feed_repo.find_by_id(first).await.unwrap().tags.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(after_merge, vec!["machine_learning", "extra"]);
+
+    env.feed_repo
+        .rename_tag("machine_learning", "artificial_intelligence")
+        .await
+        .unwrap();
+    env.feed_repo
+        .save_tags(second, r#"["AI"]"#, "technology")
+        .await
+        .unwrap();
+    let second_tags: Vec<String> = serde_json::from_str(
+        &env.feed_repo.find_by_id(second).await.unwrap().tags.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(second_tags, vec!["artificial_intelligence"]);
+
+    let catalog = env.feed_repo.find_tag_catalog().await.unwrap();
+    let head = catalog
+        .iter()
+        .find(|entry| entry.name == "artificial_intelligence")
+        .expect("renamed head should exist");
+    assert!(head.aliases.contains(&"ai".to_string()));
+    assert!(head.aliases.contains(&"machine_learning".to_string()));
+
+    env.feed_repo.delete_tag("artificial_intelligence").await.unwrap();
+    let blocked = env.feed_repo.find_blocked_tags().await.unwrap();
+    assert!(blocked.contains(&"artificial_intelligence".to_string()));
+    assert!(blocked.contains(&"ai".to_string()));
+    assert!(blocked.contains(&"machine_learning".to_string()));
+    assert!(
+        env.feed_repo
+            .save_tags(second, r#"["AI", "extra"]"#, "technology")
+            .await
+            .unwrap()
+            .tags
+            .as_deref()
+            .is_some_and(|tags| tags == r#"["extra"]"#)
+    );
+
+    env.feed_repo
+        .restore_tag("artificial_intelligence")
+        .await
+        .unwrap();
+    let restored = env.feed_repo.find_tag_catalog().await.unwrap();
+    assert!(restored.iter().any(|entry| entry.name == "artificial_intelligence"));
+}
+
+#[tokio::test]
+async fn test_find_all_tags_is_canonical_and_subscription_scoped() {
+    let env = TestEnv::new().await;
+    let sub_a = seed_sub(&env).await;
+    let sub_b = env
+        .service
+        .add_subscription(NewSubscription {
+            url: "https://other.example.com/rss".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .id;
+    let item_a = create_item(&env, sub_a, "A").await;
+    let item_b = create_item(&env, sub_b, "B").await;
+
+    env.feed_repo
+        .save_tags(item_a, r#"["Machine Learning"]"#, "")
+        .await
+        .unwrap();
+    env.feed_repo
+        .save_tags(item_b, r#"["PostgreSQL"]"#, "")
+        .await
+        .unwrap();
+    env.feed_repo.create_tag("Unused Subject").await.unwrap();
+
+    assert_eq!(
+        env.feed_repo.find_all_tags(None).await.unwrap(),
+        vec!["machine_learning", "postgresql"]
+    );
+    assert_eq!(
+        env.feed_repo.find_all_tags(Some(sub_a)).await.unwrap(),
+        vec!["machine_learning"]
+    );
+}
+

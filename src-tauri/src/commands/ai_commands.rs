@@ -120,16 +120,19 @@ pub async fn classify_item(
     description: Option<String>,
     content_snippet: Option<String>,
     rss_title: Option<String>,
-    existing_tags: Option<Vec<String>>,
+    _existing_tags: Option<Vec<String>>,
 ) -> Result<ClassificationResponse> {
     let ai_service = get_ai_service(&state).await?;
 
+    // The backend is the source of truth for the global vocabulary. Ignore
+    // stale or missing frontend suggestions and pass the current catalog to
+    // the classifier on every manual classification.
     let request = ClassificationRequest {
         title,
         description,
         content_snippet,
         rss_title,
-        existing_tags,
+        existing_tags: Some(state.feed_repo.find_active_tag_names().await?),
     };
 
     let task = state

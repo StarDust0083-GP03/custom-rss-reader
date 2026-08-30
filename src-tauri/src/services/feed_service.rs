@@ -440,7 +440,10 @@ async fn classify_batch_and_save(
         })
         .collect();
 
-    let responses = ai.classify_batch(&entries).await?;
+    // Refresh the catalog for every batch so tags created by an earlier
+    // batch are available to the next classification request.
+    let existing_tags = repo.find_active_tag_names().await?;
+    let responses = ai.classify_batch(&entries, &existing_tags).await?;
 
     for (item, response) in items.iter().zip(responses) {
         // Skip items the model left unclassified (empty tags AND no category)

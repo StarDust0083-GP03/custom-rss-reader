@@ -60,7 +60,8 @@ rss-reader/
 │   ├── features/
 │   │   ├── actions.ts             # item/subscription actions and search
 │   │   ├── ai.ts                  # translation, classification, AI settings
-│   │   └── chroma.ts               # semantic search and Chroma settings
+│   │   ├── chroma.ts               # semantic search and Chroma settings
+│   │   └── tags.ts                 # tag catalog and local cluster manager
 │   ├── ui/
 │   │   ├── render.ts              # list/detail/sidebar rendering
 │   │   ├── filters.ts             # filter state and tag picker
@@ -83,14 +84,16 @@ rss-reader/
 │   │   ├── item_commands.rs
 │   │   ├── streaming.rs           # translation events
 │   │   ├── subscription_commands.rs
+│   │   ├── tag_commands.rs        # catalog, local clusters, and mappings
 │   │   └── webview.rs
 │   ├── src/services/              # business orchestration
 │   │   ├── feed_service.rs
 │   │   └── subscription_service.rs
-│   ├── src/repositories/           # SQLite data access traits and impls
-│   │   ├── feed_item_repo.rs
+│   ├── src/repositories/          # SQLite data access traits and impls
+│   │   ├── feed_item_repo.rs      # item and tag catalog operations
 │   │   └── subscription_repo.rs
 │   ├── src/models/                # persisted domain models
+│   │   └── tag.rs                 # snake_case normalization rules
 │   ├── src/database/              # initialization and migrations
 │   │   ├── mod.rs
 │   │   └── migrations.rs
@@ -135,7 +138,7 @@ Classification uses a structured payload:
 }
 ```
 
-The Rust command serializes `tags` for SQLite storage; auto-classification writes through the repository directly.
+The Rust command passes the global tag catalog to the LLM, then the repository normalizes, resolves aliases, drops blocked names, and serializes the canonical `tags` array. Auto-classification uses the same repository reconciliation path. Tag clustering uses the local ONNX embedding model and is review-only; merges and deletes are explicit user operations.
 
 ### Backend layering
 
@@ -148,7 +151,7 @@ The Rust command serializes `tags` for SQLite storage; auto-classification write
 
 ## 5. Data and synchronization
 
-SQLite lives at `~/.rss-reader/rss_reader.db`. Migrations add missing columns, remove duplicate GUID rows, and create indexes. Migration errors are returned instead of allowing a partially known schema to start.
+SQLite lives at `~/.rss-reader/rss_reader.db`. Migrations add missing columns, remove duplicate GUID rows, create indexes, and create `tag_catalog`, `tag_aliases`, and `blocked_tags`. Legacy tag arrays are normalized into the catalog during migration. Migration errors are returned instead of allowing a partially known schema to start.
 
 Chroma uses two durable mechanisms:
 

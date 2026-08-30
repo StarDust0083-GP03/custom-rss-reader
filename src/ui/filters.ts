@@ -8,6 +8,7 @@
  */
 
 import { items as itemsApi } from "../api";
+import { openTagManager } from "../features/tags";
 import { state } from "../state";
 import { loadItems, renderSubscriptions } from "./render";
 import { error as toastError } from "../toast";
@@ -95,7 +96,7 @@ export async function showTagSelector(anchor: HTMLElement) {
     return;
   }
 
-  let tags: string[];
+  let tags: string[] = [];
   try {
     tags = await itemsApi.tags(S.currentSubscriptionId);
   } catch (error) {
@@ -103,34 +104,67 @@ export async function showTagSelector(anchor: HTMLElement) {
     return;
   }
 
-  if (tags.length === 0) {
-    toastError("No tags found. Classify some items first.");
-    return;
-  }
-
   const menu = document.createElement("div");
   menu.className = "tag-menu";
   menu.id = TAG_MENU_ID;
+  menu.setAttribute("role", "listbox");
 
-  for (const t of tags) {
-    const opt = document.createElement("button");
-    opt.type = "button";
-    opt.className = "tag-menu-item";
-    opt.textContent = "#" + t;
-    opt.addEventListener("click", (e) => {
-      e.stopPropagation();
-      closeTagMenu();
-      filterByTag(t);
-    });
-    menu.appendChild(opt);
-  }
+  const search = document.createElement("input");
+  search.type = "search";
+  search.className = "tag-menu-search";
+  search.placeholder = "Search tags...";
+  search.setAttribute("aria-label", "Search tags");
+  menu.appendChild(search);
+
+  const options = document.createElement("div");
+  options.className = "tag-menu-options";
+  menu.appendChild(options);
+
+  const renderOptions = () => {
+    options.replaceChildren();
+    const query = search.value.trim().toLowerCase();
+    const visible = tags.filter(tag => tag.toLowerCase().includes(query));
+    if (visible.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "tag-menu-empty";
+      empty.textContent = tags.length === 0 ? "No used tags yet." : "No matching tags.";
+      options.appendChild(empty);
+    } else {
+      for (const tag of visible) {
+        const opt = document.createElement("button");
+        opt.type = "button";
+        opt.className = "tag-menu-item";
+        opt.textContent = "#" + tag;
+        opt.addEventListener("click", (e) => {
+          e.stopPropagation();
+          closeTagMenu();
+          filterByTag(tag);
+        });
+        options.appendChild(opt);
+      }
+    }
+  };
+  search.addEventListener("input", renderOptions);
+  renderOptions();
+
+  const manage = document.createElement("button");
+  manage.type = "button";
+  manage.className = "tag-menu-manage";
+  manage.textContent = "Manage tags";
+  manage.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeTagMenu();
+    void openTagManager();
+  });
+  menu.appendChild(manage);
 
   document.body.appendChild(menu);
   const rect = anchor.getBoundingClientRect();
   menu.style.top = `${rect.bottom + 6}px`;
-  menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 220))}px`;
+  menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 300))}px`;
 
   tagMenuOpen = true;
   document.addEventListener("click", onTagMenuOutsideClick);
   document.addEventListener("keydown", onTagMenuEscape);
+  search.focus();
 }

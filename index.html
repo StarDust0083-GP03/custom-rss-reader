@@ -242,6 +242,48 @@
             </div>
         </div>
 
+        <!-- Tag Management Modal -->
+        <div id="tag-manager-modal" class="modal">
+            <div class="modal-content tag-manager-content">
+                <button type="button" class="close-modal" aria-label="Close tag manager">×</button>
+                <h2>Manage tags</h2>
+                <p class="tag-manager-intro">Tags are global durable subjects. Article classification uses AI; this manager stays local and explicit.</p>
+
+                <form id="tag-create-form" class="tag-create-form">
+                    <label for="tag-create-name">Create tag</label>
+                    <div class="tag-create-row">
+                        <input type="text" id="tag-create-name" placeholder="machine_learning" autocomplete="off" />
+                        <button type="submit" class="tag-action-button primary">Create tag</button>
+                    </div>
+                    <small>Names are stored as lowercase English snake_case.</small>
+                </form>
+
+                <div class="tag-manager-cluster-toolbar">
+                    <div>
+                        <h3>Similar names</h3>
+                        <p>Local embeddings suggest groups. Nothing changes until you choose a head.</p>
+                    </div>
+                    <button type="button" id="cluster-tags-btn" class="tag-action-button primary">Cluster similar tags</button>
+                </div>
+                <section id="tag-clusters-section" class="tag-manager-section" hidden>
+                    <div id="tag-clusters-list"></div>
+                </section>
+
+                <section class="tag-manager-section">
+                    <h3>Active tags</h3>
+                    <div id="tag-catalog-list"></div>
+                </section>
+                <section class="tag-manager-section">
+                    <h3>Known mappings</h3>
+                    <div id="tag-mappings-list"></div>
+                </section>
+                <section class="tag-manager-section">
+                    <h3>Blocked names</h3>
+                    <div id="tag-blocked-list"></div>
+                </section>
+            </div>
+        </div>
+
         <!-- ChromaDB Settings Modal -->
         <div id="chroma-settings-modal" class="modal">
             <div class="modal-content">

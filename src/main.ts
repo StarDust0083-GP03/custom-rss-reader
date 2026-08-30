@@ -39,6 +39,11 @@ import {
   closeRecommendModal,
 } from "./features/ai";
 import {
+  closeTagManager,
+  createTagFromForm,
+  clusterTags,
+} from "./features/tags";
+import {
   loadChromaConfig,
   findSimilarArticles,
   saveChromaConfig,
@@ -147,6 +152,20 @@ async function init() {
     if (e.target === e.currentTarget) {
       closeRecommendModal();
     }
+  });
+
+  // Tag manager
+  const tagModal = document.getElementById("tag-manager-modal");
+  tagModal?.querySelector(".close-modal")?.addEventListener("click", closeTagManager);
+  tagModal?.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeTagManager();
+  });
+  document.getElementById("tag-create-form")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    void createTagFromForm();
+  });
+  document.getElementById("cluster-tags-btn")?.addEventListener("click", () => {
+    void clusterTags();
   });
 
   // 搜索

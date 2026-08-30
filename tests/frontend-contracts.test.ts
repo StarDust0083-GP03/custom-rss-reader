@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
-import { chroma, items } from "../src/api";
+import { chroma, items, tags } from "../src/api";
 import { safeHttpUrl } from "../src/iframe";
 
 afterEach(() => {
@@ -42,6 +42,24 @@ describe("frontend security and IPC contracts", () => {
     expect(request).toEqual({
       command: "get_favorites",
       args: { subscriptionId: 42, limit: 50, offset: 0 },
+    });
+  });
+
+  it("sends canonical tag merge operations through the typed command contract", async () => {
+    let request: { command: string; args: Record<string, unknown> } | undefined;
+    mockIPC((command, args) => {
+      request = { command, args: args as Record<string, unknown> };
+      return undefined;
+    });
+
+    await tags.merge("machine_learning", ["ai", "deep_learning"]);
+
+    expect(request).toEqual({
+      command: "merge_tags",
+      args: {
+        canonicalName: "machine_learning",
+        members: ["ai", "deep_learning"],
+      },
     });
   });
 

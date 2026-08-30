@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use sqlx::SqlitePool;
@@ -6,7 +6,9 @@ use sqlx::SqlitePool;
 use super::FeedItemRepository;
 use super::IndexRow;
 use crate::error::{AppError, Result};
-use crate::models::{FeedItem, FeedItemSummary, NewFeedItem};
+use crate::models::{tag::{normalize_tag, MAX_TAGS_PER_ITEM}, FeedItem, FeedItemSummary, NewFeedItem};
+
+use super::TagCatalogEntry;
 
 /// Character cap applied to `description`/`content` in the [`IndexRow`]
 /// projection queries. Generously above what the embedding-document builder
@@ -166,6 +168,91 @@ fn escape_like(input: &str) -> String {
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+fn required_tag(input: &str) -> Result<String> {
+    normalize_tag(input).ok_or_else(|| {
+        AppError::Validation(
+            "Tag names must contain 1-64 ASCII letters or numbers, separated by underscores".into(),
+        )
+    })
+}
+
+async fn load_tag_maps(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<(HashMap<String, String>, HashSet<String>)> {
+    let alias_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT alias, canonical_name FROM tag_aliases",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let aliases = alias_rows.into_iter().collect();
+    let blocked: HashSet<String> = sqlx::query_as::<_, (String,)>(
+        "SELECT name FROM blocked_tags",
+    )
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .map(|(name,)| name)
+    .collect();
+    Ok((aliases, blocked))
+}
+
+fn resolve_tag(mut tag: String, aliases: &HashMap<String, String>) -> String {
+    for _ in 0..16 {
+        let Some(next) = aliases.get(&tag) else { break };
+        if next == &tag {
+            break;
+        }
+        tag = next.clone();
+    }
+    tag
+}
+
+/// Rewrite all JSON tag arrays in one transaction. This is intentionally a
+/// simple table scan because tag merges and deletes are rare administrative
+/// operations, not an article-ingest hot path.
+async fn rewrite_feed_item_tags(
+    conn: &mut sqlx::SqliteConnection,
+    replacements: &HashMap<String, String>,
+    removed: &HashSet<String>,
+) -> Result<()> {
+    let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
+        "SELECT id, tags FROM feed_items WHERE tags IS NOT NULL AND json_valid(tags)",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    for (item_id, raw_tags) in rows {
+        let Some(raw_tags) = raw_tags else { continue };
+        let Ok(tags) = serde_json::from_str::<Vec<String>>(&raw_tags) else {
+            continue;
+        };
+        let mut normalized = Vec::new();
+        for raw in tags {
+            let Some(tag) = normalize_tag(&raw) else { continue };
+            if removed.contains(&tag) {
+                continue;
+            }
+            let tag = resolve_tag(tag, replacements);
+            if !normalized.contains(&tag) {
+                normalized.push(tag);
+            }
+            if normalized.len() == MAX_TAGS_PER_ITEM {
+                break;
+            }
+        }
+        let normalized_json = serde_json::to_string(&normalized)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize tags: {}", e)))?;
+        if normalized_json != raw_tags {
+            sqlx::query("UPDATE feed_items SET tags = $2 WHERE id = $1")
+                .bind(item_id)
+                .bind(normalized_json)
+                .execute(&mut *conn)
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 /// Production implementation backed by a real SQLite pool.
@@ -550,24 +637,282 @@ impl FeedItemRepository for SqliteFeedItemRepository {
     async fn find_all_tags(&self, subscription_id: Option<i64>) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = if let Some(sub_id) = subscription_id {
             sqlx::query_as(
-                r#"SELECT DISTINCT value FROM feed_items, json_each(feed_items.tags)
-                   WHERE tags IS NOT NULL AND json_valid(tags) AND subscription_id = $1
-                   ORDER BY value"#,
+                r#"SELECT DISTINCT t.name
+                   FROM tag_catalog t
+                   JOIN feed_items f
+                     ON json_valid(f.tags)
+                    AND f.subscription_id = $1
+                    AND EXISTS (SELECT 1 FROM json_each(f.tags) j WHERE j.value = t.name)
+                   ORDER BY t.name"#,
             )
             .bind(sub_id)
             .fetch_all(&self.pool)
             .await?
         } else {
             sqlx::query_as(
-                r#"SELECT DISTINCT value FROM feed_items, json_each(feed_items.tags)
-                   WHERE tags IS NOT NULL AND json_valid(tags)
-                   ORDER BY value"#,
+                r#"SELECT DISTINCT t.name
+                   FROM tag_catalog t
+                   JOIN feed_items f
+                     ON json_valid(f.tags)
+                    AND EXISTS (SELECT 1 FROM json_each(f.tags) j WHERE j.value = t.name)
+                   ORDER BY t.name"#,
             )
             .fetch_all(&self.pool)
             .await?
         };
 
         Ok(rows.into_iter().map(|(tag,)| tag).collect())
+    }
+
+    async fn find_tag_catalog(&self) -> Result<Vec<TagCatalogEntry>> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            r#"SELECT t.name, COUNT(DISTINCT f.id) AS usage_count
+               FROM tag_catalog t
+               LEFT JOIN feed_items f
+                 ON json_valid(f.tags)
+                AND EXISTS (SELECT 1 FROM json_each(f.tags) j WHERE j.value = t.name)
+               GROUP BY t.name
+               ORDER BY t.name"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let aliases: Vec<(String, String)> = sqlx::query_as(
+            "SELECT alias, canonical_name FROM tag_aliases ORDER BY canonical_name, alias",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut aliases_by_tag: HashMap<String, Vec<String>> = HashMap::new();
+        for (alias, canonical) in aliases {
+            aliases_by_tag.entry(canonical).or_default().push(alias);
+        }
+
+        Ok(rows
+            .into_iter()
+            .map(|(name, usage_count)| TagCatalogEntry {
+                aliases: aliases_by_tag.remove(&name).unwrap_or_default(),
+                name,
+                usage_count,
+            })
+            .collect())
+    }
+
+    async fn find_active_tag_names(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM tag_catalog ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(name,)| name).collect())
+    }
+
+    async fn find_blocked_tags(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM blocked_tags ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(name,)| name).collect())
+    }
+
+    async fn create_tag(&self, name: &str) -> Result<()> {
+        let name = required_tag(name)?;
+        let mut tx = self.pool.begin().await?;
+        if sqlx::query_scalar::<_, String>(
+            "SELECT name FROM blocked_tags WHERE name = $1",
+        )
+        .bind(&name)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some()
+        {
+            return Err(AppError::Duplicate(format!("Tag '{}' is blocked", name)));
+        }
+        if sqlx::query_scalar::<_, String>(
+            "SELECT name FROM tag_catalog WHERE name = $1 OR EXISTS (SELECT 1 FROM tag_aliases WHERE alias = $1)",
+        )
+        .bind(&name)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some()
+        {
+            return Err(AppError::Duplicate(format!("Tag '{}' already exists", name)));
+        }
+        sqlx::query("INSERT INTO tag_catalog (name) VALUES ($1)")
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn rename_tag(&self, old_name: &str, new_name: &str) -> Result<()> {
+        let old_name = required_tag(old_name)?;
+        let new_name = required_tag(new_name)?;
+        if old_name == new_name {
+            return Ok(());
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let exists: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM tag_catalog WHERE name = $1",
+        )
+        .bind(&old_name)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if exists.is_none() {
+            return Err(AppError::NotFound(format!("Tag '{}' not found", old_name)));
+        }
+        let occupied: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM tag_catalog WHERE name = $1
+             UNION ALL SELECT alias FROM tag_aliases WHERE alias = $1
+             UNION ALL SELECT name FROM blocked_tags WHERE name = $1
+             LIMIT 1",
+        )
+        .bind(&new_name)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if occupied.is_some() {
+            return Err(AppError::Duplicate(format!("Tag '{}' already exists", new_name)));
+        }
+
+        let mut replacements = HashMap::new();
+        replacements.insert(old_name.clone(), new_name.clone());
+        rewrite_feed_item_tags(&mut tx, &replacements, &HashSet::new()).await?;
+        sqlx::query("UPDATE tag_aliases SET canonical_name = $2 WHERE canonical_name = $1")
+            .bind(&old_name)
+            .bind(&new_name)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE tag_catalog SET name = $2, updated_at = CURRENT_TIMESTAMP WHERE name = $1",
+        )
+        .bind(&old_name)
+        .bind(&new_name)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("INSERT INTO tag_aliases (alias, canonical_name) VALUES ($1, $2)")
+            .bind(old_name)
+            .bind(new_name)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn merge_tags(&self, canonical_name: &str, members: &[String]) -> Result<()> {
+        let requested_head = required_tag(canonical_name)?;
+        let mut tx = self.pool.begin().await?;
+        let (aliases, blocked) = load_tag_maps(&mut tx).await?;
+        let head = resolve_tag(requested_head, &aliases);
+        if blocked.contains(&head) {
+            return Err(AppError::Validation(format!("Tag '{}' is blocked", head)));
+        }
+        let head_exists: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM tag_catalog WHERE name = $1",
+        )
+        .bind(&head)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if head_exists.is_none() {
+            return Err(AppError::NotFound(format!("Tag '{}' not found", head)));
+        }
+
+        let mut selected = Vec::new();
+        for member in members {
+            let member = resolve_tag(required_tag(member)?, &aliases);
+            if member != head && !selected.contains(&member) {
+                let exists: Option<String> = sqlx::query_scalar(
+                    "SELECT name FROM tag_catalog WHERE name = $1",
+                )
+                .bind(&member)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if exists.is_none() {
+                    return Err(AppError::NotFound(format!("Tag '{}' not found", member)));
+                }
+                selected.push(member);
+            }
+        }
+
+        let replacements: HashMap<String, String> = selected
+            .iter()
+            .cloned()
+            .map(|member| (member, head.clone()))
+            .collect();
+        rewrite_feed_item_tags(&mut tx, &replacements, &HashSet::new()).await?;
+        for member in &selected {
+            sqlx::query("UPDATE tag_aliases SET canonical_name = $1 WHERE canonical_name = $2")
+                .bind(&head)
+                .bind(member)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT OR REPLACE INTO tag_aliases (alias, canonical_name) VALUES ($1, $2)")
+                .bind(member)
+                .bind(&head)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM tag_catalog WHERE name = $1")
+                .bind(member)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn delete_tag(&self, name: &str) -> Result<()> {
+        let name = required_tag(name)?;
+        let mut tx = self.pool.begin().await?;
+        let exists: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM tag_catalog WHERE name = $1",
+        )
+        .bind(&name)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if exists.is_none() {
+            return Err(AppError::NotFound(format!("Tag '{}' not found", name)));
+        }
+        let aliases: Vec<(String,)> = sqlx::query_as(
+            "SELECT alias FROM tag_aliases WHERE canonical_name = $1",
+        )
+        .bind(&name)
+        .fetch_all(&mut *tx)
+        .await?;
+        let removed: HashSet<String> = std::iter::once(name.clone())
+            .chain(aliases.iter().map(|(alias,)| alias.clone()))
+            .collect();
+        rewrite_feed_item_tags(&mut tx, &HashMap::new(), &removed).await?;
+        for blocked in &removed {
+            sqlx::query("INSERT OR IGNORE INTO blocked_tags (name) VALUES ($1)")
+                .bind(blocked)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("DELETE FROM tag_aliases WHERE canonical_name = $1")
+            .bind(&name)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM tag_catalog WHERE name = $1")
+            .bind(&name)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn restore_tag(&self, name: &str) -> Result<()> {
+        let name = required_tag(name)?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM blocked_tags WHERE name = $1")
+            .bind(&name)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO tag_catalog (name) VALUES ($1)")
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn mark_read(&self, id: i64, is_read: bool) -> Result<FeedItem> {
@@ -706,6 +1051,35 @@ impl FeedItemRepository for SqliteFeedItemRepository {
     }
 
     async fn save_tags(&self, item_id: i64, tags: &str, category: &str) -> Result<FeedItem> {
+        let proposed: Vec<String> = serde_json::from_str(tags)
+            .map_err(|e| AppError::Validation(format!("Invalid tags JSON: {}", e)))?;
+        let mut tx = self.pool.begin().await?;
+        let (aliases, blocked) = load_tag_maps(&mut tx).await?;
+        let mut normalized = Vec::new();
+
+        for raw in proposed {
+            let Some(tag) = normalize_tag(&raw) else { continue };
+            if blocked.contains(&tag) {
+                continue;
+            }
+            let tag = resolve_tag(tag, &aliases);
+            if blocked.contains(&tag) {
+                continue;
+            }
+            if !normalized.contains(&tag) {
+                sqlx::query("INSERT OR IGNORE INTO tag_catalog (name) VALUES ($1)")
+                    .bind(&tag)
+                    .execute(&mut *tx)
+                    .await?;
+                normalized.push(tag);
+            }
+            if normalized.len() == MAX_TAGS_PER_ITEM {
+                break;
+            }
+        }
+
+        let normalized_json = serde_json::to_string(&normalized)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize tags: {}", e)))?;
         let row = sqlx::query_as::<_, FeedItemRow>(
             r#"
             UPDATE feed_items
@@ -715,12 +1089,13 @@ impl FeedItemRepository for SqliteFeedItemRepository {
             "#,
         )
         .bind(item_id)
-        .bind(tags)
+        .bind(normalized_json)
         .bind(category)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("FeedItem with id {} not found", item_id)))?;
 
+        tx.commit().await?;
         Ok(row.into())
     }
 }

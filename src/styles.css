@@ -1514,8 +1514,13 @@ body::after {
 
 .close-modal {
     position: absolute;
-    top: 0.9rem;
-    right: 1rem;
+    top: 0.65rem;
+    right: 0.75rem;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 0;
+    background: transparent;
     font-family: var(--font-display);
     font-size: 1.4rem;
     cursor: pointer;
@@ -2005,6 +2010,338 @@ body::after {
 .tag-menu-item:hover {
     background: var(--accent-soft);
     color: var(--accent-color);
+}
+
+.tag-menu-search {
+    display: block;
+    width: 100%;
+    margin-bottom: 4px;
+    padding: 0.45rem 0.55rem;
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 0.78rem;
+}
+
+.tag-menu-search:focus {
+    outline: none;
+    border-color: var(--accent-color);
+}
+
+.tag-menu-options {
+    max-height: 260px;
+    overflow-y: auto;
+}
+
+.tag-menu-empty {
+    margin: 0;
+    padding: 0.65rem;
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.78rem;
+}
+
+.tag-menu-manage {
+    width: 100%;
+    margin-top: 4px;
+    padding: 0.5rem 0.65rem;
+    border: 0;
+    border-top: 1px solid var(--border-color);
+    background: transparent;
+    color: var(--accent-color);
+    font-family: var(--font-ui);
+    font-size: 0.74rem;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+}
+
+.tag-menu-manage:hover {
+    background: var(--accent-soft);
+}
+
+/* ==================== Tag manager ==================== */
+.tag-manager-content {
+    width: min(92%, 760px);
+    max-width: 760px;
+}
+
+.tag-manager-intro,
+.tag-manager-cluster-toolbar p,
+.tag-cluster-hint {
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+
+.tag-manager-intro {
+    margin: -0.6rem 0 1.25rem;
+}
+
+.tag-create-form {
+    padding: 0.8rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+}
+
+.tag-create-form > label,
+.tag-manager-section h3,
+.tag-manager-cluster-toolbar h3 {
+    display: block;
+    margin: 0 0 0.45rem;
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+}
+
+.tag-create-row {
+    display: flex;
+    gap: 0.55rem;
+}
+
+.tag-create-row input,
+.tag-inline-input {
+    min-width: 0;
+    flex: 1;
+    padding: 0.5rem 0.55rem;
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 0.84rem;
+}
+
+.tag-create-row input:focus,
+.tag-inline-input:focus {
+    outline: none;
+    border-color: var(--accent-color);
+}
+
+.tag-create-form small {
+    display: block;
+    margin-top: 0.45rem;
+    color: var(--muted-color);
+    font-family: var(--font-ui);
+    font-size: 0.7rem;
+}
+
+.tag-manager-cluster-toolbar {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 1rem;
+    margin: 1.35rem 0 0.75rem;
+}
+
+.tag-manager-cluster-toolbar h3 {
+    margin-bottom: 0.25rem;
+}
+
+.tag-manager-cluster-toolbar p {
+    margin: 0;
+}
+
+.tag-manager-section {
+    margin-top: 1.25rem;
+}
+
+.tag-manager-section > h3 {
+    padding-bottom: 0.45rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.tag-catalog-row,
+.tag-blocked-row,
+.tag-mapping-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.65rem 0;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.tag-catalog-details {
+    min-width: 0;
+    flex: 1;
+}
+
+.tag-catalog-name {
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 0.85rem;
+}
+
+.tag-catalog-usage,
+.tag-catalog-aliases,
+.tag-delete-warning,
+.tag-cluster-choice small {
+    display: block;
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.7rem;
+}
+
+.tag-catalog-usage {
+    margin-top: 0.2rem;
+}
+
+.tag-catalog-aliases {
+    margin-top: 0.25rem;
+    color: var(--accent-color);
+}
+
+.tag-catalog-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+}
+
+.tag-action-button {
+    min-height: 32px;
+    padding: 0.35rem 0.6rem;
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    background: transparent;
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 0.7rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.tag-action-button:hover {
+    background: var(--accent-soft);
+    border-color: var(--accent-color);
+    color: var(--accent-color);
+}
+
+.tag-action-button:active {
+    transform: scale(0.97);
+}
+
+.tag-action-button.primary {
+    background: var(--accent-color);
+    border-color: var(--accent-color);
+    color: var(--bg-primary);
+}
+
+.tag-action-button.primary:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+    color: var(--bg-primary);
+}
+
+.tag-action-button.danger {
+    color: var(--danger-color);
+}
+
+.tag-action-button.danger:hover {
+    background: var(--danger-color);
+    border-color: var(--danger-color);
+    color: var(--bg-primary);
+}
+
+.tag-action-button.muted {
+    color: var(--text-secondary);
+}
+
+.tag-manager-empty {
+    margin: 0;
+    padding: 0.7rem 0;
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.8rem;
+}
+
+.tag-cluster-card {
+    margin-bottom: 0.75rem;
+    padding: 0.8rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+}
+
+.tag-cluster-card h4 {
+    margin: 0;
+    color: var(--text-primary);
+    font-family: var(--font-display);
+    font-size: 1rem;
+}
+
+.tag-cluster-hint {
+    margin: 0.25rem 0 0.65rem;
+}
+
+.tag-cluster-choices {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 0.45rem;
+    margin-bottom: 0.7rem;
+}
+
+.tag-cluster-choice {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 0.55rem;
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 0.78rem;
+    cursor: pointer;
+}
+
+.tag-cluster-choice input {
+    margin-right: 0.35rem;
+    accent-color: var(--accent-color);
+}
+
+.tag-cluster-choice small {
+    margin-left: 1.25rem;
+}
+
+.tag-mapping-row {
+    justify-content: flex-start;
+    font-family: var(--font-ui);
+    font-size: 0.78rem;
+}
+
+.tag-mapping-row code:last-child {
+    color: var(--accent-color);
+}
+
+.tag-mapping-row span {
+    color: var(--muted-color);
+}
+
+@media (max-width: 560px) {
+    .tag-manager-cluster-toolbar,
+    .tag-create-row {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .tag-catalog-row {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .tag-catalog-actions {
+        justify-content: flex-start;
+    }
 }
 
 /* ==================== Item source kicker (issue #3) ==================== */

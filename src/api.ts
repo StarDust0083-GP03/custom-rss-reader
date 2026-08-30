@@ -21,6 +21,8 @@ import type {
   AiActivitySnapshot,
   OpmlImportResult,
   MarkdownBackfillReport,
+  TagCatalogEntry,
+  TagCluster,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -160,6 +162,23 @@ export const items = {
       { itemId: id, tags, category },
       "items.saveTags",
     ),
+};
+
+// ---------------------------------------------------------------------------
+// Tag management
+// ---------------------------------------------------------------------------
+
+export const tags = {
+  catalog: () => call<TagCatalogEntry[]>("get_tag_catalog", undefined, "tags.catalog"),
+  blocked: () => call<string[]>("get_blocked_tags", undefined, "tags.blocked"),
+  create: (name: string) => call<void>("create_tag", { name }, "tags.create"),
+  rename: (oldName: string, newName: string) =>
+    call<void>("rename_tag", { oldName, newName }, "tags.rename"),
+  merge: (canonicalName: string, members: string[]) =>
+    call<void>("merge_tags", { canonicalName, members }, "tags.merge"),
+  remove: (name: string) => call<void>("delete_tag", { name }, "tags.remove"),
+  restore: (name: string) => call<void>("restore_tag", { name }, "tags.restore"),
+  cluster: () => call<TagCluster[]>("cluster_tags", undefined, "tags.cluster"),
 };
 
 // ---------------------------------------------------------------------------

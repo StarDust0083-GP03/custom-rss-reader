@@ -8,7 +8,8 @@ A cross-platform RSS reader desktop application built with Tauri, featuring OPML
 - **RSSHub Integration**: Customize RSSHub routes per subscription
 - **Dual-Source Content**: Fetch content from RSS feeds or directly from websites
 - **AI Translation**: Streaming bilingual (original + Chinese) article translation
-- **AI Classification**: Automatic article tagging by title, batched (20 articles per LLM call) to stay under API rate limits
+- **AI Classification**: Automatic article tagging by title, using a global canonical subject vocabulary and batches of 20 articles per LLM call
+- **Tag Management**: Search the tag filter, create and rename tags, review local-embedding clusters, merge similar subjects, remove tags, and restore blocked names
 - **AI Task Status**: The bottom status bar shows whether the model is translating, classifying, recommending, testing, or waiting in the queue
 - **AI Picks** *(manual)*: "★ Picks" button — the LLM plays editor, reading your recent unread titles/snippets and picking the 5 most worthwhile articles with a one-line reason each
 - **Semantic Search** *(optional)*: ChromaDB-backed "search by meaning" and similar-article discovery
@@ -160,10 +161,15 @@ rss-reader/
 Configure an OpenAI-compatible API (default: DeepSeek) via the **AI** button in the detail panel.
 
 - **Translate** — streaming bilingual (original + 中文) translation of the selected article, cached for 3 days
-- **Tags** — classify the selected article into tags/category
+- **Tags** — classify the selected article into durable subject tags and a category. Existing canonical names are preferred; stored tags are lowercase English `snake_case`.
+- **Tag manager** — open the Tags filter and choose **Manage tags**. Management is local and does not use the LLM. Review embedding-suggested clusters, choose a canonical head, create or rename tags, remove tags, and restore blocked names.
 - **Auto-classify** — new items are tagged automatically when the subscription has AI enabled; requests are batched (20 titles per LLM call) and globally rate-limited (serialized, ≥1.2s spacing) to avoid API 429s
 
 Configuration is stored in `~/.rss-reader/ai_config.json`. On Unix, the directory is protected as `0700` and the API-key file is written atomically as `0600`; the file still contains a secret and should not be copied or committed.
+
+## Tag management
+
+Tags are global across all subscriptions. The tag manager uses the local multilingual embedding model already used by semantic search only to suggest similar-name clusters; it never changes data automatically and never calls the configured LLM. Choosing a cluster head rewrites affected article tags and stores aliases, so future AI classifications resolve old names to the selected head. Removing a tag removes it from articles and blocks the name until restored.
 
 ## Semantic Search with ChromaDB (optional)
 
@@ -244,7 +250,7 @@ CREATE TABLE feed_items (
     is_favorite BOOLEAN DEFAULT 0,
     is_read_later BOOLEAN DEFAULT 0,
     is_ignored BOOLEAN DEFAULT 0,
-    tags TEXT,                  -- JSON array, e.g. ["rust","programming"]
+    tags TEXT,                  -- JSON array of canonical snake_case subjects
     category TEXT,
     translated_title TEXT,
     translated_content TEXT,    -- cached bilingual HTML
@@ -252,6 +258,8 @@ CREATE TABLE feed_items (
     FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
 );
 ```
+
+Tag administration uses `tag_catalog`, `tag_aliases`, and `blocked_tags`; migrations create these tables and normalize legacy JSON arrays in `feed_items.tags`.
 
 ## Configuration
 

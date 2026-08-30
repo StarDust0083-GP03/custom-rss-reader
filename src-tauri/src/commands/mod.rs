@@ -4,6 +4,7 @@ pub mod feed_commands;
 pub mod item_commands;
 pub mod streaming;
 pub mod subscription_commands;
+pub mod tag_commands;
 pub mod webview;
 
 #[cfg(debug_assertions)]
@@ -15,6 +16,7 @@ pub use feed_commands::*;
 pub use item_commands::*;
 pub use streaming::*;
 pub use subscription_commands::*;
+pub use tag_commands::*;
 pub use webview::*;
 
 #[cfg(debug_assertions)]

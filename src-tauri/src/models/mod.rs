@@ -1,5 +1,6 @@
 pub mod feed_item;
 pub mod subscription;
+pub mod tag;
 
 pub use feed_item::*;
 pub use subscription::*;
