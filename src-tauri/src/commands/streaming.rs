@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use tauri::{AppHandle, Emitter};
 use tauri::State;
+use tauri::{AppHandle, Emitter};
 
 use crate::ai::activity::{current_ai_task, with_ai_task, AiTaskSpec};
 use crate::ai::service::{is_html_content, AiService, LlmAiService};
@@ -62,9 +62,8 @@ pub async fn translate_item_bilingual_streaming(
     // identical output regardless of webview/text mode. (Previously RSS
     // items translated raw `content` HTML while the pane showed markdown,
     // so originals and display diverged.)
-    let item =
-        crate::services::feed_service::ensure_content_md_for_item(&state.feed_repo, item_id)
-            .await?;
+    let item = crate::services::feed_service::ensure_content_md_for_item(&state.feed_repo, item_id)
+        .await?;
     let content = item
         .content_md
         .as_ref()
@@ -155,10 +154,7 @@ async fn translate_streaming_inner(
     // re-extraction, so we don't pay the double-extract cost.
     let ai_service = get_or_build_ai_service(state).await?;
     let is_html = is_html_content(&cleaned);
-    let blocks = crate::ai::service::extract_blocks(
-        &cleaned,
-        ai_service.config_max_chars,
-    );
+    let blocks = crate::ai::service::extract_blocks(&cleaned, ai_service.config_max_chars);
     let total = blocks.len();
     if let Some(task) = current_ai_task() {
         task.progress(0, total).await;
@@ -263,10 +259,7 @@ async fn translate_streaming_inner(
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn lookup_cached_translation(
-    state: &AppState,
-    item_id: i64,
-) -> Result<Option<String>> {
+async fn lookup_cached_translation(state: &AppState, item_id: i64) -> Result<Option<String>> {
     let item = state.feed_repo.find_by_id(item_id).await?;
     let Some(translated) = item.translated_content else {
         return Ok(None);
@@ -391,7 +384,12 @@ fn strip_anchor_tags(s: &str) -> String {
         // Opening <a ...>
         if lower[i..].starts_with("<a") {
             let after = i + 2;
-            if after >= len || bytes[after] == b' ' || bytes[after] == b'\t' || bytes[after] == b'\n' || bytes[after] == b'>' {
+            if after >= len
+                || bytes[after] == b' '
+                || bytes[after] == b'\t'
+                || bytes[after] == b'\n'
+                || bytes[after] == b'>'
+            {
                 // Find the end of the opening tag
                 let Some(open_end_rel) = lower[after..].find('>') else {
                     break;
@@ -432,7 +430,9 @@ async fn get_or_build_ai_service(state: &AppState) -> Result<AiHandle> {
     }
 
     let config = load_ai_config()?;
-    let max = config.max_chars_per_segment.unwrap_or(crate::ai::MAX_CHARS_PER_SEGMENT);
+    let max = config
+        .max_chars_per_segment
+        .unwrap_or(crate::ai::MAX_CHARS_PER_SEGMENT);
     let service: Arc<dyn AiService> = Arc::new(LlmAiService::new(config)?);
     *state.ai_service.write().await = Some(service.clone());
     Ok(AiHandle {
@@ -602,7 +602,10 @@ fn strip_img_tags(html: &str) -> String {
             let c1 = bytes[i + 1];
             let c2 = bytes[i + 2];
             let c3 = bytes[i + 3];
-            if (c1 == b'i' || c1 == b'I') && (c2 == b'm' || c2 == b'M') && (c3 == b'g' || c3 == b'G') {
+            if (c1 == b'i' || c1 == b'I')
+                && (c2 == b'm' || c2 == b'M')
+                && (c3 == b'g' || c3 == b'G')
+            {
                 // Skip to past '>'
                 while i < len && bytes[i] != b'>' {
                     i += 1;
@@ -634,7 +637,10 @@ mod tests {
     fn test_strip_images_from_translated() {
         let html = r#"<div class="paragraph-translated">一些文本 <img src="img.jpg" /></div>"#;
         let result = strip_images_from_translated(html);
-        assert_eq!(result, r#"<div class="paragraph-translated">一些文本 </div>"#);
+        assert_eq!(
+            result,
+            r#"<div class="paragraph-translated">一些文本 </div>"#
+        );
     }
 
     #[test]
@@ -692,7 +698,8 @@ mod tests {
     /// image displays twice in the bilingual pair.
     #[test]
     fn test_strip_markdown_images_basic() {
-        let html = r#"<div class="paragraph-translated">文本 ![alt](https://x.com/a.png) 之后</div>"#;
+        let html =
+            r#"<div class="paragraph-translated">文本 ![alt](https://x.com/a.png) 之后</div>"#;
         let result = strip_images_from_translated(html);
         assert_eq!(
             result,
@@ -735,7 +742,10 @@ mod tests {
     fn test_strip_images_markdown_inside_translated_div() {
         let html = r#"<div class="paragraph-translated">翻译 ![alt](x.png) 完成</div>"#;
         let result = strip_images_from_translated(html);
-        assert_eq!(result, r#"<div class="paragraph-translated">翻译  完成</div>"#);
+        assert_eq!(
+            result,
+            r#"<div class="paragraph-translated">翻译  完成</div>"#
+        );
     }
 
     /// Regression: nested <div> inside paragraph-translated used to be cut at

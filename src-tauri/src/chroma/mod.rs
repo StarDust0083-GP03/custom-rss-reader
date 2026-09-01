@@ -33,18 +33,22 @@ impl ChromaHolder {
     /// reachable. Never fails the caller — returns `None` when disabled or
     /// unreachable (callers decide how to surface that).
     pub async fn get(&self) -> Option<Arc<service::ChromaService>> {
-        let mut guard = self.inner.lock().await;
-        if let Some(svc) = guard.as_ref() {
+        if let Some(svc) = self.inner.lock().await.as_ref() {
             return Some(svc.clone());
         }
         let config = ChromaConfig::load();
         if !config.enabled {
             return None;
         }
+        // Connect OUTSIDE the lock: ChromaService::new performs network I/O
+        // (identity lookup + get-or-create), and holding the holder's mutex
+        // across it would stall every concurrent health check or search.
+        // A double connect after a concurrent miss is harmless — the cached
+        // handle is identical and upserts are idempotent.
         match service::ChromaService::new(&config).await {
             Ok(svc) => {
                 let arc = Arc::new(svc);
-                *guard = Some(arc.clone());
+                *self.inner.lock().await = Some(arc.clone());
                 Some(arc)
             }
             Err(e) => {

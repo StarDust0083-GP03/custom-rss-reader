@@ -34,7 +34,7 @@ use crate::{FeedService, SubscriptionService};
 ///
 /// Holds all service instances and shared infrastructure.
 /// Services are the canonical way to access business logic;
-/// repositories and the pool are exposed for command convenience.
+/// repositories are exposed for command convenience.
 pub struct AppState {
     pub subscription_service: SubscriptionService,
     pub feed_service: FeedService,

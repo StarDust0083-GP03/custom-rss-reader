@@ -38,8 +38,10 @@ fn clean_html_for_markdown(html: &str) -> String {
     let mut pos = 0;
 
     // Tags to remove entirely (opening + contents + closing).
-    let block_tags = ["nav", "footer", "aside", "button", "form", "svg",
-                       "script", "style", "noscript", "select", "input", "textarea"];
+    let block_tags = [
+        "nav", "footer", "aside", "button", "form", "svg", "script", "style", "noscript", "select",
+        "input", "textarea",
+    ];
 
     while pos < html.len() {
         // Look for the start of any tag we want to remove
@@ -103,7 +105,11 @@ fn find_open_tag_start(html: &str, from: usize, tag: &str) -> Option<usize> {
             // Check if it's followed by the tag name (possibly with leading '/')
             let after_lt = i + 1;
             if after_lt < html.len() {
-                let start = if bytes[after_lt] == b'/' { after_lt + 1 } else { after_lt };
+                let start = if bytes[after_lt] == b'/' {
+                    after_lt + 1
+                } else {
+                    after_lt
+                };
                 if start + tag_bytes.len() <= html.len()
                     && &html.as_bytes()[start..start + tag_bytes.len()] == tag_bytes
                 {
@@ -166,8 +172,11 @@ pub fn clean_markdown(md: &str) -> String {
             let mut depth = 1;
             let mut j = i + 3;
             while j < len && depth > 0 {
-                if bytes[j] == b'(' { depth += 1; }
-                else if bytes[j] == b')' { depth -= 1; }
+                if bytes[j] == b'(' {
+                    depth += 1;
+                } else if bytes[j] == b')' {
+                    depth -= 1;
+                }
                 j += 1;
             }
             i = j;
@@ -187,8 +196,11 @@ pub fn clean_markdown(md: &str) -> String {
             let mut depth = 1;
             let mut j = i + 4;
             while j < len && depth > 0 {
-                if bytes[j] == b'(' { depth += 1; }
-                else if bytes[j] == b')' { depth -= 1; }
+                if bytes[j] == b'(' {
+                    depth += 1;
+                } else if bytes[j] == b')' {
+                    depth -= 1;
+                }
                 j += 1;
             }
             let url = &md[i + 4..j.saturating_sub(1).max(i + 4)];
@@ -212,8 +224,11 @@ pub fn clean_markdown(md: &str) -> String {
                     let mut depth = 1;
                     let mut j = url_start;
                     while j < len && depth > 0 {
-                        if bytes[j] == b'(' { depth += 1; }
-                        else if bytes[j] == b')' { depth -= 1; }
+                        if bytes[j] == b'(' {
+                            depth += 1;
+                        } else if bytes[j] == b')' {
+                            depth -= 1;
+                        }
                         j += 1;
                     }
                     let url = &md[url_start..j - 1];
@@ -448,7 +463,10 @@ mod tests {
 
         // No leftover script execution surface.
         assert!(!md.contains("<script"), "script tag must be stripped");
-        assert!(!md.contains("</script"), "closing script tag must be stripped");
+        assert!(
+            !md.contains("</script"),
+            "closing script tag must be stripped"
+        );
         assert!(!md.contains("alert("), "script body must not survive");
 
         // Real content is preserved as Markdown (not raw HTML).
@@ -464,7 +482,8 @@ mod tests {
 
     #[test]
     fn test_clean_html_removes_nav() {
-        let html = "<html><body><nav>Nav links</nav><article><p>Content</p></article></body></html>";
+        let html =
+            "<html><body><nav>Nav links</nav><article><p>Content</p></article></body></html>";
         let cleaned = clean_html_for_markdown(html);
         assert!(!cleaned.contains("Nav links"));
         assert!(cleaned.contains("Content"));
@@ -472,7 +491,8 @@ mod tests {
 
     #[test]
     fn test_clean_html_removes_button_and_svg() {
-        let html = r#"<button class="share">Share</button><svg><path d="M0 0"/></svg><p>Real content</p>"#;
+        let html =
+            r#"<button class="share">Share</button><svg><path d="M0 0"/></svg><p>Real content</p>"#;
         let cleaned = clean_html_for_markdown(html);
         assert!(!cleaned.contains("Share"));
         assert!(!cleaned.contains("svg"));
@@ -509,7 +529,10 @@ mod tests {
 
     #[test]
     fn test_collapse_empty_lines_many_newlines() {
-        assert_eq!(collapse_empty_lines("line1\n\n\n\n\nline2"), "line1\n\nline2");
+        assert_eq!(
+            collapse_empty_lines("line1\n\n\n\n\nline2"),
+            "line1\n\nline2"
+        );
     }
 
     #[test]

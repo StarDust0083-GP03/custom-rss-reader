@@ -8,10 +8,7 @@ use super::AppState;
 // ---- Feed fetching ----
 
 #[tauri::command]
-pub async fn fetch_feed(
-    state: State<'_, AppState>,
-    subscription_id: i64,
-) -> Result<Vec<FeedItem>> {
+pub async fn fetch_feed(state: State<'_, AppState>, subscription_id: i64) -> Result<Vec<FeedItem>> {
     let sub = state
         .subscription_service
         .get_subscription(subscription_id)
@@ -74,7 +71,10 @@ pub async fn fetch_website_markdown(
     .map_err(|e| AppError::Internal(format!("markdown task failed: {}", e)))??;
 
     if let Some(item_id) = item_id {
-        state.feed_repo.update_content_md(item_id, &md, true).await?;
+        state
+            .feed_repo
+            .update_content_md(item_id, &md, true)
+            .await?;
         // The website Markdown is richer than the RSS snippet the item was
         // first indexed with — queue a re-embed so semantic search finds
         // this article by its full text on the next sync.
@@ -133,10 +133,7 @@ pub async fn import_opml(
 }
 
 #[tauri::command]
-pub async fn export_opml(
-    state: State<'_, AppState>,
-    file_path: String,
-) -> Result<()> {
+pub async fn export_opml(state: State<'_, AppState>, file_path: String) -> Result<()> {
     let subscriptions = state.subscription_service.list_subscriptions().await?;
     let opml = generate_opml(&subscriptions)?;
 
@@ -159,9 +156,13 @@ fn parse_opml(content: &str) -> Result<Vec<NewSubscription>> {
     let mut reader = Reader::from_str(content);
     let mut buf = Vec::new();
     let mut subscriptions = Vec::new();
+    let mut saw_opml = false;
 
     loop {
         match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) if e.name().as_ref() == b"opml" => {
+                saw_opml = true;
+            }
             Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
                 if e.name().as_ref() != b"outline" {
                     continue;
@@ -175,21 +176,14 @@ fn parse_opml(content: &str) -> Result<Vec<NewSubscription>> {
 
                 for attr in e.attributes().flatten() {
                     let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
-                    let value = attr
-                        .unescape_value()
-                        .unwrap_or_default()
-                        .to_string();
+                    let value = attr.unescape_value().unwrap_or_default().to_string();
                     match key {
                         "xmlUrl" | "xmlurl" => url = Some(value),
                         "title" | "text" => title = Some(value),
                         "websiteUrl" | "website_url" => website_url = Some(value),
                         "rsshubUrl" | "rsshub_url" => rsshub_url = Some(value),
-                        "useWebsite" | "use_website" => {
-                            use_website = parse_bool_attr(&value)
-                        }
-                        "autoClassify" | "auto_classify" => {
-                            auto_classify = parse_bool_attr(&value)
-                        }
+                        "useWebsite" | "use_website" => use_website = parse_bool_attr(&value),
+                        "autoClassify" | "auto_classify" => auto_classify = parse_bool_attr(&value),
                         _ => {}
                     }
                 }
@@ -213,6 +207,16 @@ fn parse_opml(content: &str) -> Result<Vec<NewSubscription>> {
             _ => {}
         }
         buf.clear();
+    }
+
+    // quick-xml is lenient: arbitrary non-XML text parses as plain-text
+    // events without error. Reject content that never opened an <opml>
+    // element so a stray file import fails loudly instead of importing 0
+    // subscriptions as if the file were valid but empty.
+    if !saw_opml {
+        return Err(AppError::Parse(
+            "OPML parse error: no <opml> element found".into(),
+        ));
     }
 
     Ok(subscriptions)
@@ -315,12 +319,11 @@ mod tests {
 
     #[test]
     fn test_parse_opml_invalid_xml_errors() {
-        let xml = "this is not XML";
-        // Either parse-error on the first non-tag content or empty result.
-        let result = parse_opml(xml);
-        // quick-xml is lenient: it just returns no events. Either outcome is
-        // acceptable; we only assert no panic.
-        let _ = result;
+        // quick-xml is lenient: plain text parses as text events without
+        // error, so the <opml> guard must turn it into a loud parse error
+        // instead of importing zero subscriptions as a silent success.
+        let result = parse_opml("this is not XML");
+        assert!(result.is_err());
     }
 
     #[test]

@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
 use crate::database::migrations::run_migrations;
 use crate::models::{NewSubscription, Subscription};
 use crate::repositories::feed_item_repo::SqliteFeedItemRepository;
-use crate::repositories::{FeedItemRepository, SubscriptionRepository};
 use crate::repositories::subscription_repo::SqliteSubscriptionRepository;
+use crate::repositories::{FeedItemRepository, SubscriptionRepository};
 use crate::{FeedService, SubscriptionService};
 
 /// Test environment holding all dependencies.
@@ -30,7 +30,11 @@ impl TestEnv {
     pub async fn new() -> Self {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
-            .connect("sqlite::memory:")
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(":memory:")
+                    .foreign_keys(true),
+            )
             .await
             .expect("Failed to create in-memory SQLite database");
 

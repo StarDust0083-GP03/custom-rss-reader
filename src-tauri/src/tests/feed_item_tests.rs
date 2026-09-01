@@ -172,10 +172,24 @@ async fn test_favorites_and_read_later_can_filter_by_subscription() {
     env.feed_repo.toggle_read_later(later_a).await.unwrap();
     env.feed_repo.toggle_read_later(later_b).await.unwrap();
 
-    let favorites = env.feed_repo.get_favorites(Some(sub_a), 50, 0).await.unwrap();
-    assert_eq!(favorites.iter().map(|item| item.id).collect::<Vec<_>>(), vec![favorite_a]);
-    let read_later = env.feed_repo.get_read_later(Some(sub_a), 50, 0).await.unwrap();
-    assert_eq!(read_later.iter().map(|item| item.id).collect::<Vec<_>>(), vec![later_a]);
+    let favorites = env
+        .feed_repo
+        .get_favorites(Some(sub_a), 50, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        favorites.iter().map(|item| item.id).collect::<Vec<_>>(),
+        vec![favorite_a]
+    );
+    let read_later = env
+        .feed_repo
+        .get_read_later(Some(sub_a), 50, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        read_later.iter().map(|item| item.id).collect::<Vec<_>>(),
+        vec![later_a]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +229,11 @@ async fn test_empty_translation_clears_cached_content() {
         .update_translation(item_id, None, "<div>cached</div>")
         .await
         .unwrap();
-    let cleared = env.feed_repo.update_translation(item_id, None, "").await.unwrap();
+    let cleared = env
+        .feed_repo
+        .update_translation(item_id, None, "")
+        .await
+        .unwrap();
 
     assert!(cleared.translated_content.is_none());
 }
@@ -280,7 +298,8 @@ async fn test_cache_website_content() {
         <footer>Footer</footer>
     </body></html>
     "#,
-        "A longer paragraph to reach the 200 character minimum threshold for extraction. ".repeat(5),
+        "A longer paragraph to reach the 200 character minimum threshold for extraction. "
+            .repeat(5),
         "Additional content to ensure the article body is sufficiently long. ".repeat(3)
     );
 
@@ -291,8 +310,14 @@ async fn test_cache_website_content() {
         .expect("Should cache website content as Markdown");
 
     let md = cached.content_md.expect("content_md should be populated");
-    assert!(md.contains("Article Title"), "Markdown should contain the heading");
-    assert!(md.contains("main"), "Markdown should contain paragraph text");
+    assert!(
+        md.contains("Article Title"),
+        "Markdown should contain the heading"
+    );
+    assert!(
+        md.contains("main"),
+        "Markdown should contain paragraph text"
+    );
     assert!(!md.contains("Nav"), "Navigation should be stripped");
     assert!(!md.contains("Footer"), "Footer should be stripped");
 }
@@ -330,18 +355,19 @@ async fn test_ensure_content_md_for_item_populates_and_preserves_flag() {
     assert!(pre.content_md.is_none());
     assert!(!pre.is_website_content);
 
-    let updated = crate::services::feed_service::ensure_content_md_for_item(
-        &env.feed_repo,
-        item_id,
-    )
-    .await
-    .expect("lazy conversion");
+    let updated =
+        crate::services::feed_service::ensure_content_md_for_item(&env.feed_repo, item_id)
+            .await
+            .expect("lazy conversion");
 
     let md = updated
         .content_md
         .as_deref()
         .expect("content_md should be populated");
-    assert!(md.contains("Headline"), "Markdown should contain the heading");
+    assert!(
+        md.contains("Headline"),
+        "Markdown should contain the heading"
+    );
     assert!(
         !md.contains("<article>"),
         "Raw HTML must not survive the conversion"
@@ -352,12 +378,9 @@ async fn test_ensure_content_md_for_item_populates_and_preserves_flag() {
     );
 
     // Second call is a no-op (already cached).
-    let again = crate::services::feed_service::ensure_content_md_for_item(
-        &env.feed_repo,
-        item_id,
-    )
-    .await
-    .expect("second call");
+    let again = crate::services::feed_service::ensure_content_md_for_item(&env.feed_repo, item_id)
+        .await
+        .expect("second call");
     assert_eq!(again.content_md.as_deref(), Some(md));
 }
 
@@ -381,12 +404,10 @@ async fn test_ensure_content_md_short_rss_falls_back_to_plain() {
         .unwrap()
         .id;
 
-    let updated = crate::services::feed_service::ensure_content_md_for_item(
-        &env.feed_repo,
-        item_id,
-    )
-    .await
-    .expect("lazy conversion should not error on short input");
+    let updated =
+        crate::services::feed_service::ensure_content_md_for_item(&env.feed_repo, item_id)
+            .await
+            .expect("lazy conversion should not error on short input");
 
     let md = updated.content_md.expect("markdown should be populated");
     assert!(md.contains("[there]"));
@@ -508,7 +529,11 @@ async fn test_find_index_page_truncates_text_columns() {
     let rows = env.feed_repo.find_index_page(0, 10).await.unwrap();
     assert_eq!(rows.len(), 1);
     let desc = rows[0].description.as_deref().expect("description present");
-    assert!(desc.chars().count() <= 2001, "description must be truncated, got {} chars", desc.chars().count());
+    assert!(
+        desc.chars().count() <= 2001,
+        "description must be truncated, got {} chars",
+        desc.chars().count()
+    );
 }
 
 #[tokio::test]
@@ -530,7 +555,12 @@ async fn test_find_index_rows_by_ids() {
     let id2 = create_item(&env, sub_id, "two").await;
 
     // Empty input → empty output, no SQL error
-    assert!(env.feed_repo.find_index_rows_by_ids(&[]).await.unwrap().is_empty());
+    assert!(env
+        .feed_repo
+        .find_index_rows_by_ids(&[])
+        .await
+        .unwrap()
+        .is_empty());
 
     let rows = env
         .feed_repo
@@ -588,7 +618,10 @@ async fn test_index_rows_prefer_content_md() {
         .find_index_rows_by_ids(&[full_id, lazy_id])
         .await
         .unwrap();
-    assert_eq!(rows[0].content.as_deref(), Some("# Full website article body"));
+    assert_eq!(
+        rows[0].content.as_deref(),
+        Some("# Full website article body")
+    );
     assert_eq!(rows[1].content.as_deref(), Some("<p>RSS only text</p>"));
 }
 
@@ -694,11 +727,21 @@ async fn test_find_website_backfill_candidates() {
         .unwrap();
     // Newest-first: the lazy item was created after the missing one
     assert_eq!(candidates.len(), 2);
-    assert_eq!(candidates[0], (lazy, "https://web.example.com/c".to_string()));
-    assert_eq!(candidates[1], (missing, "https://web.example.com/a".to_string()));
+    assert_eq!(
+        candidates[0],
+        (lazy, "https://web.example.com/c".to_string())
+    );
+    assert_eq!(
+        candidates[1],
+        (missing, "https://web.example.com/a".to_string())
+    );
 
     // The limit bounds the batch (politeness: Q)
-    let one = env.feed_repo.find_website_backfill_candidates(1).await.unwrap();
+    let one = env
+        .feed_repo
+        .find_website_backfill_candidates(1)
+        .await
+        .unwrap();
     assert_eq!(one.len(), 1);
     assert_eq!(one[0].0, lazy);
 }
@@ -725,7 +768,10 @@ async fn test_summaries_carry_source_title() {
     let items = env.feed_repo.find_all(Some(sub.id), 10, 0).await.unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].source_title.as_deref(), Some("Example Feed"));
-    assert_eq!(items[0].source_url.as_deref(), Some("https://example.com/rss"));
+    assert_eq!(
+        items[0].source_url.as_deref(),
+        Some("https://example.com/rss")
+    );
 
     // Search path (different query shape, same join)
     let hits = env.feed_repo.search("article", 10).await.unwrap();
@@ -773,10 +819,9 @@ async fn test_tag_catalog_canonicalizes_and_manages_mappings() {
         .unwrap();
     env.feed_repo.create_tag("Database").await.unwrap();
 
-    let tags: Vec<String> = serde_json::from_str(
-        &env.feed_repo.find_by_id(first).await.unwrap().tags.unwrap(),
-    )
-    .unwrap();
+    let tags: Vec<String> =
+        serde_json::from_str(&env.feed_repo.find_by_id(first).await.unwrap().tags.unwrap())
+            .unwrap();
     assert_eq!(tags, vec!["machine_learning", "ai", "extra"]);
     assert!(env.feed_repo.create_tag("machine-learning").await.is_err());
 
@@ -784,10 +829,9 @@ async fn test_tag_catalog_canonicalizes_and_manages_mappings() {
         .merge_tags("machine_learning", &["ai".into()])
         .await
         .unwrap();
-    let after_merge: Vec<String> = serde_json::from_str(
-        &env.feed_repo.find_by_id(first).await.unwrap().tags.unwrap(),
-    )
-    .unwrap();
+    let after_merge: Vec<String> =
+        serde_json::from_str(&env.feed_repo.find_by_id(first).await.unwrap().tags.unwrap())
+            .unwrap();
     assert_eq!(after_merge, vec!["machine_learning", "extra"]);
 
     env.feed_repo
@@ -799,7 +843,12 @@ async fn test_tag_catalog_canonicalizes_and_manages_mappings() {
         .await
         .unwrap();
     let second_tags: Vec<String> = serde_json::from_str(
-        &env.feed_repo.find_by_id(second).await.unwrap().tags.unwrap(),
+        &env.feed_repo
+            .find_by_id(second)
+            .await
+            .unwrap()
+            .tags
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(second_tags, vec!["artificial_intelligence"]);
@@ -812,27 +861,58 @@ async fn test_tag_catalog_canonicalizes_and_manages_mappings() {
     assert!(head.aliases.contains(&"ai".to_string()));
     assert!(head.aliases.contains(&"machine_learning".to_string()));
 
-    env.feed_repo.delete_tag("artificial_intelligence").await.unwrap();
+    env.feed_repo
+        .delete_tag("artificial_intelligence")
+        .await
+        .unwrap();
     let blocked = env.feed_repo.find_blocked_tags().await.unwrap();
     assert!(blocked.contains(&"artificial_intelligence".to_string()));
     assert!(blocked.contains(&"ai".to_string()));
     assert!(blocked.contains(&"machine_learning".to_string()));
-    assert!(
-        env.feed_repo
-            .save_tags(second, r#"["AI", "extra"]"#, "technology")
-            .await
-            .unwrap()
-            .tags
-            .as_deref()
-            .is_some_and(|tags| tags == r#"["extra"]"#)
-    );
+    assert!(env
+        .feed_repo
+        .save_tags(second, r#"["AI", "extra"]"#, "technology")
+        .await
+        .unwrap()
+        .tags
+        .as_deref()
+        .is_some_and(|tags| tags == r#"["extra"]"#));
 
     env.feed_repo
         .restore_tag("artificial_intelligence")
         .await
         .unwrap();
     let restored = env.feed_repo.find_tag_catalog().await.unwrap();
-    assert!(restored.iter().any(|entry| entry.name == "artificial_intelligence"));
+    assert!(restored
+        .iter()
+        .any(|entry| entry.name == "artificial_intelligence"));
+}
+
+#[tokio::test]
+async fn test_restore_tag_requires_a_blocked_non_alias_name() {
+    let env = TestEnv::new().await;
+    env.feed_repo.create_tag("machine_learning").await.unwrap();
+    env.feed_repo.create_tag("ai").await.unwrap();
+    env.feed_repo
+        .merge_tags("machine_learning", &["ai".into()])
+        .await
+        .unwrap();
+
+    assert!(env.feed_repo.restore_tag("never_blocked").await.is_err());
+
+    // Even a corrupt/legacy blocked row cannot turn an existing alias into a
+    // second canonical tag with the same name.
+    sqlx::query("INSERT INTO blocked_tags (name) VALUES ('ai')")
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    assert!(env.feed_repo.restore_tag("ai").await.is_err());
+    let canonical_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM tag_catalog WHERE name = 'ai'")
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+    assert_eq!(canonical_count, 0);
 }
 
 #[tokio::test]
@@ -870,4 +950,3 @@ async fn test_find_all_tags_is_canonical_and_subscription_scoped() {
         vec!["machine_learning"]
     );
 }
-

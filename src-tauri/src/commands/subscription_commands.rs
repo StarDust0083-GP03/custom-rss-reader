@@ -32,25 +32,17 @@ pub async fn add_subscription(
 }
 
 #[tauri::command]
-pub async fn list_subscriptions(
-    state: State<'_, AppState>,
-) -> Result<Vec<Subscription>> {
+pub async fn list_subscriptions(state: State<'_, AppState>) -> Result<Vec<Subscription>> {
     state.subscription_service.list_subscriptions().await
 }
 
 #[tauri::command]
-pub async fn get_subscription(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<Subscription> {
+pub async fn get_subscription(state: State<'_, AppState>, id: i64) -> Result<Subscription> {
     state.subscription_service.get_subscription(id).await
 }
 
 #[tauri::command]
-pub async fn remove_subscription(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<()> {
+pub async fn remove_subscription(state: State<'_, AppState>, id: i64) -> Result<()> {
     // Collect item ids BEFORE the cascade delete so the ChromaDB index can
     // be cleaned up too; otherwise deleted articles stay searchable forever.
     let item_ids = state.feed_repo.find_ids_by_subscription(id).await?;
@@ -74,8 +66,13 @@ pub async fn remove_subscription(
     if let Some(chroma) = state.chroma_service.get().await {
         if let Err(e) = chroma.delete_items(&item_ids).await {
             eprintln!("ChromaDB cleanup for subscription {} failed: {}", id, e);
-        } else if let Err(e) = crate::chroma::sync::SyncState::clear_pending_deletes(&item_ids).await {
-            eprintln!("Failed to clear ChromaDB tombstones for subscription {}: {}", id, e);
+        } else if let Err(e) =
+            crate::chroma::sync::SyncState::clear_pending_deletes(&item_ids).await
+        {
+            eprintln!(
+                "Failed to clear ChromaDB tombstones for subscription {}: {}",
+                id, e
+            );
         }
     }
     Ok(())
@@ -99,21 +96,18 @@ pub async fn update_subscription(
         rsshub_url,
     };
 
-    state.subscription_service.update_subscription(id, input).await
+    state
+        .subscription_service
+        .update_subscription(id, input)
+        .await
 }
 
 #[tauri::command]
-pub async fn toggle_use_website(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<Subscription> {
+pub async fn toggle_use_website(state: State<'_, AppState>, id: i64) -> Result<Subscription> {
     state.subscription_service.toggle_use_website(id).await
 }
 
 #[tauri::command]
-pub async fn toggle_auto_classify(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<Subscription> {
+pub async fn toggle_auto_classify(state: State<'_, AppState>, id: i64) -> Result<Subscription> {
     state.subscription_service.toggle_auto_classify(id).await
 }

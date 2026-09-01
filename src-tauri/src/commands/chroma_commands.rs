@@ -46,6 +46,17 @@ pub async fn set_chroma_config(
     config.validate()?;
     config.save()?;
     state.chroma_service.invalidate().await;
+
+    // An enabled host/collection change gets a new collection identity. Run
+    // the identity-aware catch-up now instead of leaving semantic search empty
+    // until the next app restart or feed refresh.
+    if config.enabled {
+        let repo = state.feed_repo.clone();
+        let chroma = state.chroma_service.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::chroma::sync::run_background_sync(repo, chroma).await;
+        });
+    }
     Ok(())
 }
 
@@ -71,13 +82,15 @@ pub async fn enable_chroma_and_index(
     // collection call. Do this before persisting enabled=true, so an
     // unreachable server cannot leave the app looking successfully enabled.
     let chroma = ChromaService::new(&config).await?;
-    config.save()?;
-    state.chroma_service.invalidate().await;
 
     // Full resync is intentional for first-use: the persisted watermark may
     // belong to a previous collection, while every existing article must be
-    // searchable after this one-click setup.
+    // searchable after this one-click setup. Persist enabled=true only after
+    // indexing succeeds, so a model/download failure cannot leave a partially
+    // initialized configuration looking ready.
     let sync = crate::chroma::sync::full_resync(&state.feed_repo, &chroma).await?;
+    config.save()?;
+    state.chroma_service.invalidate().await;
     Ok(ChromaInitializationResponse {
         config: ChromaConfigResponse {
             host: config.host,
@@ -134,11 +147,8 @@ pub async fn find_similar_items(
     let mut summaries = state.feed_repo.find_summaries_by_ids(&ids).await?;
     // find_summaries_by_ids returns DB order — restore the similarity
     // ranking so the most similar article shows first.
-    let rank: std::collections::HashMap<i64, usize> = ids
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (*id, i))
-        .collect();
+    let rank: std::collections::HashMap<i64, usize> =
+        ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
     summaries.sort_by_key(|s| rank.get(&s.id).copied().unwrap_or(usize::MAX));
     Ok(summaries)
 }
@@ -225,11 +235,9 @@ fn clamp_limit(limit: Option<i64>, default: i64, max: i64) -> i64 {
 }
 
 async fn get_chroma_service(state: &AppState) -> Result<Arc<ChromaService>> {
-    state
-        .chroma_service
-        .get()
-        .await
-        .ok_or_else(|| crate::error::AppError::OperationFailed(
+    state.chroma_service.get().await.ok_or_else(|| {
+        crate::error::AppError::OperationFailed(
             "ChromaDB is not reachable. Check the server and the Semantic DB settings.".into(),
-        ))
+        )
+    })
 }

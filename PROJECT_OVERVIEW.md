@@ -1,6 +1,6 @@
 # RSS Reader · Current Project Overview
 
-> **Source of truth:** this document describes the repository as of 2026-08-25. Paths below are checked against the current worktree. Update this file when a module moves; do not copy an old tree into a new section.
+> **Source of truth:** this document describes the repository as of 2026-08-31. Paths below are checked against the current worktree. Update this file when a module moves; do not copy an old tree into a new section.
 
 ## 1. Product and runtime
 
@@ -155,8 +155,9 @@ SQLite lives at `~/.rss-reader/rss_reader.db`. Migrations add missing columns, r
 
 Chroma uses two durable mechanisms:
 
-- `~/.rss-reader/chroma_sync.json` stores the watermark and pending upsert/delete work.
-- Delete tombstones are persisted before subscription rows are cascade-deleted. Sync checks whether a tombstoned item still exists before deleting its vector, making a crash before the SQLite delete safe.
+- `~/.rss-reader/chroma_sync.json` stores SQLite/collection identities, the watermark, reconciliation state, and pending upsert/delete work.
+- A database or collection identity change resets the watermark. A completed rebuild removes orphaned `item_*` vectors while preserving unrelated collection entries.
+- Delete tombstones are persisted before subscription rows are cascade-deleted. SQLite foreign keys are enabled on every connection; sync also checks whether a tombstoned item still exists before deleting its vector, making a crash before the SQLite delete safe.
 
 The default Chroma helper binds to `127.0.0.1` and installs `chromadb==1.5.9`. Remote binding must be an explicit operator choice.
 
@@ -169,6 +170,8 @@ The default Chroma helper binds to `127.0.0.1` and installs `chromadb==1.5.9`. R
 - External browser opening parses the URL and requires HTTP(S) with a host.
 - Markdown and HTML display paths pass through the shared sanitizer.
 - Tauri CSP restricts scripts to the bundled origin and limits object/base sources.
+- Local embedding downloads use an immutable model revision, architecture-specific weights, and SHA-256 verification before ONNX load.
+- Chroma setup binds to loopback by default and refuses broad process kills or unsafe virtual-environment deletion paths.
 
 These controls do not claim to solve DNS rebinding or a compromised local machine; those require a stronger network sandbox or OS-level policy.
 
@@ -193,5 +196,3 @@ These controls do not claim to solve DNS rebinding or a compromised local machin
 3. Run `npm test` and the narrow Rust test first.
 4. Run `npm run verify` before pushing.
 5. Do not commit API keys, local databases, `target/`, `dist/`, or personal reports.
-
-The current branch used for integration testing is `refactor`.

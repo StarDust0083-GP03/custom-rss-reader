@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::error::Result;
-use crate::models::{NewFeedItem, FeedItem, FeedItemSummary, NewSubscription, Subscription, UpdateSubscription};
+use crate::models::{
+    FeedItem, FeedItemSummary, NewFeedItem, NewSubscription, Subscription, UpdateSubscription,
+};
 
 /// Lightweight row for embedding-index pipelines (ChromaDB).
 ///
@@ -88,6 +90,11 @@ pub trait FeedItemRepository: Send + Sync {
     /// Used to validate the Chroma sync watermark after a DB reset.
     async fn max_item_id(&self) -> Result<i64>;
 
+    /// Stable identity generated inside this SQLite database. Replacing the
+    /// database produces a new id so external indexes cannot reuse an old
+    /// watermark against unrelated rows.
+    async fn database_id(&self) -> Result<String>;
+
     /// Find items that should have website Markdown cached but don't:
     /// their subscription has `use_website` enabled and they carry a link,
     /// yet `content_md` is missing/empty or did not come from the website
@@ -95,11 +102,7 @@ pub trait FeedItemRepository: Send + Sync {
     /// from the feed's history before website mode was enabled, or whose
     /// fetch-time website pre-cache failed. Returned newest-first so a
     /// batched backfill refreshes the most relevant articles first.
-    async fn find_website_backfill_candidates(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<(i64, String)>>;
-
+    async fn find_website_backfill_candidates(&self, limit: i64) -> Result<Vec<(i64, String)>>;
 
     /// Update the Markdown-cached content for a feed item.
     ///

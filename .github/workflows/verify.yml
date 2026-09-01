@@ -47,4 +47,6 @@ jobs:
         run: npm run verify
 
       - name: Check shell scripts
-        run: bash -n scripts/setup-chroma.sh
+        run: |
+          bash -n scripts/setup-chroma.sh
+          bash -n scripts/init.sh

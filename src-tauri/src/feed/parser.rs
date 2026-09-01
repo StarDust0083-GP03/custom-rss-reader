@@ -207,7 +207,10 @@ mod tests {
     fn test_detect_content_type() {
         assert_eq!(detect_content_type("<?xml version=\"1.0\"?>"), "XML");
         assert_eq!(detect_content_type("<rss version=\"2.0\">"), "RSS");
-        assert_eq!(detect_content_type("<feed xmlns=\"http://www.w3.org/2005/Atom\">"), "Atom");
+        assert_eq!(
+            detect_content_type("<feed xmlns=\"http://www.w3.org/2005/Atom\">"),
+            "Atom"
+        );
         assert_eq!(detect_content_type("{\"key\": \"value\"}"), "JSON");
         assert_eq!(detect_content_type("<!DOCTYPE html>"), "HTML");
         assert_eq!(detect_content_type("<html lang=\"en\">"), "HTML");

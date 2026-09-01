@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { afterEach, describe, expect, it } from "vitest";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { chroma, items, tags } from "../src/api";
@@ -8,6 +10,13 @@ afterEach(() => {
 });
 
 describe("frontend security and IPC contracts", () => {
+  it("allows a blank AI key field so saving can preserve the existing secret", () => {
+    const html = readFileSync("index.html", "utf8");
+    const page = new DOMParser().parseFromString(html, "text/html");
+    const input = page.querySelector<HTMLInputElement>("#ai-api-key");
+    expect(input?.required).toBe(false);
+  });
+
   it("accepts public article URLs and rejects active or private destinations", () => {
     expect(safeHttpUrl(" https://example.com/article ")).toBe("https://example.com/article");
     expect(safeHttpUrl("http://127.0.0.1:8000/admin")).toBeNull();

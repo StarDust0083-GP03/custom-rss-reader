@@ -168,7 +168,11 @@ impl FeedFetcher {
         let document = Html::parse_document(html);
 
         // WeChat-specific attributes checked first
-        let wechat_selectors = ["[data-content]", "[content_noencode]", ".rich_media_content"];
+        let wechat_selectors = [
+            "[data-content]",
+            "[content_noencode]",
+            ".rich_media_content",
+        ];
         for selector_str in &wechat_selectors {
             if let Ok(selector) = Selector::parse(selector_str) {
                 if let Some(element) = document.select(&selector).next() {
@@ -331,7 +335,11 @@ fn rewrite_rsshub_url(url: &str) -> String {
 
 /// Map an HTTP status to a retryable / non-retryable error category.
 fn map_status_error(status: reqwest::StatusCode, url: &reqwest::Url) -> AppError {
-    let msg = format!("HTTP {} {}", status.as_u16(), status.canonical_reason().unwrap_or(""));
+    let msg = format!(
+        "HTTP {} {}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("")
+    );
     match status.as_u16() {
         // Transient: worth retrying
         408 | 429 | 500..=599 => AppError::Network(msg),
@@ -388,7 +396,9 @@ mod tests {
 
     #[test]
     fn test_extract_main_content_article() {
-        let long = "A longer paragraph to reach the 200 character minimum threshold for extraction. ".repeat(5);
+        let long =
+            "A longer paragraph to reach the 200 character minimum threshold for extraction. "
+                .repeat(5);
         let html = format!(
             r#"
         <html><body>
@@ -442,7 +452,10 @@ mod tests {
 
     #[test]
     fn test_website_url_allows_public_http_and_https() {
-        for raw in ["https://example.com/article", "http://198.51.100.10/article"] {
+        for raw in [
+            "https://example.com/article",
+            "http://198.51.100.10/article",
+        ] {
             let url = reqwest::Url::parse(raw).unwrap();
             assert!(is_safe_website_url(&url), "should allow {raw}");
         }

@@ -8,14 +8,15 @@
 #   3. npm install + frontend build
 #   4. `cargo check` on src-tauri — validates that `npm run tauri dev/build` compiles
 #   5. ChromaDB server: venv + pip install + start (via scripts/setup-chroma.sh)
-#   6. Embedding model pre-download into ~/.rss-reader/models (mirrors HF,
-#      huggingface.co, hf-mirror.com) so the first semantic search is instant
+#   6. Pinned, SHA-256-verified embedding model pre-download into
+#      ~/.rss-reader/models so the first semantic search avoids a download
 #
 # Usage:
 #   ./scripts/init.sh            # full setup (skips the long production build)
 #   ./scripts/init.sh --build    # also run `npm run tauri build`
 #
 # Env overrides (passed through to setup-chroma.sh / the Rust backend):
+#   CHROMA_HOST        ChromaDB bind address   (default 127.0.0.1)
 #   CHROMA_PORT        ChromaDB port           (default 8000)
 #   CHROMA_VERSION     server package version  (default 1.5.9)
 #   CHROMA_COLLECTION  collection to create    (default rss_articles)
@@ -238,7 +239,24 @@ fi
 # the first semantic search/index doesn't stall on a ~120 MB download.
 # Mirrors and paths mirror src-tauri/src/chroma/embeddings.rs.
 MODEL_REPO="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-MODEL_FILES=("tokenizer.json" "onnx/model_quint8_avx2.onnx")
+MODEL_REVISION="e8f8c211226b894fcb81acc59f3b34ba3efd5f42"
+TOKENIZER_FILE="tokenizer.json"
+TOKENIZER_SHA256="2c3387be76557bd40970cec13153b3bbf80407865484b209e655e5e4729076b8"
+case "$(uname -m)" in
+    arm64|aarch64)
+        MODEL_FILE="onnx/model_qint8_arm64.onnx"
+        MODEL_SHA256="783fea82d71a58179b830a4dbd2d58447e640609e98eedf9ffa12622d375a672"
+        ;;
+    x86_64|amd64)
+        MODEL_FILE="onnx/model_quint8_avx2.onnx"
+        MODEL_SHA256="98a01d88b7de996cdea58c32ca71208c09968d143798814b2ea09d3439dc334f"
+        ;;
+    *)
+        MODEL_FILE="onnx/model.onnx"
+        MODEL_SHA256="10f7a088420252b26caf819236ca2c9d2987afd0fc06fec7553b542a5655a05a"
+        ;;
+esac
+MODEL_SPECS=("$TOKENIZER_FILE|$TOKENIZER_SHA256" "$MODEL_FILE|$MODEL_SHA256")
 MODEL_DIR="${CHROMA_MODEL_DIR:-$HOME/.rss-reader/models}/$MODEL_REPO"
 
 model_mirrors() {
@@ -247,31 +265,53 @@ model_mirrors() {
     echo "https://hf-mirror.com"
 }
 
+model_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+model_file_ok() {
+    [[ -f "$1" ]] && [[ "$(model_sha256 "$1")" == "$2" ]]
+}
+
 download_model() {
-    local file dest url got mirror
-    for file in "${MODEL_FILES[@]}"; do
+    local spec file expected dest url got mirror actual
+    for spec in "${MODEL_SPECS[@]}"; do
+        file="${spec%%|*}"
+        expected="${spec#*|}"
         dest="$MODEL_DIR/$file"
-        if [[ -f "$dest" ]]; then
-            green "  ✓ $file already present ($(du -h "$dest" | cut -f1))"
+        if model_file_ok "$dest" "$expected"; then
+            green "  ✓ $file verified ($(du -h "$dest" | cut -f1))"
             continue
+        fi
+        if [[ -f "$dest" ]]; then
+            yellow "  checksum mismatch for $file — replacing it"
+            rm -f -- "$dest"
         fi
         mkdir -p "$(dirname "$dest")"
         got=0
-        for mirror in $(model_mirrors); do
-            url="$mirror/$MODEL_REPO/resolve/main/$file"
+        while IFS= read -r mirror; do
+            url="${mirror%/}/$MODEL_REPO/resolve/$MODEL_REVISION/$file"
             echo "  downloading $file from $mirror ..."
             if curl -fL --retry 3 --connect-timeout 15 -o "$dest.part" "$url" 2>/dev/null; then
-                mv "$dest.part" "$dest"
-                green "  ✓ $file ($(du -h "$dest" | cut -f1))"
-                got=1
-                break
+                actual=$(model_sha256 "$dest.part")
+                if [[ "$actual" == "$expected" ]]; then
+                    mv "$dest.part" "$dest"
+                    green "  ✓ $file verified ($(du -h "$dest" | cut -f1))"
+                    got=1
+                    break
+                fi
+                yellow "    checksum mismatch from $mirror"
             else
                 yellow "    failed from $mirror"
-                rm -f "$dest.part"
             fi
-        done
+            rm -f -- "$dest.part"
+        done < <(model_mirrors)
         if [[ "$got" != "1" ]]; then
-            red "  ✗ could not download $file from any mirror"
+            red "  ✗ could not download a verified $file from any mirror"
             return 1
         fi
     done

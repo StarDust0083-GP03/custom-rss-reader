@@ -11,11 +11,11 @@ use crate::feed::parser::parse_feed;
 use crate::feed::FeedFetcher;
 use crate::models::{FeedItem, Subscription};
 
+use crate::ai::service::{AiService, SharedAiService};
 use crate::content_processor::html_to_markdown_pipeline;
 #[cfg(test)]
 use crate::models::NewFeedItem;
 use crate::repositories::{FeedItemRepository, SubscriptionRepository};
-use crate::ai::service::{AiService, SharedAiService};
 
 /// Summary of a batch fetch operation.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -349,7 +349,7 @@ async fn fetch_parse_and_save(
     // (was: one full-content SELECT * per parsed item — the N+1 hot spot).
     let (existing_guids, existing_links) = repo.find_dedup_keys(subscription.id).await?;
 
-        let mut saved = Vec::new();
+    let mut saved = Vec::new();
     // Items pending auto-classification. Classification now runs in BATCHES
     // after the insert loop: one LLM call per ~20 articles instead of one
     // call per article — a 20x reduction in request count (and thus in
@@ -451,8 +451,7 @@ async fn classify_batch_and_save(
         if response.tags.is_empty() && response.category.is_none() {
             continue;
         }
-        let tags_json =
-            serde_json::to_string(&response.tags).unwrap_or_else(|_| "[]".to_string());
+        let tags_json = serde_json::to_string(&response.tags).unwrap_or_else(|_| "[]".to_string());
         let category = response.category.unwrap_or_default();
         if let Err(e) = repo.save_tags(item.id, &tags_json, &category).await {
             eprintln!("Failed to save tags for item {}: {}", item.id, e);
@@ -483,7 +482,10 @@ async fn precache_website_content(
     match converted {
         Ok(Ok(md)) => {
             if let Err(e) = repo.update_content_md(item.id, &md, true).await {
-                eprintln!("Failed to cache website content for item {}: {}", item.id, e);
+                eprintln!(
+                    "Failed to cache website content for item {}: {}",
+                    item.id, e
+                );
             } else {
                 // The website Markdown is richer than the RSS snippet the
                 // item was indexed from at insert time — queue a re-embed
@@ -492,7 +494,10 @@ async fn precache_website_content(
             }
         }
         Ok(Err(e)) => {
-            eprintln!("Failed to convert website content for item {}: {}", item.id, e);
+            eprintln!(
+                "Failed to convert website content for item {}: {}",
+                item.id, e
+            );
         }
         Err(e) => {
             eprintln!("Website conversion task failed for item {}: {}", item.id, e);

@@ -1,5 +1,7 @@
 use chromadb::client::{ChromaAuthMethod, ChromaClient, ChromaClientOptions};
-use chromadb::collection::{ChromaCollection, CollectionEntries, QueryOptions, QueryResult};
+use chromadb::collection::{
+    ChromaCollection, CollectionEntries, GetOptions, QueryOptions, QueryResult,
+};
 use chromadb::embeddings::EmbeddingFunction;
 use serde_json::Map;
 
@@ -76,6 +78,12 @@ impl ChromaService {
         self.upsert_index_rows(std::slice::from_ref(&row)).await
     }
 
+    /// Chroma's stable UUID for this collection. Sync persists it so a
+    /// collection change cannot reuse another collection's watermark.
+    pub fn collection_id(&self) -> &str {
+        self.collection.id()
+    }
+
     /// Remove multiple feed items from the index (e.g. every article of a
     /// deleted subscription). Empty input is a no-op.
     pub async fn delete_items(&self, item_ids: &[i64]) -> Result<()> {
@@ -83,7 +91,7 @@ impl ChromaService {
             return Ok(());
         }
         let ids: Vec<String> = item_ids.iter().map(|id| format!("item_{}", id)).collect();
-        let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
         self.collection
             .delete(Some(id_refs), None, None)
             .await
@@ -91,6 +99,44 @@ impl ChromaService {
                 crate::error::AppError::OperationFailed(format!("ChromaDB delete: {}", e))
             })?;
         Ok(())
+    }
+
+    /// List ids owned by this app without downloading documents or vectors.
+    /// Other entries in a user-selected collection are deliberately ignored.
+    pub async fn indexed_item_ids(&self) -> Result<Vec<i64>> {
+        const PAGE_SIZE: usize = 1_000;
+        let mut offset = 0;
+        let mut item_ids = Vec::new();
+
+        loop {
+            let page = self
+                .collection
+                .get(GetOptions {
+                    ids: Vec::new(),
+                    where_metadata: None,
+                    limit: Some(PAGE_SIZE),
+                    offset: Some(offset),
+                    where_document: None,
+                    // metadatas is the smallest universally accepted include;
+                    // an empty include list has inconsistent server support.
+                    include: Some(vec!["metadatas".to_string()]),
+                })
+                .await
+                .map_err(|error| {
+                    crate::error::AppError::OperationFailed(format!(
+                        "ChromaDB list indexed items: {}",
+                        error
+                    ))
+                })?;
+            let page_len = page.ids.len();
+            item_ids.extend(page.ids.iter().filter_map(|id| parse_item_id(id)));
+            if page_len < PAGE_SIZE {
+                break;
+            }
+            offset += page_len;
+        }
+
+        Ok(item_ids)
     }
 
     /// Perform a semantic search against the indexed articles.
@@ -123,9 +169,7 @@ impl ChromaService {
         if text.is_empty() {
             return Ok(Vec::new());
         }
-        let results = self
-            .query_by_text(&text, limit.max(0) as usize + 1)
-            .await?;
+        let results = self.query_by_text(&text, limit.max(0) as usize + 1).await?;
         Ok(results
             .into_iter()
             .filter(|r| r.item_id != item.id)
@@ -149,9 +193,7 @@ impl ChromaService {
             .embedding_function
             .embed(&[query])
             .await
-            .map_err(|e| {
-                crate::error::AppError::OperationFailed(format!("Embed query: {}", e))
-            })?
+            .map_err(|e| crate::error::AppError::OperationFailed(format!("Embed query: {}", e)))?
             .into_iter()
             .next()
             .unwrap_or_default();
@@ -169,13 +211,13 @@ impl ChromaService {
         };
 
         let query_t0 = std::time::Instant::now();
-        let result: QueryResult = self
-            .collection
-            .query(query_options, None)
-            .await
-            .map_err(|e| {
-                crate::error::AppError::OperationFailed(format!("ChromaDB query: {}", e))
-            })?;
+        let result: QueryResult =
+            self.collection
+                .query(query_options, None)
+                .await
+                .map_err(|e| {
+                    crate::error::AppError::OperationFailed(format!("ChromaDB query: {}", e))
+                })?;
         let query_ms = query_t0.elapsed().as_millis();
 
         let mut results: Vec<SemanticSearchResult> = Vec::new();
@@ -199,10 +241,12 @@ impl ChromaService {
 
         for (i, id) in ids.iter().enumerate() {
             let score = distances.get(i).copied().unwrap_or(1.0f32) as f64;
-            let item_id = id
-                .strip_prefix("item_")
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(0);
+            // Vectors for rows that no longer parse as `item_<id>` (or were
+            // written by another tool) are not navigable — skip instead of
+            // synthesizing a broken `item_id = 0` hit.
+            let Some(item_id) = parse_item_id(id) else {
+                continue;
+            };
 
             let title = metadatas
                 .get(i)
@@ -278,7 +322,10 @@ impl ChromaService {
                             .unwrap_or_default()
                             .into(),
                     );
-                    m.insert("category".into(), r.category.clone().unwrap_or_default().into());
+                    m.insert(
+                        "category".into(),
+                        r.category.clone().unwrap_or_default().into(),
+                    );
                     m
                 })
                 .collect();
@@ -342,9 +389,13 @@ async fn connect(
     client
         .get_or_create_collection(collection_name, None)
         .await
-        .map_err(|e| {
-            crate::error::AppError::OperationFailed(format!("ChromaDB collection: {}", e))
-        })
+        .map_err(|e| crate::error::AppError::OperationFailed(format!("ChromaDB collection: {}", e)))
+}
+
+fn parse_item_id(id: &str) -> Option<i64> {
+    id.strip_prefix("item_")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|id| *id > 0)
 }
 
 /// Result of a semantic search query. `document` is intentionally omitted;
@@ -498,6 +549,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_only_owned_item_ids() {
+        assert_eq!(parse_item_id("item_42"), Some(42));
+        assert_eq!(parse_item_id("item_0"), None);
+        assert_eq!(parse_item_id("item_notes"), None);
+        assert_eq!(parse_item_id("other_42"), None);
+    }
+
+    #[test]
     fn test_strip_html_tags_simple() {
         assert_eq!(strip_html_tags("<p>Hello</p>"), "Hello");
     }
@@ -516,7 +575,8 @@ mod tests {
     /// Regression: indexing code/JS into the embedding pollutes semantic search.
     #[test]
     fn test_strip_script_and_style() {
-        let html = r#"<p>Real content</p><script>alert('x')</script><p>More</p><style>body{}</style>"#;
+        let html =
+            r#"<p>Real content</p><script>alert('x')</script><p>More</p><style>body{}</style>"#;
         let cleaned = strip_script_and_style(html);
         assert!(cleaned.contains("Real content"));
         assert!(cleaned.contains("More"));
@@ -554,7 +614,8 @@ mod tests {
     /// blow up the embedding size.
     #[test]
     fn test_build_document_text_truncates() {
-        let doc = build_document_from_parts("T", None, Some(&"x".repeat(MAX_INDEXED_DOC_CHARS * 3)));
+        let doc =
+            build_document_from_parts("T", None, Some(&"x".repeat(MAX_INDEXED_DOC_CHARS * 3)));
         assert!(doc.len() <= MAX_INDEXED_DOC_CHARS);
     }
 
@@ -589,10 +650,19 @@ mod tests {
     /// Markdown body.
     #[test]
     fn test_best_body_prefers_markdown() {
-        assert_eq!(best_body(Some("# Full"), Some("<p>teaser</p>")), Some("# Full"));
+        assert_eq!(
+            best_body(Some("# Full"), Some("<p>teaser</p>")),
+            Some("# Full")
+        );
         // Empty/missing Markdown falls back to the RSS content.
-        assert_eq!(best_body(Some(""), Some("<p>teaser</p>")), Some("<p>teaser</p>"));
-        assert_eq!(best_body(None, Some("<p>teaser</p>")), Some("<p>teaser</p>"));
+        assert_eq!(
+            best_body(Some(""), Some("<p>teaser</p>")),
+            Some("<p>teaser</p>")
+        );
+        assert_eq!(
+            best_body(None, Some("<p>teaser</p>")),
+            Some("<p>teaser</p>")
+        );
         assert_eq!(best_body(None, None), None);
     }
 }

@@ -12,6 +12,15 @@ let editingTag: string | null = null;
 let deletingTag: string | null = null;
 let clustering = false;
 
+type TagChangeDetail =
+  | { kind: "rename"; oldName: string; newName: string | null }
+  | { kind: "merge"; canonicalName: string; members: string[] }
+  | { kind: "delete"; name: string };
+
+function notifyTagChange(detail: TagChangeDetail) {
+  window.dispatchEvent(new CustomEvent<TagChangeDetail>("rss-tags-changed", { detail }));
+}
+
 export async function openTagManager() {
   document.getElementById("tag-manager-modal")?.classList.add("visible");
   await refreshTagManager();
@@ -235,6 +244,8 @@ async function renameTag(oldName: string, newName: string) {
     editingTag = null;
     toastSuccess("Tag renamed.");
     await refreshTagManager();
+    const canonical = catalog.find(entry => entry.aliases.includes(oldName))?.name ?? null;
+    notifyTagChange({ kind: "rename", oldName, newName: canonical });
   } catch (error) {
     toastError(`Could not rename tag: ${error}`);
   }
@@ -246,6 +257,7 @@ async function removeTag(name: string) {
     deletingTag = null;
     toastSuccess("Tag removed from articles.");
     await refreshTagManager();
+    notifyTagChange({ kind: "delete", name });
   } catch (error) {
     toastError(`Could not remove tag: ${error}`);
   }
@@ -285,10 +297,12 @@ async function applyCluster(index: number) {
   )?.value;
   if (!selected) return;
   try {
-    await tagsApi.merge(selected, cluster.members.map(member => member.name));
+    const members = cluster.members.map(member => member.name);
+    await tagsApi.merge(selected, members);
     clusters = clusters.filter((_, clusterIndex) => clusterIndex !== index);
     toastSuccess(`Mapped cluster to ${selected}.`);
     await refreshTagManager();
+    notifyTagChange({ kind: "merge", canonicalName: selected, members });
   } catch (error) {
     toastError(`Could not apply cluster: ${error}`);
   }
@@ -303,4 +317,3 @@ async function restoreTag(name: string) {
     toastError(`Could not restore tag: ${error}`);
   }
 }
-

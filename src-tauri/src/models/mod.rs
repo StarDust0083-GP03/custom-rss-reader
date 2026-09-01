@@ -13,7 +13,9 @@ use serde::Deserialize;
 /// null" (`Some(None)`, clear the value). Use with `#[serde(default)]` so a
 /// missing field deserializes to `None`, and a present field goes through
 /// this function.
-pub fn de_double_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
+pub fn de_double_option<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,

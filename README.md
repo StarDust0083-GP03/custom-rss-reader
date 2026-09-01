@@ -212,8 +212,9 @@ The app maintains the index automatically — no manual maintenance:
 - **Incremental sync** — on every app start and after each bulk refresh, a watermark-based sync (`~/.rss-reader/chroma_sync.json`) indexes anything newer than the last synced id. If ChromaDB was down during a fetch, those items are queued and picked up on the next sync — nothing is lost silently.
 - **Deletions** — removing a subscription writes durable tombstones before the SQLite cascade; vectors are deleted immediately when possible and retried by the next sync when Chroma is unavailable.
 - **Memory-safe** — sync pages through a lightweight projection (keyset pagination, text columns truncated to 2000 chars), so index rebuilds stay bounded regardless of library size.
-- **Enable & Index** — the first enable validates the server, ensures the collection, and performs a full rebuild via the same mechanism (idempotent upserts); live progress is shown in the status bar.
-- **Re-Index All Items** — the button in the ChromaDB settings dialog repeats that full rebuild when needed; configuration changes apply without restarting.
+- **Enable & Index** — the first enable validates the server, ensures the collection, and performs a full rebuild via the same mechanism; live progress is shown in the status bar. Configuration is enabled only after indexing succeeds.
+- **Re-Index All Items** — the button repeats that rebuild and removes orphaned `item_*` vectors while leaving unrelated collection entries untouched. SQLite and Chroma collection identities prevent a new database/collection from inheriting an old watermark.
+- **Local model integrity** — the architecture-specific multilingual ONNX model is fetched from a pinned upstream revision and SHA-256 verified before it is loaded.
 
 ## Database Schema
 

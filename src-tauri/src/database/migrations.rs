@@ -9,13 +9,12 @@ use crate::models::tag::{normalize_tag, MAX_TAGS_PER_ITEM};
 /// missing columns incrementally. Indexes are created at the end.
 pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
-    let tables_exist = sqlx::query(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='feed_items'",
-    )
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(AppError::Database)?
-    .is_some();
+    let tables_exist =
+        sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name='feed_items'")
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(AppError::Database)?
+            .is_some();
 
     if !tables_exist {
         create_tables(&mut tx).await?;
@@ -28,6 +27,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     }
 
     create_tag_tables(&mut tx).await?;
+    create_app_metadata(&mut tx).await?;
     backfill_tag_catalog(&mut tx).await?;
     create_indexes(&mut tx).await?;
     tx.commit().await.map_err(AppError::Database)?;
@@ -82,6 +82,29 @@ async fn create_tables(conn: &mut SqliteConnection) -> Result<()> {
             FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
         )
         "#,
+    )
+    .await
+    .map_err(AppError::Database)?;
+
+    Ok(())
+}
+
+async fn create_app_metadata(conn: &mut SqliteConnection) -> Result<()> {
+    conn.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS app_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        "#,
+    )
+    .await
+    .map_err(AppError::Database)?;
+
+    // The id survives normal migrations but changes when the SQLite database
+    // is replaced. Chroma sync uses it to invalidate an old watermark.
+    conn.execute(
+        "INSERT OR IGNORE INTO app_metadata (key, value) VALUES ('database_id', lower(hex(randomblob(16))))",
     )
     .await
     .map_err(AppError::Database)?;
@@ -153,7 +176,9 @@ async fn backfill_tag_catalog(conn: &mut SqliteConnection) -> Result<()> {
         };
         let mut normalized = Vec::new();
         for raw in tags {
-            let Some(tag) = normalize_tag(&raw) else { continue };
+            let Some(tag) = normalize_tag(&raw) else {
+                continue;
+            };
             if normalized.len() >= MAX_TAGS_PER_ITEM {
                 break;
             }
@@ -191,14 +216,13 @@ async fn ensure_column(
     column: &str,
     ddl: &str,
 ) -> Result<()> {
-    let exists: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM pragma_table_info($1) WHERE name = $2 LIMIT 1",
-    )
-    .bind(table)
-    .bind(column)
-    .fetch_optional(&mut *conn)
-    .await
-    .map_err(AppError::Database)?;
+    let exists: Option<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info($1) WHERE name = $2 LIMIT 1")
+            .bind(table)
+            .bind(column)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(AppError::Database)?;
 
     if exists.is_none() {
         sqlx::query(ddl)
@@ -381,11 +405,13 @@ mod tests {
         .execute(&pool)
         .await
         .expect("create legacy feed_items table");
-        sqlx::query("INSERT INTO feed_items (subscription_id, title, tags) VALUES (1, 'legacy', ?)")
-            .bind(r#"["Machine Learning","machine-learning","AI"]"#)
-            .execute(&pool)
-            .await
-            .expect("seed legacy tagged item");
+        sqlx::query(
+            "INSERT INTO feed_items (subscription_id, title, tags) VALUES (1, 'legacy', ?)",
+        )
+        .bind(r#"["Machine Learning","machine-learning","AI"]"#)
+        .execute(&pool)
+        .await
+        .expect("seed legacy tagged item");
 
         run_migrations(&pool)
             .await
@@ -424,5 +450,12 @@ mod tests {
             .await
             .expect("inspect tag catalog");
         assert_eq!(catalog_count.0, 2);
+
+        let database_id: String =
+            sqlx::query_scalar("SELECT value FROM app_metadata WHERE key = 'database_id'")
+                .fetch_one(&pool)
+                .await
+                .expect("inspect database identity");
+        assert_eq!(database_id.len(), 32);
     }
 }

@@ -6,7 +6,10 @@ use sqlx::SqlitePool;
 use super::FeedItemRepository;
 use super::IndexRow;
 use crate::error::{AppError, Result};
-use crate::models::{tag::{normalize_tag, MAX_TAGS_PER_ITEM}, FeedItem, FeedItemSummary, NewFeedItem};
+use crate::models::{
+    tag::{normalize_tag, MAX_TAGS_PER_ITEM},
+    FeedItem, FeedItemSummary, NewFeedItem,
+};
 
 use super::TagCatalogEntry;
 
@@ -181,20 +184,17 @@ fn required_tag(input: &str) -> Result<String> {
 async fn load_tag_maps(
     conn: &mut sqlx::SqliteConnection,
 ) -> Result<(HashMap<String, String>, HashSet<String>)> {
-    let alias_rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT alias, canonical_name FROM tag_aliases",
-    )
-    .fetch_all(&mut *conn)
-    .await?;
+    let alias_rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT alias, canonical_name FROM tag_aliases")
+            .fetch_all(&mut *conn)
+            .await?;
     let aliases = alias_rows.into_iter().collect();
-    let blocked: HashSet<String> = sqlx::query_as::<_, (String,)>(
-        "SELECT name FROM blocked_tags",
-    )
-    .fetch_all(&mut *conn)
-    .await?
-    .into_iter()
-    .map(|(name,)| name)
-    .collect();
+    let blocked: HashSet<String> = sqlx::query_as::<_, (String,)>("SELECT name FROM blocked_tags")
+        .fetch_all(&mut *conn)
+        .await?
+        .into_iter()
+        .map(|(name,)| name)
+        .collect();
     Ok((aliases, blocked))
 }
 
@@ -230,7 +230,9 @@ async fn rewrite_feed_item_tags(
         };
         let mut normalized = Vec::new();
         for raw in tags {
-            let Some(tag) = normalize_tag(&raw) else { continue };
+            let Some(tag) = normalize_tag(&raw) else {
+                continue;
+            };
             if removed.contains(&tag) {
                 continue;
             }
@@ -356,12 +358,11 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         &self,
         subscription_id: i64,
     ) -> Result<(HashSet<String>, HashSet<String>)> {
-        let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT guid, link FROM feed_items WHERE subscription_id = $1",
-        )
-        .bind(subscription_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT guid, link FROM feed_items WHERE subscription_id = $1")
+                .bind(subscription_id)
+                .fetch_all(&self.pool)
+                .await?;
 
         let guids = rows.iter().filter_map(|r| r.0.clone()).collect();
         let links = rows.iter().filter_map(|r| r.1.clone()).collect();
@@ -436,10 +437,14 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         Ok(max.unwrap_or(0))
     }
 
-    async fn find_website_backfill_candidates(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<(i64, String)>> {
+    async fn database_id(&self) -> Result<String> {
+        sqlx::query_scalar("SELECT value FROM app_metadata WHERE key = 'database_id'")
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| AppError::Internal("Database identity is missing".into()))
+    }
+
+    async fn find_website_backfill_candidates(&self, limit: i64) -> Result<Vec<(i64, String)>> {
         let rows: Vec<(i64, String)> = sqlx::query_as(
             r#"
             SELECT f.id, f.link
@@ -486,11 +491,7 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         Ok(row.into())
     }
 
-    async fn reset_content_md(
-        &self,
-        id: i64,
-        content_md: &str,
-    ) -> Result<FeedItem> {
+    async fn reset_content_md(&self, id: i64, content_md: &str) -> Result<FeedItem> {
         // Overwrite both content_md and the website marker — this always
         // reverts to the RSS source, never the website.
         let row = sqlx::query_as::<_, FeedItemRow>(
@@ -550,7 +551,8 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         } else {
             ""
         };
-        self.fetch_summaries(where_sql, subscription_id, limit, offset).await
+        self.fetch_summaries(where_sql, subscription_id, limit, offset)
+            .await
     }
 
     async fn search(&self, query: &str, limit: i64) -> Result<Vec<FeedItemSummary>> {
@@ -697,33 +699,27 @@ impl FeedItemRepository for SqliteFeedItemRepository {
     }
 
     async fn find_active_tag_names(&self) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT name FROM tag_catalog ORDER BY name",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String,)> = sqlx::query_as("SELECT name FROM tag_catalog ORDER BY name")
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows.into_iter().map(|(name,)| name).collect())
     }
 
     async fn find_blocked_tags(&self) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT name FROM blocked_tags ORDER BY name",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String,)> = sqlx::query_as("SELECT name FROM blocked_tags ORDER BY name")
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows.into_iter().map(|(name,)| name).collect())
     }
 
     async fn create_tag(&self, name: &str) -> Result<()> {
         let name = required_tag(name)?;
         let mut tx = self.pool.begin().await?;
-        if sqlx::query_scalar::<_, String>(
-            "SELECT name FROM blocked_tags WHERE name = $1",
-        )
-        .bind(&name)
-        .fetch_optional(&mut *tx)
-        .await?
-        .is_some()
+        if sqlx::query_scalar::<_, String>("SELECT name FROM blocked_tags WHERE name = $1")
+            .bind(&name)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some()
         {
             return Err(AppError::Duplicate(format!("Tag '{}' is blocked", name)));
         }
@@ -753,12 +749,11 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         }
 
         let mut tx = self.pool.begin().await?;
-        let exists: Option<String> = sqlx::query_scalar(
-            "SELECT name FROM tag_catalog WHERE name = $1",
-        )
-        .bind(&old_name)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let exists: Option<String> =
+            sqlx::query_scalar("SELECT name FROM tag_catalog WHERE name = $1")
+                .bind(&old_name)
+                .fetch_optional(&mut *tx)
+                .await?;
         if exists.is_none() {
             return Err(AppError::NotFound(format!("Tag '{}' not found", old_name)));
         }
@@ -772,7 +767,10 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         .fetch_optional(&mut *tx)
         .await?;
         if occupied.is_some() {
-            return Err(AppError::Duplicate(format!("Tag '{}' already exists", new_name)));
+            return Err(AppError::Duplicate(format!(
+                "Tag '{}' already exists",
+                new_name
+            )));
         }
 
         let mut replacements = HashMap::new();
@@ -807,12 +805,11 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         if blocked.contains(&head) {
             return Err(AppError::Validation(format!("Tag '{}' is blocked", head)));
         }
-        let head_exists: Option<String> = sqlx::query_scalar(
-            "SELECT name FROM tag_catalog WHERE name = $1",
-        )
-        .bind(&head)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let head_exists: Option<String> =
+            sqlx::query_scalar("SELECT name FROM tag_catalog WHERE name = $1")
+                .bind(&head)
+                .fetch_optional(&mut *tx)
+                .await?;
         if head_exists.is_none() {
             return Err(AppError::NotFound(format!("Tag '{}' not found", head)));
         }
@@ -821,12 +818,11 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         for member in members {
             let member = resolve_tag(required_tag(member)?, &aliases);
             if member != head && !selected.contains(&member) {
-                let exists: Option<String> = sqlx::query_scalar(
-                    "SELECT name FROM tag_catalog WHERE name = $1",
-                )
-                .bind(&member)
-                .fetch_optional(&mut *tx)
-                .await?;
+                let exists: Option<String> =
+                    sqlx::query_scalar("SELECT name FROM tag_catalog WHERE name = $1")
+                        .bind(&member)
+                        .fetch_optional(&mut *tx)
+                        .await?;
                 if exists.is_none() {
                     return Err(AppError::NotFound(format!("Tag '{}' not found", member)));
                 }
@@ -846,11 +842,13 @@ impl FeedItemRepository for SqliteFeedItemRepository {
                 .bind(member)
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query("INSERT OR REPLACE INTO tag_aliases (alias, canonical_name) VALUES ($1, $2)")
-                .bind(member)
-                .bind(&head)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "INSERT OR REPLACE INTO tag_aliases (alias, canonical_name) VALUES ($1, $2)",
+            )
+            .bind(member)
+            .bind(&head)
+            .execute(&mut *tx)
+            .await?;
             sqlx::query("DELETE FROM tag_catalog WHERE name = $1")
                 .bind(member)
                 .execute(&mut *tx)
@@ -863,21 +861,19 @@ impl FeedItemRepository for SqliteFeedItemRepository {
     async fn delete_tag(&self, name: &str) -> Result<()> {
         let name = required_tag(name)?;
         let mut tx = self.pool.begin().await?;
-        let exists: Option<String> = sqlx::query_scalar(
-            "SELECT name FROM tag_catalog WHERE name = $1",
-        )
-        .bind(&name)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let exists: Option<String> =
+            sqlx::query_scalar("SELECT name FROM tag_catalog WHERE name = $1")
+                .bind(&name)
+                .fetch_optional(&mut *tx)
+                .await?;
         if exists.is_none() {
             return Err(AppError::NotFound(format!("Tag '{}' not found", name)));
         }
-        let aliases: Vec<(String,)> = sqlx::query_as(
-            "SELECT alias FROM tag_aliases WHERE canonical_name = $1",
-        )
-        .bind(&name)
-        .fetch_all(&mut *tx)
-        .await?;
+        let aliases: Vec<(String,)> =
+            sqlx::query_as("SELECT alias FROM tag_aliases WHERE canonical_name = $1")
+                .bind(&name)
+                .fetch_all(&mut *tx)
+                .await?;
         let removed: HashSet<String> = std::iter::once(name.clone())
             .chain(aliases.iter().map(|(alias,)| alias.clone()))
             .collect();
@@ -903,11 +899,39 @@ impl FeedItemRepository for SqliteFeedItemRepository {
     async fn restore_tag(&self, name: &str) -> Result<()> {
         let name = required_tag(name)?;
         let mut tx = self.pool.begin().await?;
+
+        let was_blocked: Option<String> =
+            sqlx::query_scalar("SELECT name FROM blocked_tags WHERE name = $1")
+                .bind(&name)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if was_blocked.is_none() {
+            return Err(AppError::NotFound(format!(
+                "Blocked tag '{}' not found",
+                name
+            )));
+        }
+
+        let occupied: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM tag_catalog WHERE name = $1
+             UNION ALL SELECT alias FROM tag_aliases WHERE alias = $1
+             LIMIT 1",
+        )
+        .bind(&name)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if occupied.is_some() {
+            return Err(AppError::Duplicate(format!(
+                "Tag '{}' already exists",
+                name
+            )));
+        }
+
         sqlx::query("DELETE FROM blocked_tags WHERE name = $1")
             .bind(&name)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("INSERT OR IGNORE INTO tag_catalog (name) VALUES ($1)")
+        sqlx::query("INSERT INTO tag_catalog (name) VALUES ($1)")
             .bind(name)
             .execute(&mut *tx)
             .await?;
@@ -975,7 +999,8 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         } else {
             "WHERE f.is_favorite = 1"
         };
-        self.fetch_summaries(where_sql, subscription_id, limit, offset).await
+        self.fetch_summaries(where_sql, subscription_id, limit, offset)
+            .await
     }
 
     async fn get_read_later(
@@ -989,7 +1014,8 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         } else {
             "WHERE f.is_read_later = 1"
         };
-        self.fetch_summaries(where_sql, subscription_id, limit, offset).await
+        self.fetch_summaries(where_sql, subscription_id, limit, offset)
+            .await
     }
 
     async fn get_unread(
@@ -1003,7 +1029,8 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         } else {
             "WHERE f.is_read = 0"
         };
-        self.fetch_summaries(where_sql, subscription_id, limit, offset).await
+        self.fetch_summaries(where_sql, subscription_id, limit, offset)
+            .await
     }
 
     async fn get_today_items(
@@ -1058,7 +1085,9 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         let mut normalized = Vec::new();
 
         for raw in proposed {
-            let Some(tag) = normalize_tag(&raw) else { continue };
+            let Some(tag) = normalize_tag(&raw) else {
+                continue;
+            };
             if blocked.contains(&tag) {
                 continue;
             }

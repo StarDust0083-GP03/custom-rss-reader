@@ -21,10 +21,10 @@ mod tests;
 use std::sync::Arc;
 use tauri::Manager;
 
-use database::init_database;
-use feed::FeedFetcher;
 use ai::activity::AiActivityStore;
 use ai::service::SharedAiService;
+use database::init_database;
+use feed::FeedFetcher;
 use repositories::feed_item_repo::SqliteFeedItemRepository;
 use repositories::subscription_repo::SqliteSubscriptionRepository;
 use services::{FeedService, SubscriptionService};
@@ -51,11 +51,10 @@ pub fn run() {
             let feed_repo = Arc::new(SqliteFeedItemRepository::new(pool.clone()));
             let sub_repo = Arc::new(SqliteSubscriptionRepository::new(pool.clone()));
             let subscription_service = SubscriptionService::new(sub_repo.clone());
-            let fetcher = FeedFetcher::new()
-                .map_err(|e| {
-                    eprintln!("Failed to build HTTP client: {}", e);
-                    Box::new(e) as Box<dyn std::error::Error>
-                })?;
+            let fetcher = FeedFetcher::new().map_err(|e| {
+                eprintln!("Failed to build HTTP client: {}", e);
+                Box::new(e) as Box<dyn std::error::Error>
+            })?;
             let fetcher = Arc::new(fetcher);
             // ChromaDB connects lazily on first use (health check, search,
             // sync) and auto-reconnects — the app must not stay broken just
@@ -169,4 +168,3 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-

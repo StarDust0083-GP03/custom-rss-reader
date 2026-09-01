@@ -59,7 +59,8 @@ pub struct SyncReport {
 pub struct SyncProgress {
     /// True while a sync/reindex is in flight.
     pub running: bool,
-    /// Current stage: `""` (idle), `"deletes"`, `"upserts"`, `"walk"`.
+    /// Current stage: `""` (idle), `"deletes"`, `"upserts"`, `"walk"`,
+    /// or `"reconcile"`.
     pub phase: &'static str,
     /// Approximate total items to scan (`max(feed_items.id)` at run start).
     pub total: i64,
@@ -99,14 +100,21 @@ static STATE_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 
 /// Persisted sync state. Stored as JSON next to the other app config files.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SyncState {
-    /// All items with id <= this value are known to be indexed (or were
-    /// intentionally skipped because ChromaDB was disabled at the time).
+    /// SQLite database identity from `app_metadata`.
+    pub database_id: Option<String>,
+    /// Stable UUID reported by the active Chroma collection.
+    pub collection_id: Option<String>,
+    /// All items with id <= this value are known to be indexed.
     pub last_indexed_id: i64,
     /// Item ids awaiting deletion from the index.
     pub pending_deletes: Vec<i64>,
     /// Item ids awaiting (re)indexing.
     pub pending_upserts: Vec<i64>,
+    /// A database/collection change or full rebuild requires an orphan sweep
+    /// after the complete SQLite walk succeeds.
+    pub needs_reconcile: bool,
 }
 
 impl SyncState {
@@ -250,11 +258,28 @@ async fn sync_pass(
         p.elapsed_ms = 0;
     });
 
-    // 1. Watermark validation — a database reset (ids restarting at 1) must
-    //    not be treated as "everything already indexed".
+    // 1. Identity + watermark validation. A new SQLite database or Chroma
+    // collection must never inherit another index's high-water mark.
+    let database_id = repo.database_id().await?;
+    let collection_id = chroma.collection_id().to_string();
+    if state.database_id.as_deref() != Some(database_id.as_str())
+        || state.collection_id.as_deref() != Some(collection_id.as_str())
+    {
+        state = SyncState {
+            database_id: Some(database_id),
+            collection_id: Some(collection_id),
+            needs_reconcile: true,
+            ..Default::default()
+        };
+        state.save()?;
+    }
+
     let max_id = repo.max_item_id().await?;
     if state.last_indexed_id > max_id {
         state.last_indexed_id = 0;
+        state.pending_upserts.clear();
+        state.pending_deletes.clear();
+        state.needs_reconcile = true;
         state.save()?;
     }
     // `total` approximates the number of items to scan (walk runs 0 → max id).
@@ -303,7 +328,9 @@ async fn sync_pass(
         update_progress(|p| p.phase = "walk");
     }
     loop {
-        let rows = repo.find_index_page(state.last_indexed_id, SYNC_PAGE_SIZE).await?;
+        let rows = repo
+            .find_index_page(state.last_indexed_id, SYNC_PAGE_SIZE)
+            .await?;
         if rows.is_empty() {
             break;
         }
@@ -335,8 +362,48 @@ async fn sync_pass(
         }
     }
 
+    // 5. After a database/collection change or explicit rebuild, remove only
+    // orphaned `item_*` entries. Unknown ids in a user-selected collection are
+    // left untouched.
+    if state.needs_reconcile {
+        update_progress(|p| p.phase = "reconcile");
+        let deleted = reconcile_orphans(repo, chroma).await?;
+        report.deleted += deleted;
+        processed += deleted as i64;
+        state.needs_reconcile = false;
+        state.save()?;
+        update_progress(|p| {
+            p.done = processed;
+            p.elapsed_ms = started.elapsed().as_millis();
+        });
+    }
+
     report.duration_ms = started.elapsed().as_millis();
     Ok(report)
+}
+
+async fn reconcile_orphans(
+    repo: &Arc<dyn FeedItemRepository>,
+    chroma: &ChromaService,
+) -> Result<usize> {
+    const PAGE_SIZE: usize = 500;
+    let indexed_ids = chroma.indexed_item_ids().await?;
+    let mut orphaned = Vec::new();
+
+    for chunk in indexed_ids.chunks(PAGE_SIZE) {
+        let existing: HashSet<i64> = repo
+            .find_index_rows_by_ids(chunk)
+            .await?
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        orphaned.extend(chunk.iter().copied().filter(|id| !existing.contains(id)));
+    }
+
+    for chunk in orphaned.chunks(PAGE_SIZE) {
+        chroma.delete_items(chunk).await?;
+    }
+    Ok(orphaned.len())
 }
 
 /// Always leave the progress tracker idle after a sync attempt, success or
@@ -368,7 +435,12 @@ pub async fn full_resync(
 ) -> Result<SyncReport> {
     let _guard = STATE_LOCK.lock().await;
     let mut state = SyncState::load();
+    state.database_id = Some(repo.database_id().await?);
+    state.collection_id = Some(chroma.collection_id().to_string());
     state.last_indexed_id = 0;
+    state.pending_deletes.clear();
+    state.pending_upserts.clear();
+    state.needs_reconcile = true;
     state.save()?;
     let started = std::time::Instant::now();
     let result = sync_pass(repo, chroma, started).await;
@@ -383,7 +455,9 @@ pub async fn run_background_sync(
     repo: Arc<dyn FeedItemRepository>,
     holder: crate::chroma::ChromaHolder,
 ) {
-    let Some(chroma) = holder.get().await else { return };
+    let Some(chroma) = holder.get().await else {
+        return;
+    };
     match incremental_sync(&repo, &chroma).await {
         Ok(report) if report.indexed > 0 || report.deleted > 0 => {
             println!(
@@ -403,15 +477,21 @@ mod tests {
     #[test]
     fn test_sync_state_roundtrip() {
         let state = SyncState {
+            database_id: Some("db-1".into()),
+            collection_id: Some("collection-1".into()),
             last_indexed_id: 42,
             pending_deletes: vec![1, 2],
             pending_upserts: vec![7],
+            needs_reconcile: true,
         };
         let json = serde_json::to_string(&state).unwrap();
         let back: SyncState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.database_id.as_deref(), Some("db-1"));
+        assert_eq!(back.collection_id.as_deref(), Some("collection-1"));
         assert_eq!(back.last_indexed_id, 42);
         assert_eq!(back.pending_deletes, vec![1, 2]);
         assert_eq!(back.pending_upserts, vec![7]);
+        assert!(back.needs_reconcile);
     }
 
     #[test]
@@ -420,6 +500,19 @@ mod tests {
         assert_eq!(s.last_indexed_id, 0);
         assert!(s.pending_deletes.is_empty());
         assert!(s.pending_upserts.is_empty());
+        assert!(!s.needs_reconcile);
+    }
+
+    #[test]
+    fn legacy_sync_state_defaults_new_identity_fields() {
+        let state: SyncState = serde_json::from_str(
+            r#"{"last_indexed_id":12,"pending_deletes":[1],"pending_upserts":[2]}"#,
+        )
+        .unwrap();
+        assert_eq!(state.last_indexed_id, 12);
+        assert!(state.database_id.is_none());
+        assert!(state.collection_id.is_none());
+        assert!(!state.needs_reconcile);
     }
 
     #[test]

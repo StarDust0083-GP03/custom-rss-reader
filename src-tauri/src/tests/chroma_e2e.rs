@@ -24,8 +24,8 @@ use crate::ai::AiConfig;
 use crate::chroma::service::ChromaService;
 use crate::chroma::{ChromaConfig, ChromaHolder};
 use crate::repositories::feed_item_repo::SqliteFeedItemRepository;
-use crate::repositories::{FeedItemRepository, SubscriptionRepository};
 use crate::repositories::subscription_repo::SqliteSubscriptionRepository;
+use crate::repositories::{FeedItemRepository, SubscriptionRepository};
 
 /// How many recent unread items are offered to the LLM (mirrors the
 /// `recommend_reads` command).
@@ -83,9 +83,17 @@ async fn chroma_and_recommend_e2e() {
         .await
         .expect("anchor item exists");
     let hits = chroma.search(&anchor.title, 5).await.expect("search");
-    println!("[2/4] SEARCH  query={:?}", &anchor.title[..anchor.title.len().min(50)]);
+    println!(
+        "[2/4] SEARCH  query={:?}",
+        &anchor.title[..anchor.title.len().min(50)]
+    );
     for h in &hits {
-        println!("      hit  score={:.4} id={} title={}", h.score, h.item_id, truncate(&h.title));
+        println!(
+            "      hit  score={:.4} id={} title={}",
+            h.score,
+            h.item_id,
+            truncate(&h.title)
+        );
     }
     assert!(
         hits.iter().any(|h| h.item_id == anchor.id),
@@ -96,7 +104,12 @@ async fn chroma_and_recommend_e2e() {
     let similar = chroma.find_similar(&anchor, 5).await.expect("find similar");
     println!("[3/4] SIMILAR  anchor={:?}", truncate(&anchor.title));
     for s in &similar {
-        println!("      related  score={:.4} id={} title={}", s.score, s.item_id, truncate(&s.title));
+        println!(
+            "      related  score={:.4} id={} title={}",
+            s.score,
+            s.item_id,
+            truncate(&s.title)
+        );
     }
     assert!(
         similar.iter().all(|s| s.item_id != anchor.id),
@@ -146,7 +159,11 @@ async fn chroma_and_recommend_e2e() {
         .recommend_reads(&candidates)
         .await
         .expect("live LLM recommend call");
-    println!("[4/4] RECOMMEND  {} unread candidates, {} picks", candidates.len(), picks.len());
+    println!(
+        "[4/4] RECOMMEND  {} unread candidates, {} picks",
+        candidates.len(),
+        picks.len()
+    );
     for p in &picks {
         println!("      pick  id={} reason={}", p.item_id, p.reason);
     }

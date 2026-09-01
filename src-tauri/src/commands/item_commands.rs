@@ -26,7 +26,11 @@ pub async fn get_items(
 ) -> Result<Vec<FeedItemSummary>> {
     state
         .feed_repo
-        .find_all(subscription_id, clamp_limit(limit, 50, 200), clamp_offset(offset))
+        .find_all(
+            subscription_id,
+            clamp_limit(limit, 50, 200),
+            clamp_offset(offset),
+        )
         .await
 }
 
@@ -114,34 +118,22 @@ pub async fn mark_item_read(
 }
 
 #[tauri::command]
-pub async fn mark_all_read(
-    state: State<'_, AppState>,
-    subscription_id: Option<i64>,
-) -> Result<()> {
+pub async fn mark_all_read(state: State<'_, AppState>, subscription_id: Option<i64>) -> Result<()> {
     state.feed_repo.mark_all_read(subscription_id).await
 }
 
 #[tauri::command]
-pub async fn toggle_favorite(
-    state: State<'_, AppState>,
-    item_id: i64,
-) -> Result<bool> {
+pub async fn toggle_favorite(state: State<'_, AppState>, item_id: i64) -> Result<bool> {
     state.feed_repo.toggle_favorite(item_id).await
 }
 
 #[tauri::command]
-pub async fn toggle_read_later(
-    state: State<'_, AppState>,
-    item_id: i64,
-) -> Result<bool> {
+pub async fn toggle_read_later(state: State<'_, AppState>, item_id: i64) -> Result<bool> {
     state.feed_repo.toggle_read_later(item_id).await
 }
 
 #[tauri::command]
-pub async fn toggle_ignored(
-    state: State<'_, AppState>,
-    item_id: i64,
-) -> Result<bool> {
+pub async fn toggle_ignored(state: State<'_, AppState>, item_id: i64) -> Result<bool> {
     state.feed_repo.toggle_ignored(item_id).await
 }
 

@@ -1,5 +1,5 @@
 use crate::error::AppError;
-use crate::models::{NewSubscription, UpdateSubscription};
+use crate::models::{NewFeedItem, NewSubscription, UpdateSubscription};
 
 use super::helpers::{new_sub, TestEnv};
 
@@ -239,8 +239,8 @@ async fn test_update_subscription_preserves_unchanged_fields() {
             UpdateSubscription {
                 title: Some("New Title".into()),
                 website_url: None, // unchanged
-                use_website: None,  // unchanged
-                rsshub_url: None,   // unchanged
+                use_website: None, // unchanged
+                rsshub_url: None,  // unchanged
             },
         )
         .await
@@ -357,12 +357,24 @@ async fn test_delete_subscription() {
         .await
         .unwrap();
 
-    // Delete succeeds
+    let item_id = env
+        .feed_repo
+        .create(NewFeedItem {
+            subscription_id: sub.id,
+            title: "Cascaded item".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .id;
+
+    // Delete succeeds and SQLite enforces the declared cascade.
     env.service.remove_subscription(sub.id).await.unwrap();
 
-    // Get should now fail with NotFound
     let result = env.service.get_subscription(sub.id).await;
     assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
+    let item = env.feed_repo.find_by_id(item_id).await;
+    assert!(matches!(item.unwrap_err(), AppError::NotFound(_)));
 }
 
 #[tokio::test]
@@ -433,14 +445,22 @@ async fn test_toggle_not_found() {
 async fn test_exists_by_url() {
     let env = TestEnv::new().await;
 
-    assert!(!env.repo.exists_by_url("https://example.com/rss").await.unwrap());
+    assert!(!env
+        .repo
+        .exists_by_url("https://example.com/rss")
+        .await
+        .unwrap());
 
     env.service
         .add_subscription(new_sub("https://example.com/rss"))
         .await
         .unwrap();
 
-    assert!(env.repo.exists_by_url("https://example.com/rss").await.unwrap());
+    assert!(env
+        .repo
+        .exists_by_url("https://example.com/rss")
+        .await
+        .unwrap());
 }
 
 // ---------------------------------------------------------------------------

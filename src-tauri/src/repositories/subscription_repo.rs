@@ -78,23 +78,20 @@ impl SubscriptionRepository for SqliteSubscriptionRepository {
     }
 
     async fn find_by_id(&self, id: i64) -> Result<Subscription> {
-        let row = sqlx::query_as::<_, SubscriptionRow>(
-            "SELECT * FROM subscriptions WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Subscription with id {} not found", id)))?;
+        let row = sqlx::query_as::<_, SubscriptionRow>("SELECT * FROM subscriptions WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Subscription with id {} not found", id)))?;
 
         Ok(row.into())
     }
 
     async fn find_all(&self) -> Result<Vec<Subscription>> {
-        let rows = sqlx::query_as::<_, SubscriptionRow>(
-            "SELECT * FROM subscriptions ORDER BY title",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows =
+            sqlx::query_as::<_, SubscriptionRow>("SELECT * FROM subscriptions ORDER BY title")
+                .fetch_all(&self.pool)
+                .await?;
 
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
@@ -147,12 +144,10 @@ impl SubscriptionRepository for SqliteSubscriptionRepository {
     }
 
     async fn exists_by_url(&self, url: &str) -> Result<bool> {
-        let exists: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM subscriptions WHERE url = $1",
-        )
-        .bind(url)
-        .fetch_optional(&self.pool)
-        .await?;
+        let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM subscriptions WHERE url = $1")
+            .bind(url)
+            .fetch_optional(&self.pool)
+            .await?;
 
         Ok(exists.is_some())
     }

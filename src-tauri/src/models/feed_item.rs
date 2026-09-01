@@ -64,7 +64,8 @@ pub struct FeedItemSummary {
 
 /// Input for creating a new feed item.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct NewFeedItem {    pub subscription_id: i64,
+pub struct NewFeedItem {
+    pub subscription_id: i64,
     pub guid: Option<String>,
     pub title: String,
     pub link: Option<String>,

@@ -17,7 +17,7 @@ This script will:
 - Build the frontend (`npm run build`)
 - Validate the Rust backend with `cargo check` (proves `npm run tauri dev/build` will compile)
 - Set up and start the pinned ChromaDB server and idempotently create the `rss_articles` collection (server on port 8000)
-- Pre-download the multilingual embedding model (~/.rss-reader/models) with mirror fallback
+- Pre-download the architecture-specific multilingual embedding model into `~/.rss-reader/models`, pinned to an immutable revision and SHA-256 verified
 
 Options:
 ```bash
@@ -29,6 +29,7 @@ Environment overrides (also understood by the app and `setup-chroma.sh`):
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `CHROMA_HOST` | `127.0.0.1` | ChromaDB bind address |
 | `CHROMA_PORT` | `8000` | ChromaDB port |
 | `CHROMA_VERSION` | `1.5.9` | ChromaDB server package version |
 | `CHROMA_COLLECTION` | `rss_articles` | Collection to create |
@@ -61,7 +62,7 @@ Options:
 .\scripts\init.ps1 -Build   # also run the full production build (npm run tauri build)
 ```
 
-The same `CHROMA_PORT`, `CHROMA_VERSION`, `CHROMA_COLLECTION`, `CHROMA_TENANT`,
+The same `CHROMA_HOST`, `CHROMA_PORT`, `CHROMA_VERSION`, `CHROMA_COLLECTION`, `CHROMA_TENANT`,
 `CHROMA_DATABASE`, `CHROMA_VENV`, `CHROMA_DATA`, `CHROMA_MODEL_DIR`, `HF_ENDPOINT`,
 `SKIP_CARGO_CHECK`, `SKIP_CHROMA`, and `SKIP_MODEL` environment overrides apply.
 
@@ -82,12 +83,12 @@ The same `CHROMA_PORT`, `CHROMA_VERSION`, `CHROMA_COLLECTION`, `CHROMA_TENANT`,
    and its collection is ensured. The server is not managed by npm/tauri; start/stop it with
    `bash scripts/setup-chroma.sh --stop | --status` (Linux/macOS) or kill the
    process whose PID is in `~/.chroma-server.pid` (Windows).
-5. **Embedding model** — pre-downloads the quantized ONNX
-   `paraphrase-multilingual-MiniLM-L12-v2` model (tokenizer + weights, ~120 MB)
-   into `~/.rss-reader/models/`. The app computes embeddings client-side
-   (ChromaDB 1.x removed server-side embedding functions), so this prevents a
-   slow first-index. Mirrors tried in order: `$HF_ENDPOINT` (if set),
-   `https://huggingface.co`, `https://hf-mirror.com`.
+5. **Embedding model** — pre-downloads the matching x86-64 or ARM64 quantized
+   ONNX `paraphrase-multilingual-MiniLM-L12-v2` model (tokenizer + weights,
+   ~120 MB) into `~/.rss-reader/models/`. Downloads use a pinned upstream
+   revision and are SHA-256 verified before installation. The app applies the
+   same verification on first use. Mirrors tried in order: `$HF_ENDPOINT` (if
+   set), `https://huggingface.co`, `https://hf-mirror.com`.
 6. **Optional full build** — `--build` / `-Build` runs `npm run tauri build`.
 
 ## Manual Setup
@@ -136,12 +137,9 @@ npm run build
 # Start ChromaDB (Linux/macOS)
 ./scripts/setup-chroma.sh
 
-# Pre-download the embedding model (optional but recommended)
-mkdir -p ~/.rss-reader/models/sentence-transformers
-curl -fL -o ~/.rss-reader/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2/tokenizer.json \
-  https://hf-mirror.com/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2/resolve/main/tokenizer.json
-curl -fL -o ~/.rss-reader/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2/onnx/model_quint8_avx2.onnx \
-  https://hf-mirror.com/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2/resolve/main/onnx/model_quint8_avx2.onnx
+# The app downloads the pinned, checksummed embedding model on first use.
+# To pre-download it with architecture selection and verification, run:
+SKIP_CHROMA=1 SKIP_CARGO_CHECK=1 ./scripts/init.sh
 ```
 
 ## Running the Application

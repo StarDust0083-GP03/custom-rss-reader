@@ -42,12 +42,36 @@ is_running() {
 }
 
 stop_server() {
+    if ! is_running; then
+        rm -f "$PID_FILE"
+        green "ChromaDB is already stopped (port ${PORT})."
+        return 0
+    fi
+    if [ ! -f "$PID_FILE" ]; then
+        red "A server is using port ${PORT}, but it was not started by this helper."
+        red "Refusing to kill an unrelated process. Stop it manually."
+        return 1
+    fi
+
+    local pid command_line
+    pid=$(cat "$PID_FILE")
+    case "$pid" in
+        ''|*[!0-9]*) red "Invalid PID file: ${PID_FILE}"; return 1 ;;
+    esac
+    command_line=$(ps -p "$pid" -o command= 2>/dev/null || true)
+    if [[ "$command_line" != *"$VENV_DIR/bin/chroma"* \
+        || "$command_line" != *" run "* \
+        || "$command_line" != *"--port $PORT"* ]]; then
+        red "PID ${pid} is not this helper's ChromaDB process. Refusing to kill it."
+        return 1
+    fi
+
+    kill "$pid"
+    rm -f "$PID_FILE"
+    sleep 1
     if is_running; then
-        if [ -f "$PID_FILE" ]; then
-            kill "$(cat "$PID_FILE")" 2>/dev/null || true
-        fi
-        pkill -f "chroma run.*--port ${PORT}" 2>/dev/null || true
-        sleep 1
+        red "ChromaDB did not stop; inspect ${LOG_FILE}."
+        return 1
     fi
     green "ChromaDB stopped (port ${PORT})."
 }
@@ -63,7 +87,7 @@ status() {
 
 # --- --stop / --status shortcuts ------------------------------------------
 case "${1:-}" in
-    --stop)   stop_server; exit 0 ;;
+    --stop)   stop_server; exit $? ;;
     --status) status ;;
 esac
 
@@ -171,8 +195,23 @@ venv_ok() {
 }
 
 if ! venv_ok; then
-    # Remove a half-created venv so it can't block retries.
-    rm -rf "$VENV_DIR"
+    # Only remove a directory that is recognizably a virtual environment.
+    # CHROMA_VENV is user-controlled; blindly `rm -rf`-ing it could erase a
+    # home or project directory after a typo.
+    case "$VENV_DIR" in
+        ''|'/'|'.'|'..'|"$HOME"|"$HOME/")
+            red "Unsafe CHROMA_VENV path: ${VENV_DIR}"
+            exit 1
+            ;;
+    esac
+    if [ -e "$VENV_DIR" ]; then
+        if [ ! -f "$VENV_DIR/pyvenv.cfg" ]; then
+            red "${VENV_DIR} exists but is not a recognizable Python venv."
+            red "Refusing to delete it; move/remove it manually, then retry."
+            exit 1
+        fi
+        rm -rf -- "$VENV_DIR"
+    fi
     if command -v uv >/dev/null 2>&1; then
         echo "Creating venv with uv at ${VENV_DIR} ..."
         uv venv --seed "$VENV_DIR"

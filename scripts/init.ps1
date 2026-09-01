@@ -12,6 +12,7 @@
 #   .\scripts\init.ps1 -Build      # also run `npm run tauri build`
 #
 # Env overrides:
+#   CHROMA_HOST        ChromaDB bind address   (default 127.0.0.1)
 #   CHROMA_PORT        ChromaDB port           (default 8000)
 #   CHROMA_VERSION     server package version  (default 1.5.9)
 #   CHROMA_COLLECTION  collection to create    (default rss_articles)
@@ -227,6 +228,7 @@ if ($env:SKIP_CHROMA -eq "1") {
 } else {
     $venvDir  = if ($env:CHROMA_VENV)      { $env:CHROMA_VENV }      else { "$HOME\chroma-venv" }
     $dataDir  = if ($env:CHROMA_DATA)      { $env:CHROMA_DATA }      else { "$HOME\chroma-data" }
+    $hostAddress = if ($env:CHROMA_HOST) { $env:CHROMA_HOST } else { "127.0.0.1" }
     $port     = if ($env:CHROMA_PORT)      { $env:CHROMA_PORT }      else { 8000 }
     $version  = if ($env:CHROMA_VERSION)   { $env:CHROMA_VERSION }   else { "1.5.9" }
     $collection = if ($env:CHROMA_COLLECTION) { $env:CHROMA_COLLECTION } else { "rss_articles" }
@@ -260,7 +262,7 @@ if ($env:SKIP_CHROMA -eq "1") {
             $logOut = "$HOME\.chroma-server.log"
             $logErr = "$HOME\.chroma-server.err.log"
             $proc = Start-Process -FilePath $chromaExe `
-                -ArgumentList @("run", "--host", "0.0.0.0", "--port", "$port", "--path", "$dataDir") `
+                -ArgumentList @("run", "--host", "$hostAddress", "--port", "$port", "--path", "$dataDir") `
                 -WindowStyle Hidden `
                 -RedirectStandardOutput $logOut `
                 -RedirectStandardError $logErr `
@@ -334,8 +336,19 @@ Write-Step "5/6  Embedding model pre-download"
 # embedding function) with a quantized ONNX model. Pre-fetching it here means
 # the first semantic search/index doesn't stall on a ~120 MB download.
 # Mirrors and paths mirror src-tauri/src/chroma/embeddings.rs.
-$modelRepo  = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-$modelFiles = @("tokenizer.json", "onnx/model_quint8_avx2.onnx")
+$modelRepo = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+$modelRevision = "e8f8c211226b894fcb81acc59f3b34ba3efd5f42"
+$isArm64 = $env:PROCESSOR_ARCHITECTURE -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq "ARM64"
+$modelFile = if ($isArm64) { "onnx/model_qint8_arm64.onnx" } else { "onnx/model_quint8_avx2.onnx" }
+$modelHash = if ($isArm64) {
+    "783fea82d71a58179b830a4dbd2d58447e640609e98eedf9ffa12622d375a672"
+} else {
+    "98a01d88b7de996cdea58c32ca71208c09968d143798814b2ea09d3439dc334f"
+}
+$modelFiles = @(
+    @{ Path = "tokenizer.json"; Sha256 = "2c3387be76557bd40970cec13153b3bbf80407865484b209e655e5e4729076b8" },
+    @{ Path = $modelFile; Sha256 = $modelHash }
+)
 $modelBase  = if ($env:CHROMA_MODEL_DIR) { $env:CHROMA_MODEL_DIR } else { "$HOME\.rss-reader\models" }
 $modelDir   = Join-Path $modelBase $modelRepo
 
@@ -349,30 +362,44 @@ if ($env:SKIP_MODEL -eq "1") {
     Write-Host "Embedding model: $modelRepo" -ForegroundColor White
     Write-Host "Target dir:      $modelDir" -ForegroundColor White
     $allOk = $true
-    foreach ($file in $modelFiles) {
+    foreach ($spec in $modelFiles) {
+        $file = $spec.Path
+        $expectedHash = $spec.Sha256
         $dest = Join-Path $modelDir $file
-        if (Test-Path $dest) {
-            Write-Host "✅ $file already present" -ForegroundColor Green
+        $existingOk = (Test-Path $dest) -and ((Get-FileHash -Algorithm SHA256 $dest).Hash.ToLowerInvariant() -eq $expectedHash)
+        if ($existingOk) {
+            Write-Host "✅ $file verified" -ForegroundColor Green
             continue
+        }
+        if (Test-Path $dest) {
+            Write-Host "⚠️  checksum mismatch for $file — replacing it" -ForegroundColor Yellow
+            Remove-Item $dest -Force
         }
         New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
         $found = $false
+        $part = "$dest.part"
         foreach ($mirror in $mirrors) {
-            $url = "$mirror/$modelRepo/resolve/main/$file"
+            $url = "$($mirror.TrimEnd('/'))/$modelRepo/resolve/$modelRevision/$file"
             Write-Host "  downloading $file from $mirror ..." -ForegroundColor White
             try {
-                Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+                Remove-Item $part -ErrorAction SilentlyContinue
+                Invoke-WebRequest -Uri $url -OutFile $part -UseBasicParsing
+                $actualHash = (Get-FileHash -Algorithm SHA256 $part).Hash.ToLowerInvariant()
+                if ($actualHash -ne $expectedHash) {
+                    throw "SHA-256 mismatch (expected $expectedHash, got $actualHash)"
+                }
+                Move-Item -Force $part $dest
                 $size = (Get-Item $dest).Length / 1MB
-                Write-Host "✅ $file ($([math]::Round($size,1)) MB)" -ForegroundColor Green
+                Write-Host "✅ $file verified ($([math]::Round($size,1)) MB)" -ForegroundColor Green
                 $found = $true
                 break
             } catch {
-                Write-Host "⚠️  failed from $mirror" -ForegroundColor Yellow
-                Remove-Item $dest -ErrorAction SilentlyContinue
+                Write-Host "⚠️  failed from $mirror`: $_" -ForegroundColor Yellow
+                Remove-Item $part -ErrorAction SilentlyContinue
             }
         }
         if (-not $found) {
-            Write-Host "❌ could not download $file from any mirror" -ForegroundColor Red
+            Write-Host "❌ could not download a verified $file from any mirror" -ForegroundColor Red
             $allOk = $false
         }
     }

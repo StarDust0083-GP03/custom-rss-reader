@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 
-use crate::ai::*;
 use crate::ai::activity::current_ai_task;
+use crate::ai::*;
 use crate::error::{AppError, Result};
 
 // ---------------------------------------------------------------------------
@@ -69,7 +69,10 @@ impl Drop for LlmPermit {
 async fn llm_acquire(priority: bool) -> LlmPermit {
     let gate = llm_gate();
     let task = current_ai_task();
-    let priority = task.as_ref().map(|task| task.priority()).unwrap_or(priority);
+    let priority = task
+        .as_ref()
+        .map(|task| task.priority())
+        .unwrap_or(priority);
     let (tx, rx) = oneshot::channel();
     let (fast_path, initial_wait) = {
         let mut state = gate.state.lock().await;
@@ -282,7 +285,9 @@ impl LlmAiService {
     }
 
     fn max_chars(&self) -> usize {
-        self.config.max_chars_per_segment.unwrap_or(MAX_CHARS_PER_SEGMENT)
+        self.config
+            .max_chars_per_segment
+            .unwrap_or(MAX_CHARS_PER_SEGMENT)
     }
 
     /// Send an interactive chat completion request.
@@ -302,7 +307,10 @@ impl LlmAiService {
     ) -> Result<String> {
         let _permit = llm_acquire(priority).await;
 
-        let url = format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/chat/completions",
+            self.config.base_url.trim_end_matches('/')
+        );
 
         let response = self
             .client
@@ -561,8 +569,14 @@ impl AiService for LlmAiService {
         let req = ChatRequest {
             model: self.config.model.clone(),
             messages: vec![
-                ChatMessage { role: "system".into(), content: system_prompt },
-                ChatMessage { role: "user".into(), content: user_message },
+                ChatMessage {
+                    role: "system".into(),
+                    content: system_prompt,
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: user_message,
+                },
             ],
             max_tokens: Some(2000),
             temperature: Some(0.1),
@@ -597,8 +611,14 @@ impl AiService for LlmAiService {
         let req = ChatRequest {
             model: self.config.model.clone(),
             messages: vec![
-                ChatMessage { role: "system".into(), content: system_prompt },
-                ChatMessage { role: "user".into(), content: user_message },
+                ChatMessage {
+                    role: "system".into(),
+                    content: system_prompt,
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: user_message,
+                },
             ],
             max_tokens: Some(600),
             temperature: Some(0.3),
@@ -687,7 +707,9 @@ fn is_atx_header(line: &str) -> bool {
 /// bilingual output.
 fn is_header_block(block: &str) -> bool {
     let mut lines = block.lines();
-    let Some(first) = lines.next() else { return false };
+    let Some(first) = lines.next() else {
+        return false;
+    };
     if lines.next().is_some() {
         return false; // multi-line → a paragraph, not a bare header
     }
@@ -695,9 +717,8 @@ fn is_header_block(block: &str) -> bool {
         return true;
     }
     let lower = first.trim_start().to_ascii_lowercase();
-    (1..=6).any(|n| {
-        lower.starts_with(&format!("<h{}>", n)) || lower.starts_with(&format!("<h{} ", n))
-    })
+    (1..=6)
+        .any(|n| lower.starts_with(&format!("<h{}>", n)) || lower.starts_with(&format!("<h{} ", n)))
 }
 
 /// Split markdown / plain-text content into paragraph blocks.
@@ -744,9 +765,19 @@ fn split_markdown_blocks(content: &str) -> Vec<String> {
 /// accidentally match `<pre>`/`<picture>`/`<path>`.
 fn extract_html_blocks(content: &str) -> Vec<String> {
     let block_tags = [
-        "p", "h1", "h2", "h3", "h4", "h5", "h6",
-        "li", "blockquote", "pre",
-        "div", "section", "article",
+        "p",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "li",
+        "blockquote",
+        "pre",
+        "div",
+        "section",
+        "article",
     ];
 
     let mut candidates: Vec<(usize, usize, String)> = Vec::new();
@@ -767,7 +798,12 @@ fn extract_html_blocks(content: &str) -> Vec<String> {
                 break;
             }
             let next_ch = bytes[after];
-            if !(next_ch == b'>' || next_ch == b' ' || next_ch == b'\t' || next_ch == b'\n' || next_ch == b'/') {
+            if !(next_ch == b'>'
+                || next_ch == b' '
+                || next_ch == b'\t'
+                || next_ch == b'\n'
+                || next_ch == b'/')
+            {
                 // Advance past this false hit and keep scanning
                 search_start = abs_start + 1;
                 continue;
@@ -810,7 +846,10 @@ fn extract_html_blocks(content: &str) -> Vec<String> {
         deduplicated.push((start, end, block.clone()));
     }
 
-    deduplicated.into_iter().map(|(_, _, block)| block).collect()
+    deduplicated
+        .into_iter()
+        .map(|(_, _, block)| block)
+        .collect()
 }
 
 /// Find the position of the `</tag>` that pairs with the (already-opened)
@@ -866,7 +905,13 @@ pub fn merge_small_blocks(blocks: Vec<String>, max_chars: usize) -> Vec<String> 
     let mut current_len = 0;
 
     let container_closing = [
-        "</ul>", "</ol>", "</table>", "</div>", "</section>", "</blockquote>", "</pre>",
+        "</ul>",
+        "</ol>",
+        "</table>",
+        "</div>",
+        "</section>",
+        "</blockquote>",
+        "</pre>",
     ];
 
     for block in &blocks {
@@ -1064,10 +1109,7 @@ pub fn parse_classification_json(response: &str) -> Result<ClassificationRespons
 
     // Strip ``` fence (```json ... ``` or ``` ... ```) if present
     let unbraced = if trimmed.starts_with("```") {
-        let after_open = trimmed
-            .find('\n')
-            .map(|i| i + 1)
-            .unwrap_or(3);
+        let after_open = trimmed.find('\n').map(|i| i + 1).unwrap_or(3);
         let close = trimmed.rfind("```").unwrap_or(trimmed.len());
         trimmed[after_open..close].trim()
     } else {
@@ -1082,9 +1124,8 @@ pub fn parse_classification_json(response: &str) -> Result<ClassificationRespons
         _ => unbraced,
     };
 
-    let value: serde_json::Value = serde_json::from_str(json_slice).map_err(|e| {
-        AppError::Parse(format!("Failed to parse classification JSON: {}", e))
-    })?;
+    let value: serde_json::Value = serde_json::from_str(json_slice)
+        .map_err(|e| AppError::Parse(format!("Failed to parse classification JSON: {}", e)))?;
 
     let tags = value["tags"]
         .as_array()
@@ -1111,7 +1152,10 @@ pub fn parse_classification_batch_json(
     expected_len: usize,
 ) -> Vec<ClassificationResponse> {
     let mut out: Vec<ClassificationResponse> = (0..expected_len)
-        .map(|_| ClassificationResponse { tags: Vec::new(), category: None })
+        .map(|_| ClassificationResponse {
+            tags: Vec::new(),
+            category: None,
+        })
         .collect();
 
     let trimmed = response.trim();
@@ -1136,13 +1180,19 @@ pub fn parse_classification_batch_json(
     };
 
     for el in arr {
-        let Some(idx) = el["index"].as_u64() else { continue };
+        let Some(idx) = el["index"].as_u64() else {
+            continue;
+        };
         if idx as usize >= expected_len {
             continue;
         }
         let tags = el["tags"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         let category = el["category"].as_str().map(String::from);
         out[idx as usize] = ClassificationResponse { tags, category };
@@ -1186,9 +1236,15 @@ pub fn parse_recommendation_json(
     let mut out: Vec<crate::ai::Recommendation> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for el in arr {
-        let Some(idx) = el["index"].as_u64() else { continue };
-        let Some(cand) = candidates.get(idx as usize) else { continue };
-        let Some(reason) = el["reason"].as_str() else { continue };
+        let Some(idx) = el["index"].as_u64() else {
+            continue;
+        };
+        let Some(cand) = candidates.get(idx as usize) else {
+            continue;
+        };
+        let Some(reason) = el["reason"].as_str() else {
+            continue;
+        };
         let reason = reason.trim();
         if reason.is_empty() || !seen.insert(cand.item_id) {
             continue;
@@ -1283,7 +1339,11 @@ mod tests {
     fn test_extract_blocks_header_is_individual_paragraph() {
         let md = "# Chapter One\n\nThis is the first body paragraph of the chapter.";
         let blocks = extract_blocks(md, MAX_CHARS_PER_SEGMENT);
-        assert!(blocks.len() >= 2, "header must not merge with body, got {:?}", blocks);
+        assert!(
+            blocks.len() >= 2,
+            "header must not merge with body, got {:?}",
+            blocks
+        );
         assert_eq!(blocks[0], "# Chapter One");
         assert!(blocks[1].contains("first body paragraph"));
     }
@@ -1302,7 +1362,10 @@ mod tests {
     /// Short headers translate too — exempt from the >5-char paragraph filter.
     #[test]
     fn test_extract_blocks_short_header_kept() {
-        let blocks = extract_blocks("# News\n\nA longer body paragraph follows here.", MAX_CHARS_PER_SEGMENT);
+        let blocks = extract_blocks(
+            "# News\n\nA longer body paragraph follows here.",
+            MAX_CHARS_PER_SEGMENT,
+        );
         assert!(blocks.iter().any(|b| b == "# News"), "got {:?}", blocks);
     }
 
@@ -1313,7 +1376,7 @@ mod tests {
         assert!(is_atx_header("###### Six"));
         assert!(is_atx_header("  ## Indented"));
         assert!(!is_atx_header("####### Seven")); // 7 hashes = not a header
-        assert!(!is_atx_header("#NoSpace"));      // requires space
+        assert!(!is_atx_header("#NoSpace")); // requires space
         assert!(!is_atx_header("Plain text"));
         assert!(!is_atx_header("C# code"));
     }
@@ -1504,7 +1567,10 @@ mod tests {
     #[test]
     fn test_split_html_block_does_not_split_inside_tag() {
         // Attribute value longer than max_chars — must NOT be cut
-        let html = format!(r#"<a href="{}">link</a>"#, "x".repeat(MAX_CHARS_PER_SEGMENT + 100));
+        let html = format!(
+            r#"<a href="{}">link</a>"#,
+            "x".repeat(MAX_CHARS_PER_SEGMENT + 100)
+        );
         let chunks = split_html_block(&html, MAX_CHARS_PER_SEGMENT);
         let joined: String = chunks.join("");
         assert_eq!(joined, html);
@@ -1648,7 +1714,8 @@ mod tests {
 
     #[test]
     fn test_parse_recommendation_out_of_range_and_dup_dropped() {
-        let resp = r#"[{"index":9,"reason":"x"},{"index":0,"reason":"a"},{"index":0,"reason":"b"}]"#;
+        let resp =
+            r#"[{"index":9,"reason":"x"},{"index":0,"reason":"a"},{"index":0,"reason":"b"}]"#;
         let out = parse_recommendation_json(resp, &rec_cands());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].item_id, 100);
@@ -1720,7 +1787,9 @@ mod tests {
         assert!(is_html_content("<p>hi</p>"));
         assert!(is_html_content("<div>x</div>"));
         assert!(!is_html_content("plain text"));
-        assert!(!is_html_content("some <strong>bold</strong> with no closing"));
+        assert!(!is_html_content(
+            "some <strong>bold</strong> with no closing"
+        ));
     }
 
     // -----------------------------------------------------------------------

@@ -70,6 +70,14 @@ pub const BACKFILL_HOST_FAILURE_LIMIT: u32 = 3;
 /// page loading twice) collapse into one running pass.
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
+struct RunningGuard;
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Result of one backfill run, surfaced to the UI.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct BackfillReport {
@@ -112,10 +120,9 @@ pub async fn backfill_website_markdown(
             ..Default::default()
         });
     }
-    // Release the guard on every exit path.
-    let result = run_backfill(repo, fetcher, chroma).await;
-    RUNNING.store(false, Ordering::SeqCst);
-    result
+    // Cancellation and early returns must release the process-global guard.
+    let _running = RunningGuard;
+    run_backfill(repo, fetcher, chroma).await
 }
 
 async fn run_backfill(
@@ -175,6 +182,10 @@ async fn run_backfill(
             tokio::time::sleep(next_allowed - now).await;
         }
 
+        // Record the next start time before awaiting the request. A slow
+        // request that already exceeds the interval needs no extra sleep.
+        next_allowed = tokio::time::Instant::now() + min_interval;
+
         match fetch_one(repo, fetcher, id, &link).await {
             Ok(()) => {
                 host_failures.remove(&host);
@@ -190,7 +201,6 @@ async fn run_backfill(
                 eprintln!("[markdown-backfill] item {} failed: {}", id, e);
             }
         }
-        next_allowed = tokio::time::Instant::now() + min_interval;
     }
 
     // Re-index what we just refreshed so the articles are searchable now,
@@ -229,9 +239,7 @@ async fn fetch_one(
     // HTML -> Markdown is CPU-bound; keep it off the async workers.
     let html = tokio::task::spawn_blocking(move || html_to_markdown_pipeline(&html))
         .await
-        .map_err(|e| {
-            crate::error::AppError::Internal(format!("markdown task failed: {}", e))
-        })??;
+        .map_err(|e| crate::error::AppError::Internal(format!("markdown task failed: {}", e)))??;
 
     if html.trim().is_empty() {
         return Err(crate::error::AppError::OperationFailed(

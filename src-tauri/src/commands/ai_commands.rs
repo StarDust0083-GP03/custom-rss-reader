@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::ai::activity::{with_ai_task, AiActivitySnapshot, AiTaskSpec};
-use crate::ai::{AiConfig, ClassificationRequest, ClassificationResponse};
 use crate::ai::service::{AiService, LlmAiService};
+use crate::ai::{AiConfig, ClassificationRequest, ClassificationResponse};
 use crate::error::{AppError, Result};
 
 use super::AppState;
@@ -38,10 +38,7 @@ pub struct AiConfigResponse {
 // ---- Translation ----
 
 #[tauri::command]
-pub async fn translate_item_bilingual(
-    state: State<'_, AppState>,
-    item_id: i64,
-) -> Result<String> {
+pub async fn translate_item_bilingual(state: State<'_, AppState>, item_id: i64) -> Result<String> {
     let item = state.feed_repo.find_by_id(item_id).await?;
 
     // Check cache validity
@@ -169,9 +166,7 @@ const RECOMMEND_SNIPPET_CHARS: usize = 140;
 /// contributes source + title + a 140-char plain-text snippet — full article
 /// bodies are deliberately never sent.
 #[tauri::command]
-pub async fn recommend_reads(
-    state: State<'_, AppState>,
-) -> Result<Vec<RecommendationResponse>> {
+pub async fn recommend_reads(state: State<'_, AppState>) -> Result<Vec<RecommendationResponse>> {
     let mut summaries = state
         .feed_repo
         .get_unread(None, RECOMMEND_MAX_CANDIDATES, 0)
@@ -259,9 +254,8 @@ pub async fn set_ai_config(
     // The UI deliberately displays a masked key. Treat an omitted, blank, or
     // masked value as "keep the existing secret" instead of persisting the
     // mask itself and breaking the next LLM request.
-    let existing = load_ai_config().unwrap_or_else(|_| {
-        AiConfig::default_for(DEFAULT_BASE_URL, DEFAULT_MODEL)
-    });
+    let existing =
+        load_ai_config().unwrap_or_else(|_| AiConfig::default_for(DEFAULT_BASE_URL, DEFAULT_MODEL));
     let api_key = resolve_api_key(api_key, &existing.api_key)?;
     let config = AiConfig {
         api_key,
@@ -280,7 +274,8 @@ pub async fn set_ai_config(
         task.finish().await;
         connection.map_err(|e| {
             AppError::Network(format!(
-                "API connection test failed: {}. Please check your base URL and model name.", e
+                "API connection test failed: {}. Please check your base URL and model name.",
+                e
             ))
         })?;
     }
@@ -406,7 +401,11 @@ fn write_private_atomic(path: &Path, contents: &str) -> Result<()> {
 
 fn resolve_api_key(input: Option<String>, existing: &str) -> Result<String> {
     let candidate = input.map(|key| key.trim().to_string());
-    let existing = if existing.contains("****") { "" } else { existing };
+    let existing = if existing.contains("****") {
+        ""
+    } else {
+        existing
+    };
     match candidate.filter(|key| !key.is_empty()) {
         Some(key) if !key.contains("****") => Ok(key),
         Some(_) | None if !existing.is_empty() => Ok(existing.to_string()),
@@ -430,7 +429,14 @@ fn mask_api_key(key: &str) -> String {
     }
     let chars: Vec<char> = key.chars().collect();
     let head: String = chars.iter().take(4).collect();
-    let tail: String = chars.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    let tail: String = chars
+        .iter()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     format!("{}****{}", head, tail)
 }
 
@@ -456,7 +462,10 @@ mod tests {
 
     #[test]
     fn test_resolve_api_key_keeps_existing_for_blank_or_masked_input() {
-        assert_eq!(resolve_api_key(None, "sk-live-secret").unwrap(), "sk-live-secret");
+        assert_eq!(
+            resolve_api_key(None, "sk-live-secret").unwrap(),
+            "sk-live-secret"
+        );
         assert_eq!(
             resolve_api_key(Some("sk-****cret".into()), "sk-live-secret").unwrap(),
             "sk-live-secret"
@@ -465,7 +474,10 @@ mod tests {
 
     #[test]
     fn test_resolve_api_key_accepts_new_key_and_rejects_missing_key() {
-        assert_eq!(resolve_api_key(Some(" sk-new ".into()), "old").unwrap(), "sk-new");
+        assert_eq!(
+            resolve_api_key(Some(" sk-new ".into()), "old").unwrap(),
+            "sk-new"
+        );
         assert!(resolve_api_key(None, "").is_err());
         assert!(resolve_api_key(Some("sk-****".into()), "").is_err());
     }

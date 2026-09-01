@@ -60,6 +60,44 @@ import { initAiActivity } from "./ui/ai-activity";
 
 const S = state;
 
+type TagChangeDetail =
+  | { kind: "rename"; oldName: string; newName: string | null }
+  | { kind: "merge"; canonicalName: string; members: string[] }
+  | { kind: "delete"; name: string };
+
+async function refreshAfterTagChange(detail: TagChangeDetail) {
+  if (S.currentFilter === "tag" && S.currentTagFilter) {
+    if (detail.kind === "rename" && S.currentTagFilter === detail.oldName) {
+      S.currentTagFilter = detail.newName;
+    } else if (
+      detail.kind === "merge"
+      && detail.members.includes(S.currentTagFilter)
+    ) {
+      S.currentTagFilter = detail.canonicalName;
+    } else if (detail.kind === "delete" && S.currentTagFilter === detail.name) {
+      S.currentTagFilter = null;
+    }
+
+    if (!S.currentTagFilter) {
+      S.currentFilter = "all";
+    }
+    updateFilterTabs();
+  }
+
+  const selectedId = S.selectedItem?.id ?? null;
+  await loadItems();
+  if (selectedId === null || S.selectedItem?.id !== selectedId) return;
+  try {
+    const refreshed = await itemsApi.get(selectedId);
+    if (S.selectedItem?.id === selectedId) {
+      S.selectedItem = refreshed;
+      renderItemDetail(refreshed);
+    }
+  } catch (error) {
+    console.error("Failed to refresh selected item after tag change:", error);
+  }
+}
+
 // 初始化
 async function init() {
   void initAiActivity();
@@ -166,6 +204,9 @@ async function init() {
   });
   document.getElementById("cluster-tags-btn")?.addEventListener("click", () => {
     void clusterTags();
+  });
+  window.addEventListener("rss-tags-changed", (event) => {
+    void refreshAfterTagChange((event as CustomEvent<TagChangeDetail>).detail);
   });
 
   // 搜索
