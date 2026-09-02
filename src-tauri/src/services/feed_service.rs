@@ -16,6 +16,7 @@ use crate::content_processor::html_to_markdown_pipeline;
 #[cfg(test)]
 use crate::models::NewFeedItem;
 use crate::repositories::{FeedItemRepository, SubscriptionRepository};
+use crate::services::tag_matcher::TagMatcher;
 
 /// Summary of a batch fetch operation.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -42,6 +43,7 @@ pub struct FeedService {
     ai_service: SharedAiService,
     ai_activity: AiActivityStore,
     chroma_service: ChromaHolder,
+    tag_matcher: Arc<TagMatcher>,
 }
 
 impl FeedService {
@@ -55,6 +57,7 @@ impl FeedService {
             ai_service: Arc::new(tokio::sync::RwLock::new(None)),
             ai_activity: AiActivityStore::new(),
             chroma_service: ChromaHolder::default(),
+            tag_matcher: Arc::new(TagMatcher::local()),
         }
     }
 
@@ -87,6 +90,13 @@ impl FeedService {
     /// Attach the ChromaDB holder (enables semantic search indexing).
     pub fn with_chroma_service(mut self, chroma: ChromaHolder) -> Self {
         self.chroma_service = chroma;
+        self
+    }
+
+    /// Attach the shared tag matcher so automatic classification snaps
+    /// generated names onto the catalog with the same settings as the UI.
+    pub fn with_tag_matcher(mut self, tag_matcher: Arc<TagMatcher>) -> Self {
+        self.tag_matcher = tag_matcher;
         self
     }
 
@@ -123,6 +133,7 @@ impl FeedService {
             self.ai_service.clone(),
             self.ai_activity.clone(),
             &self.chroma_service,
+            &self.tag_matcher,
             subscription,
         )
         .await
@@ -225,6 +236,7 @@ impl FeedService {
             let ai_service = self.ai_service.clone();
             let ai_activity = self.ai_activity.clone();
             let chroma_service = self.chroma_service.clone();
+            let tag_matcher = self.tag_matcher.clone();
 
             handles.push(tokio::spawn(async move {
                 let result = async {
@@ -238,6 +250,7 @@ impl FeedService {
                         ai_service.clone(),
                         ai_activity.clone(),
                         &chroma_service,
+                        &tag_matcher,
                         &sub,
                     )
                     .await
@@ -335,6 +348,7 @@ async fn fetch_parse_and_save(
     ai_service: SharedAiService,
     ai_activity: AiActivityStore,
     chroma_service: &ChromaHolder,
+    tag_matcher: &TagMatcher,
     subscription: &Subscription,
 ) -> Result<Vec<FeedItem>> {
     let feed_url = subscription
@@ -409,7 +423,7 @@ async fn fetch_parse_and_save(
                 .await;
             let result = with_ai_task(
                 task.clone(),
-                classify_batch_and_save(repo, ai.as_ref(), chunk),
+                classify_batch_and_save(repo, ai.as_ref(), tag_matcher, chunk),
             )
             .await;
             task.finish().await;
@@ -429,6 +443,7 @@ async fn fetch_parse_and_save(
 async fn classify_batch_and_save(
     repo: &Arc<dyn FeedItemRepository>,
     ai: &dyn AiService,
+    tag_matcher: &TagMatcher,
     items: &[FeedItem],
 ) -> Result<()> {
     let entries: Vec<crate::ai::BatchClassifyEntry> = items
@@ -451,7 +466,17 @@ async fn classify_batch_and_save(
         if response.tags.is_empty() && response.category.is_none() {
             continue;
         }
-        let tags_json = serde_json::to_string(&response.tags).unwrap_or_else(|_| "[]".to_string());
+        // Snap generated names onto existing catalog tags before the exact
+        // canonicalization in `save_tags`. Matching degrades to exact
+        // resolution on embedding errors, so it never blocks the save.
+        let tags = match tag_matcher.resolve(repo.as_ref(), &response.tags).await {
+            Ok(tags) => tags,
+            Err(e) => {
+                eprintln!("Tag matching failed for item {}: {}", item.id, e);
+                response.tags
+            }
+        };
+        let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string());
         let category = response.category.unwrap_or_default();
         if let Err(e) = repo.save_tags(item.id, &tags_json, &category).await {
             eprintln!("Failed to save tags for item {}: {}", item.id, e);

@@ -42,6 +42,8 @@ import {
   closeTagManager,
   createTagFromForm,
   clusterTags,
+  saveMatchConfigFromForm,
+  syncMatchConfigForm,
 } from "./features/tags";
 import {
   loadChromaConfig,
@@ -205,6 +207,12 @@ async function init() {
   document.getElementById("cluster-tags-btn")?.addEventListener("click", () => {
     void clusterTags();
   });
+  document.getElementById("tag-match-form")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    void saveMatchConfigFromForm();
+  });
+  document.getElementById("tag-match-threshold")?.addEventListener("input", syncMatchConfigForm);
+  document.getElementById("tag-match-enabled")?.addEventListener("change", syncMatchConfigForm);
   window.addEventListener("rss-tags-changed", (event) => {
     void refreshAfterTagChange((event as CustomEvent<TagChangeDetail>).detail);
   });

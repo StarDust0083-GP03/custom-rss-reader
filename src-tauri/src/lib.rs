@@ -63,12 +63,16 @@ pub fn run() {
             let ai_service: SharedAiService = Arc::new(tokio::sync::RwLock::new(
                 commands::ai_commands::load_configured_ai_service(),
             ));
+            // Local ONNX embedder for snapping generated tags onto the
+            // catalog; loads the model lazily on first classification.
+            let tag_matcher = Arc::new(services::TagMatcher::local());
             let feed_service = FeedService::new(feed_repo.clone())
                 .with_subscription_repo(sub_repo.clone())
                 .with_fetcher(fetcher.clone())
                 .with_ai_service(ai_service.clone())
                 .with_chroma_service(chroma_service.clone())
-                .with_ai_activity(ai_activity.clone());
+                .with_ai_activity(ai_activity.clone())
+                .with_tag_matcher(tag_matcher.clone());
 
             let sync_chroma = chroma_service.clone();
             let sync_repo = feed_repo.clone();
@@ -81,6 +85,7 @@ pub fn run() {
                 ai_service,
                 ai_activity,
                 chroma_service,
+                tag_matcher,
             };
 
             app.manage(app_state);
@@ -138,6 +143,8 @@ pub fn run() {
             delete_tag,
             restore_tag,
             cluster_tags,
+            get_tag_match_config,
+            set_tag_match_config,
             // Webview / browser
             open_url_in_browser,
             // AI commands

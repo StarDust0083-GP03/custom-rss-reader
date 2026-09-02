@@ -88,6 +88,12 @@ export interface TagCluster {
   members: TagCatalogEntry[];
 }
 
+/** Settings for snapping AI-generated tag names onto the catalog. */
+export interface TagMatchConfig {
+  enabled: boolean;
+  similarity_threshold: number;
+}
+
 /** One AI-recommended article (manual "Picks" feature). */
 export interface Recommendation {
   item_id: number;

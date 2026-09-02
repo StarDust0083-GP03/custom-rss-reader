@@ -23,6 +23,7 @@ import type {
   MarkdownBackfillReport,
   TagCatalogEntry,
   TagCluster,
+  TagMatchConfig,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -179,6 +180,13 @@ export const tags = {
   remove: (name: string) => call<void>("delete_tag", { name }, "tags.remove"),
   restore: (name: string) => call<void>("restore_tag", { name }, "tags.restore"),
   cluster: () => call<TagCluster[]>("cluster_tags", undefined, "tags.cluster"),
+  matchConfig: () => call<TagMatchConfig>("get_tag_match_config", undefined, "tags.matchConfig"),
+  setMatchConfig: (enabled: boolean, similarityThreshold: number) =>
+    call<TagMatchConfig>(
+      "set_tag_match_config",
+      { enabled, similarityThreshold },
+      "tags.setMatchConfig",
+    ),
 };
 
 // ---------------------------------------------------------------------------

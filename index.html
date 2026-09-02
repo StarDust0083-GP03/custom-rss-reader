@@ -258,6 +258,23 @@
                     <small>Names are stored as lowercase English snake_case.</small>
                 </form>
 
+                <form id="tag-match-form" class="tag-create-form tag-match-form">
+                    <label for="tag-match-threshold">AI tag matching</label>
+                    <p class="tag-match-help">When AI classification returns a name that is not in the catalog, compare it with existing tags using local embeddings and silently reuse the closest tag if the similarity is at or above the threshold. The match is saved as a mapping.</p>
+                    <div class="tag-match-row">
+                        <label class="tag-match-toggle">
+                            <input type="checkbox" id="tag-match-enabled" checked />
+                            <span>Match generated tags to existing tags</span>
+                        </label>
+                    </div>
+                    <div class="tag-match-row">
+                        <input type="range" id="tag-match-threshold" min="0.5" max="1" step="0.01" value="0.85" aria-describedby="tag-match-threshold-value" />
+                        <output id="tag-match-threshold-value" for="tag-match-threshold">0.85</output>
+                        <button type="submit" class="tag-action-button primary">Save</button>
+                    </div>
+                    <small>Higher values merge only near-identical names (0.9+). Lower values also merge related subjects (0.7). Existing article tags are not changed.</small>
+                </form>
+
                 <div class="tag-manager-cluster-toolbar">
                     <div>
                         <h3>Similar names</h3>

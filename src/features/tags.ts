@@ -1,7 +1,7 @@
 /** Tag catalog management, local similarity clustering, and explicit mutations. */
 
 import { tags as tagsApi } from "../api";
-import type { TagCatalogEntry, TagCluster } from "../types";
+import type { TagCatalogEntry, TagCluster, TagMatchConfig } from "../types";
 import { clearLoadingStatus, setLoadingWithStatus } from "../ui/status";
 import { error as toastError, info as toastInfo, success as toastSuccess } from "../toast";
 
@@ -11,6 +11,7 @@ let clusters: TagCluster[] = [];
 let editingTag: string | null = null;
 let deletingTag: string | null = null;
 let clustering = false;
+let matchConfig: TagMatchConfig | null = null;
 
 type TagChangeDetail =
   | { kind: "rename"; oldName: string; newName: string | null }
@@ -42,6 +43,61 @@ async function refreshTagManager() {
     renderClusters();
   } catch (error) {
     toastError(`Failed to load tags: ${error}`);
+  }
+  // Settings are independent of the catalog; a failure here must not hide
+  // the tag list, so load them separately.
+  try {
+    matchConfig = await tagsApi.matchConfig();
+    renderMatchConfig();
+  } catch (error) {
+    toastError(`Failed to load tag matching settings: ${error}`);
+  }
+}
+
+function matchFormElements() {
+  return {
+    form: document.getElementById("tag-match-form") as HTMLFormElement | null,
+    enabled: document.getElementById("tag-match-enabled") as HTMLInputElement | null,
+    threshold: document.getElementById("tag-match-threshold") as HTMLInputElement | null,
+    value: document.getElementById("tag-match-threshold-value") as HTMLOutputElement | null,
+  };
+}
+
+/** Reflect the slider position and enabled state in the form. */
+export function syncMatchConfigForm() {
+  const { form, enabled, threshold, value } = matchFormElements();
+  if (!form || !enabled || !threshold || !value) return;
+  value.textContent = Number(threshold.value).toFixed(2);
+  threshold.disabled = !enabled.checked;
+  form.classList.toggle("disabled", !enabled.checked);
+}
+
+function renderMatchConfig() {
+  const { enabled, threshold } = matchFormElements();
+  if (!matchConfig || !enabled || !threshold) return;
+  enabled.checked = matchConfig.enabled;
+  threshold.value = matchConfig.similarity_threshold.toFixed(2);
+  syncMatchConfigForm();
+}
+
+export async function saveMatchConfigFromForm() {
+  const { enabled, threshold } = matchFormElements();
+  if (!enabled || !threshold) return;
+  const similarityThreshold = Number(threshold.value);
+  if (!Number.isFinite(similarityThreshold)) {
+    toastError("Similarity threshold must be a number.");
+    return;
+  }
+  try {
+    matchConfig = await tagsApi.setMatchConfig(enabled.checked, similarityThreshold);
+    renderMatchConfig();
+    toastSuccess(
+      matchConfig.enabled
+        ? `Generated tags will be matched at ≥ ${matchConfig.similarity_threshold.toFixed(2)} similarity.`
+        : "Automatic tag matching disabled.",
+    );
+  } catch (error) {
+    toastError(`Could not save tag matching settings: ${error}`);
   }
 }
 

@@ -88,7 +88,8 @@ rss-reader/
 │   │   └── webview.rs
 │   ├── src/services/              # business orchestration
 │   │   ├── feed_service.rs
-│   │   └── subscription_service.rs
+│   │   ├── subscription_service.rs
+│   │   └── tag_matcher.rs         # snaps generated tags onto the catalog (local ONNX)
 │   ├── src/repositories/          # SQLite data access traits and impls
 │   │   ├── feed_item_repo.rs      # item and tag catalog operations
 │   │   └── subscription_repo.rs
@@ -138,7 +139,7 @@ Classification uses a structured payload:
 }
 ```
 
-The Rust command passes the global tag catalog to the LLM, then the repository normalizes, resolves aliases, drops blocked names, and serializes the canonical `tags` array. Auto-classification uses the same repository reconciliation path. Tag clustering uses the local ONNX embedding model and is review-only; merges and deletes are explicit user operations.
+The Rust command passes the global tag catalog to the LLM. `TagMatcher` then embeds any returned name that is not already a catalog name or alias, snaps it onto the closest catalog tag when the cosine similarity meets the user-configured threshold (`~/.rss-reader/tag_config.json`, default 0.85), and records the match as an alias. Finally the repository normalizes, resolves aliases, drops blocked names, and serializes the canonical `tags` array. Auto-classification uses the same matcher and repository path. Tag clustering reuses the matcher's embedding cache and is review-only; merges and deletes of existing tags are explicit user operations.
 
 ### Backend layering
 
@@ -185,6 +186,7 @@ These controls do not claim to solve DNS rebinding or a compromised local machin
 | Search over Markdown | `src-tauri/src/tests/feed_item_tests.rs` |
 | Subscription-scoped Favorites/Read Later | `src-tauri/src/tests/feed_item_tests.rs` |
 | Legacy migration | `src-tauri/src/database/migrations.rs` test |
+| Generated-tag matching and alias persistence | `src-tauri/src/tests/tag_matcher_tests.rs` |
 | Website URL/redirect policy | `src-tauri/src/feed/fetcher.rs` tests |
 | iframe URL and IPC payload contracts | `tests/frontend-contracts.test.ts` |
 | Full merge gate | `npm run verify` and `.github/workflows/verify.yml` |

@@ -939,6 +939,50 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         Ok(())
     }
 
+    async fn add_tag_alias(&self, alias: &str, canonical_name: &str) -> Result<()> {
+        let alias = required_tag(alias)?;
+        let canonical_name = required_tag(canonical_name)?;
+        if alias == canonical_name {
+            return Ok(());
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let head_exists: Option<String> =
+            sqlx::query_scalar("SELECT name FROM tag_catalog WHERE name = $1")
+                .bind(&canonical_name)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if head_exists.is_none() {
+            return Err(AppError::NotFound(format!(
+                "Tag '{}' not found",
+                canonical_name
+            )));
+        }
+        // An active tag or a blocked name must never be shadowed by a mapping;
+        // merging or restoring are the explicit operations for those cases.
+        let occupied: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM tag_catalog WHERE name = $1
+             UNION ALL SELECT name FROM blocked_tags WHERE name = $1
+             LIMIT 1",
+        )
+        .bind(&alias)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if occupied.is_some() {
+            return Err(AppError::Duplicate(format!(
+                "Tag '{}' is an active or blocked name",
+                alias
+            )));
+        }
+        sqlx::query("INSERT OR IGNORE INTO tag_aliases (alias, canonical_name) VALUES ($1, $2)")
+            .bind(alias)
+            .bind(canonical_name)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn mark_read(&self, id: i64, is_read: bool) -> Result<FeedItem> {
         let row = sqlx::query_as::<_, FeedItemRow>(
             r#"

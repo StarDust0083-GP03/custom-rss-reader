@@ -186,6 +186,11 @@ pub trait FeedItemRepository: Send + Sync {
     /// Restore a blocked name as an unused canonical tag.
     async fn restore_tag(&self, name: &str) -> Result<()>;
 
+    /// Record that `alias` should resolve to the existing canonical tag
+    /// `canonical_name` on future writes. Used when a generated name is
+    /// matched onto the catalog. No-op if the alias is already recorded.
+    async fn add_tag_alias(&self, alias: &str, canonical_name: &str) -> Result<()>;
+
     /// Mark a feed item as read or unread.
     async fn mark_read(&self, id: i64, is_read: bool) -> Result<FeedItem>;
 

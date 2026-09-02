@@ -24,7 +24,7 @@ The current database snapshot has 250 articles and no tags. Automatic classifica
 ## Non-goals
 
 - No tag-count policy or maximum number of global tags.
-- No automatic merge, deletion, or mutation based on embedding similarity.
+- No automatic merge or deletion of *existing* catalog tags based on embedding similarity. Automatic matching applies only to newly generated names that are not yet in the catalog (see "Generated-tag matching").
 - No AI call from the tag manager.
 - No rejected-pair or exclusion system in the first version.
 - No per-subscription vocabularies.
@@ -41,7 +41,8 @@ The current database snapshot has 250 articles and no tags. Automatic classifica
 - Removing a tag, selecting a cluster head, and renaming a tag are distinct operations.
 - Manual creation of an unused tag is supported.
 - The filter needs tag-name search and a **Manage tags** action. Counts and extra filter controls are not required.
-- Local embeddings are used only for the similarity-clustering recommendation. Article tag generation remains an AI classification feature.
+- Local embeddings are used for two things: the review-only similarity clustering, and silently matching newly generated names onto the catalog. Article tag generation itself remains an AI classification feature.
+- Generated-tag matching is silent. The similarity threshold is a user setting in the tag manager, not an implementation constant.
 
 ## User experience
 
@@ -65,8 +66,9 @@ The manager is opened from the picker and contains:
 4. **Tag list**: rename or remove active tags. Removal rewrites articles immediately and places the removed name and its known aliases in the blocked list.
 5. **Known mappings**: display `alias -> cluster head` mappings.
 6. **Blocked names**: display removed names and allow restoration as unused active tags.
+7. **AI tag matching settings**: an on/off switch and a similarity threshold slider (0.50–1.00, default 0.85) that control how aggressively newly generated names are snapped onto existing tags.
 
-All mutations are explicit user actions. A cluster result alone never changes article tags.
+All mutations of existing tags are explicit user actions. A cluster result alone never changes article tags.
 
 ## Data model
 
@@ -118,6 +120,16 @@ The existing classifier remains responsible for generating tags. Its prompt is u
 
 Manual and batch classification receive current active catalog names from the backend. The repository reconciles every response before saving, so the UI and automatic feed pipeline use the same rules.
 
+## Generated-tag matching
+
+When classification returns a name that, after normalization and alias resolution, is not an active catalog tag:
+
+1. The backend embeds the name and every active catalog name with the local ONNX model (cached per name for the process lifetime).
+2. If the best cosine similarity is at or above the configured threshold, the generated name is silently rewritten to that catalog tag and `generated_name -> catalog_tag` is stored in `tag_aliases`. Later occurrences resolve exactly without embedding.
+3. Otherwise the name is kept and enters the catalog through the normal `save_tags` path, where it will appear in future cluster suggestions.
+
+The step runs before `save_tags` in both the manual `classify_item` command (so the UI shows the final tags) and the automatic batch classifier. Matching never maps onto blocked names or shadows an active tag, and embedding failures degrade to exact resolution rather than blocking the save. Settings live in `~/.rss-reader/tag_config.json` and apply immediately to the next classification.
+
 ## Local clustering contract
 
 The manager fetches active catalog entries, embeds their names with the existing multilingual sentence-transformer model, computes pairwise cosine similarity, and returns connected clusters above a conservative similarity threshold. Clustering is deliberately review-only. The threshold is an implementation constant, not a user setting, and can be tuned after observing real tag data.
@@ -136,6 +148,8 @@ Add typed wrappers and Tauri commands for:
 - `delete_tag`
 - `restore_tag`
 - `cluster_tags`
+- `get_tag_match_config`
+- `set_tag_match_config`
 
 The existing `get_all_tags`, `save_item_tags`, and classification commands remain compatible at the frontend boundary. Their backend behavior becomes canonicalization-aware.
 
@@ -151,6 +165,7 @@ Automated checks must cover:
 - Delete removes tags, blocks names, and restore recreates an unused active tag.
 - Catalog and subscription-scoped filter queries return canonical used names.
 - Cluster grouping is deterministic for representative vectors, including transitive membership.
+- Generated-tag matching snaps names at or above the threshold, persists the alias, skips blocked names, respects the enabled flag, and survives embedder failures.
 - Frontend IPC wrappers send the intended command names and camelCase arguments.
 
 Manual acceptance:

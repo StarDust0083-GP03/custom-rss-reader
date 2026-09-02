@@ -28,6 +28,7 @@ use crate::ai::activity::AiActivityStore;
 use crate::ai::service::SharedAiService;
 use crate::feed::FeedFetcher;
 use crate::repositories::FeedItemRepository;
+use crate::services::TagMatcher;
 use crate::{FeedService, SubscriptionService};
 
 /// Application state managed by Tauri.
@@ -44,4 +45,7 @@ pub struct AppState {
     pub ai_activity: AiActivityStore,
     /// Lazily-connected ChromaDB service (auto-reconnects).
     pub chroma_service: crate::chroma::ChromaHolder,
+    /// Local-embedding matcher that snaps generated tag names onto the
+    /// catalog. Shared with `FeedService` so settings apply everywhere.
+    pub tag_matcher: Arc<TagMatcher>,
 }

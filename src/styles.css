@@ -2133,6 +2133,62 @@ body::after {
     font-size: 0.7rem;
 }
 
+.tag-match-form {
+    margin-top: 0.75rem;
+}
+
+.tag-match-help {
+    margin: 0 0 0.6rem;
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.78rem;
+    line-height: 1.45;
+}
+
+.tag-match-row {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+}
+
+.tag-match-row + .tag-match-row {
+    margin-top: 0.55rem;
+}
+
+.tag-match-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 0.84rem;
+    cursor: pointer;
+}
+
+.tag-match-toggle input {
+    accent-color: var(--accent-color);
+}
+
+.tag-match-row input[type="range"] {
+    flex: 1;
+    min-width: 0;
+    accent-color: var(--accent-color);
+}
+
+.tag-match-row output {
+    min-width: 2.6rem;
+    text-align: right;
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 0.84rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.tag-match-form.disabled input[type="range"],
+.tag-match-form.disabled output {
+    opacity: 0.45;
+}
+
 .tag-manager-cluster-toolbar {
     display: flex;
     align-items: end;

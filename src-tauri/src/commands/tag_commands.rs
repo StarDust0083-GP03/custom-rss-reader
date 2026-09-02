@@ -1,13 +1,11 @@
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
 
-use chromadb::embeddings::EmbeddingFunction;
 use serde::Serialize;
 use tauri::State;
 
-use crate::chroma::embeddings::OnnxEmbeddingFunction;
 use crate::error::Result;
 use crate::repositories::TagCatalogEntry;
+use crate::services::tag_matcher::{cosine_similarity, TagMatchConfig};
 
 use super::AppState;
 
@@ -65,6 +63,27 @@ pub async fn restore_tag(state: State<'_, AppState>, name: String) -> Result<()>
     state.feed_repo.restore_tag(&name).await
 }
 
+#[tauri::command]
+pub async fn get_tag_match_config(state: State<'_, AppState>) -> Result<TagMatchConfig> {
+    Ok(state.tag_matcher.config().await)
+}
+
+/// Save the automatic tag-matching settings used when AI classification
+/// returns names that are not yet in the catalog.
+#[tauri::command]
+pub async fn set_tag_match_config(
+    state: State<'_, AppState>,
+    enabled: bool,
+    similarity_threshold: f32,
+) -> Result<TagMatchConfig> {
+    let config = TagMatchConfig {
+        enabled,
+        similarity_threshold,
+    };
+    state.tag_matcher.set_config(config.clone()).await?;
+    Ok(config)
+}
+
 /// Cluster active tag names with the local sentence-embedding model.
 ///
 /// No LLM or ChromaDB server is involved. The result is a suggestion only;
@@ -77,11 +96,7 @@ pub async fn cluster_tags(state: State<'_, AppState>) -> Result<Vec<TagClusterRe
     }
 
     let names: Vec<String> = catalog.iter().map(|tag| tag.name.clone()).collect();
-    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let embedder = shared_tag_embedder();
-    let vectors = embedder.embed(&name_refs).await.map_err(|error| {
-        crate::error::AppError::OperationFailed(format!("Cluster tags: {}", error))
-    })?;
+    let vectors = state.tag_matcher.embed(&names).await?;
 
     let groups = cluster_indices(&vectors, TAG_CLUSTER_SIMILARITY_THRESHOLD);
     Ok(groups
@@ -102,11 +117,6 @@ pub async fn cluster_tags(state: State<'_, AppState>) -> Result<Vec<TagClusterRe
             TagClusterResponse { members }
         })
         .collect())
-}
-
-fn shared_tag_embedder() -> OnnxEmbeddingFunction {
-    static EMBEDDER: OnceLock<OnnxEmbeddingFunction> = OnceLock::new();
-    EMBEDDER.get_or_init(OnnxEmbeddingFunction::new).clone()
 }
 
 /// Return connected components for pairwise cosine similarity above `threshold`.
@@ -141,34 +151,9 @@ fn find_root(parents: &mut [usize], index: usize) -> usize {
     parents[index]
 }
 
-fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
-    let (dot, left_norm, right_norm) = left.iter().zip(right).fold(
-        (0.0f32, 0.0f32, 0.0f32),
-        |(dot, left_norm, right_norm), (left, right)| {
-            (
-                dot + left * right,
-                left_norm + left * left,
-                right_norm + right * right,
-            )
-        },
-    );
-    let denominator = (left_norm * right_norm).sqrt();
-    if denominator == 0.0 {
-        0.0
-    } else {
-        dot / denominator
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{cluster_indices, cosine_similarity};
-
-    #[test]
-    fn cosine_similarity_handles_normalized_and_zero_vectors() {
-        assert!((cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < f32::EPSILON);
-        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 0.0]), 0.0);
-    }
+    use super::cluster_indices;
 
     #[test]
     fn clustering_is_transitive_and_leaves_distant_tags_alone() {

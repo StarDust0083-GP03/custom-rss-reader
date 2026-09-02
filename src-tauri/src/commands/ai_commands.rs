@@ -138,7 +138,15 @@ pub async fn classify_item(
         .await;
     let result = with_ai_task(task.clone(), ai_service.classify(request)).await;
     task.finish().await;
-    result
+    let mut response = result?;
+
+    // Snap generated names onto existing catalog tags (local embeddings, no
+    // LLM) so the UI shows exactly what `save_item_tags` will persist.
+    response.tags = state
+        .tag_matcher
+        .resolve(state.feed_repo.as_ref(), &response.tags)
+        .await?;
+    Ok(response)
 }
 
 // ---- Read recommendations (manual trigger, first version) ----

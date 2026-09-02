@@ -72,6 +72,31 @@ describe("frontend security and IPC contracts", () => {
     });
   });
 
+  it("sends tag matching settings with camelCase arguments and returns the saved config", async () => {
+    let request: { command: string; args: Record<string, unknown> } | undefined;
+    mockIPC((command, args) => {
+      request = { command, args: args as Record<string, unknown> };
+      return { enabled: true, similarity_threshold: 0.9 };
+    });
+
+    const saved = await tags.setMatchConfig(true, 0.9);
+
+    expect(request).toEqual({
+      command: "set_tag_match_config",
+      args: { enabled: true, similarityThreshold: 0.9 },
+    });
+    expect(saved).toEqual({ enabled: true, similarity_threshold: 0.9 });
+  });
+
+  it("bounds the tag matching threshold slider to the backend's accepted range", () => {
+    const html = readFileSync("index.html", "utf8");
+    const page = new DOMParser().parseFromString(html, "text/html");
+    const slider = page.querySelector<HTMLInputElement>("#tag-match-threshold");
+    expect(slider?.min).toBe("0.5");
+    expect(slider?.max).toBe("1");
+    expect(page.querySelector("#tag-match-form")).not.toBeNull();
+  });
+
   it("uses the one-click Chroma initialization command contract", async () => {
     let request: { command: string; args: Record<string, unknown> } | undefined;
     mockIPC((command, args) => {

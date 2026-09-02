@@ -9,7 +9,7 @@ A cross-platform RSS reader desktop application built with Tauri, featuring OPML
 - **Dual-Source Content**: Fetch content from RSS feeds or directly from websites
 - **AI Translation**: Streaming bilingual (original + Chinese) article translation
 - **AI Classification**: Automatic article tagging by title, using a global canonical subject vocabulary and batches of 20 articles per LLM call
-- **Tag Management**: Search the tag filter, create and rename tags, review local-embedding clusters, merge similar subjects, remove tags, and restore blocked names
+- **Tag Management**: Search the tag filter, create and rename tags, review local-embedding clusters, merge similar subjects, remove tags, and restore blocked names. Newly generated AI tags are silently matched onto existing tags with local embeddings at a user-configurable similarity threshold
 - **AI Task Status**: The bottom status bar shows whether the model is translating, classifying, recommending, testing, or waiting in the queue
 - **AI Picks** *(manual)*: "★ Picks" button — the LLM plays editor, reading your recent unread titles/snippets and picking the 5 most worthwhile articles with a one-line reason each
 - **Semantic Search** *(optional)*: ChromaDB-backed "search by meaning" and similar-article discovery
