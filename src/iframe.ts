@@ -49,22 +49,71 @@ function isPrivateOrLocalHost(rawHost: string): boolean {
     return true;
   }
 
-  const octets = host.split(".").map(Number);
-  if (octets.length === 4 && octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)) {
-    const [first, second] = octets;
-    return (
-      first === 0 ||
-      first === 10 ||
-      first === 127 ||
-      (first === 169 && second === 254) ||
-      (first === 172 && second >= 16 && second <= 31) ||
-      (first === 192 && second === 168) ||
-      first >= 224
-    );
-  }
+  const octets = parseIpv4(host);
+  if (octets) return isPrivateIpv4(octets);
 
-  // IPv6 loopback, link-local, unique-local and multicast ranges.
-  return host === "::1" || /^(fc|fd|fe8|fe9|fea|feb)/i.test(host) || host.startsWith("ff");
+  // `::ffff:127.0.0.1` (mapped) and `::127.0.0.1` (compatible) embed an IPv4
+  // address. Without unwrapping them first, the IPv6 branch below reads them
+  // as ordinary v6 addresses and lets loopback/private destinations through.
+  const mapped = mappedIpv4(host);
+  if (mapped) return isPrivateIpv4(mapped);
+
+  // IPv6 loopback, unspecified, and compatible/mapped forms are handled by
+  // `mappedIpv4` above; what remains are the v6-specific ranges.
+  const groups = ipv6Groups(host);
+  if (!groups) return false;
+  const [g1] = groups;
+  return (
+    (g1 & 0xfe00) === 0xfc00 ||
+    (g1 & 0xffc0) === 0xfe80 ||
+    (g1 & 0xff00) === 0xff00
+  );
+}
+
+function parseIpv4(host: string): [number, number, number, number] | null {
+  const parts = host.split(".");
+  if (parts.length !== 4) return null;
+  const octets = parts.map((part) => (/^\d{1,3}$/.test(part) ? Number(part) : NaN));
+  if (octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+  return octets as [number, number, number, number];
+}
+
+function isPrivateIpv4([first, second]: readonly number[]): boolean {
+  return (
+    first === 0 ||
+    first === 10 ||
+    first === 127 ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168) ||
+    first >= 224
+  );
+}
+
+/** Expand an IPv6 literal into its eight 16-bit groups, or null if malformed. */
+function ipv6Groups(host: string): number[] | null {
+  const halves = host.split("::");
+  if (halves.length > 2) return null;
+  const parse = (part: string): number[] =>
+    part === ""
+      ? []
+      : part.split(":").map((group) => (/^[0-9a-f]{1,4}$/.test(group) ? parseInt(group, 16) : NaN));
+  const head = parse(halves[0]);
+  const tail = halves.length === 2 ? parse(halves[1]) : [];
+  if ([...head, ...tail].some((group) => Number.isNaN(group))) return null;
+  if (halves.length === 1) return head.length === 8 ? head : null;
+  const fill = 8 - head.length - tail.length;
+  if (fill < 1) return null;
+  return [...head, ...new Array(fill).fill(0), ...tail];
+}
+
+function mappedIpv4(host: string): readonly number[] | null {
+  const groups = ipv6Groups(host);
+  if (!groups) return null;
+  const [g1, g2, g3, g4, g5, g6, g7, g8] = groups;
+  if (g1 !== 0 || g2 !== 0 || g3 !== 0 || g4 !== 0 || g5 !== 0) return null;
+  if (g6 !== 0 && g6 !== 0xffff) return null;
+  return [g7 >> 8, g7 & 0xff, g8 >> 8, g8 & 0xff];
 }
 
 function ensureIframeCss(): void {

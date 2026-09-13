@@ -226,16 +226,45 @@ async fn test_empty_translation_clears_cached_content() {
     let item_id = create_item(&env, sub_id, "Translation cache").await;
 
     env.feed_repo
-        .update_translation(item_id, None, "<div>cached</div>")
+        .update_translation(
+            item_id,
+            None,
+            "<div>cached</div>",
+            "hash-a",
+            "test-model",
+            1,
+        )
         .await
         .unwrap();
     let cleared = env
         .feed_repo
-        .update_translation(item_id, None, "")
+        .update_translation(item_id, None, "", "hash-a", "test-model", 1)
         .await
         .unwrap();
 
     assert!(cleared.translated_content.is_none());
+    // Clearing drops the validity metadata too: a later lookup must not see a
+    // hash that no longer has content behind it.
+    assert!(cleared.translated_source_hash.is_none());
+}
+
+/// A stored translation keeps the identity of what produced it, so a lookup
+/// can tell "same article, same model" from "different source".
+#[tokio::test]
+async fn test_translation_records_source_identity() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+    let item_id = create_item(&env, sub_id, "Translation identity").await;
+
+    let stored = env
+        .feed_repo
+        .update_translation(item_id, None, "<div>t</div>", "hash-b", "model-x", 3)
+        .await
+        .unwrap();
+
+    assert_eq!(stored.translated_source_hash.as_deref(), Some("hash-b"));
+    assert_eq!(stored.translated_model.as_deref(), Some("model-x"));
+    assert_eq!(stored.translated_prompt_version, Some(3));
 }
 
 // ---------------------------------------------------------------------------
@@ -810,11 +839,7 @@ async fn test_tag_catalog_canonicalizes_and_manages_mappings() {
     let second = create_item(&env, sub_id, "Second tagged item").await;
 
     env.feed_repo
-        .save_tags(
-            first,
-            r#"["Machine Learning", "machine-learning", "AI", "Extra"]"#,
-            "technology",
-        )
+        .save_tags(first, r#"["Machine Learning", "AI", "extra"]"#)
         .await
         .unwrap();
     env.feed_repo.create_tag("Database").await.unwrap();
@@ -839,7 +864,7 @@ async fn test_tag_catalog_canonicalizes_and_manages_mappings() {
         .await
         .unwrap();
     env.feed_repo
-        .save_tags(second, r#"["AI"]"#, "technology")
+        .save_tags(second, r#"["AI"]"#)
         .await
         .unwrap();
     let second_tags: Vec<String> = serde_json::from_str(
@@ -871,7 +896,7 @@ async fn test_tag_catalog_canonicalizes_and_manages_mappings() {
     assert!(blocked.contains(&"machine_learning".to_string()));
     assert!(env
         .feed_repo
-        .save_tags(second, r#"["AI", "extra"]"#, "technology")
+        .save_tags(second, r#"["AI", "extra"]"#)
         .await
         .unwrap()
         .tags
@@ -932,11 +957,11 @@ async fn test_find_all_tags_is_canonical_and_subscription_scoped() {
     let item_b = create_item(&env, sub_b, "B").await;
 
     env.feed_repo
-        .save_tags(item_a, r#"["Machine Learning"]"#, "")
+        .save_tags(item_a, r#"["Machine Learning"]"#)
         .await
         .unwrap();
     env.feed_repo
-        .save_tags(item_b, r#"["PostgreSQL"]"#, "")
+        .save_tags(item_b, r#"["PostgreSQL"]"#)
         .await
         .unwrap();
     env.feed_repo.create_tag("Unused Subject").await.unwrap();
@@ -948,5 +973,109 @@ async fn test_find_all_tags_is_canonical_and_subscription_scoped() {
     assert_eq!(
         env.feed_repo.find_all_tags(Some(sub_a)).await.unwrap(),
         vec!["machine_learning"]
+    );
+}
+
+/// A legacy row whose `tags` column is not valid JSON must not take the whole
+/// tag filter down with it: `json_each` raises on malformed input, so without
+/// the `json_valid` guard one bad row hides every tagged article.
+#[tokio::test]
+async fn test_find_by_tag_survives_malformed_legacy_tag_json() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+    let good = create_item(&env, sub_id, "Properly tagged").await;
+    env.feed_repo
+        .save_tags(good, r#"["rust"]"#)
+        .await
+        .unwrap();
+
+    let legacy = create_item(&env, sub_id, "Legacy tagged").await;
+    sqlx::query("UPDATE feed_items SET tags = 'rust, rss' WHERE id = $1")
+        .bind(legacy)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+    let rows = env
+        .feed_repo
+        .find_by_tag("rust", None, 50, 0)
+        .await
+        .expect("a malformed legacy row must not fail the tag filter");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, good);
+}
+
+/// The dictionary index must be resumable, keyed to its encoder, and must drop
+/// a vector as soon as the definition it was computed from changes.
+#[tokio::test]
+async fn test_tag_dictionary_round_trip_and_stale_key() {
+    let env = TestEnv::new().await;
+    env.feed_repo.create_tag("machine_learning").await.unwrap();
+    env.feed_repo.create_tag("cooking").await.unwrap();
+
+    assert_eq!(
+        env.feed_repo.find_tags_missing_explanation(10).await.unwrap(),
+        vec!["cooking", "machine_learning"]
+    );
+    assert_eq!(
+        env.feed_repo.tag_dictionary_status().await.unwrap(),
+        (2, 0, 0)
+    );
+
+    env.feed_repo
+        .save_tag_explanations(&[("machine_learning".into(), "Branch of AI.".into())], 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        env.feed_repo.find_tags_missing_explanation(10).await.unwrap(),
+        vec!["cooking"]
+    );
+    assert_eq!(
+        env.feed_repo.tag_dictionary_status().await.unwrap(),
+        (2, 1, 0)
+    );
+
+    // Vectors are readable only under the encoder identity that produced them.
+    env.feed_repo
+        .save_tag_embeddings("model#v1", &[("machine_learning".into(), vec![1.0, 0.0])])
+        .await
+        .unwrap();
+    assert_eq!(
+        env.feed_repo
+            .find_tag_embeddings("model#v1")
+            .await
+            .unwrap()
+            .get("machine_learning"),
+        Some(&vec![1.0, 0.0])
+    );
+    assert!(env
+        .feed_repo
+        .find_tag_embeddings("other#v1")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        env.feed_repo.tag_dictionary_status().await.unwrap(),
+        (2, 1, 1)
+    );
+
+    // A rewritten definition invalidates the vector made from the old text.
+    env.feed_repo
+        .save_tag_explanations(&[("machine_learning".into(), "A field of AI.".into())], 1)
+        .await
+        .unwrap();
+    assert!(env
+        .feed_repo
+        .find_tag_embeddings("model#v1")
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        env.feed_repo.tag_dictionary_status().await.unwrap(),
+        (2, 1, 0)
+    );
+    assert_eq!(
+        env.feed_repo.find_tag_explanations().await.unwrap(),
+        vec![("machine_learning".to_string(), "A field of AI.".to_string())]
     );
 }

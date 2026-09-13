@@ -5478,6 +5478,7 @@ dependencies = [
  "chromadb",
  "chrono",
  "dirs 5.0.1",
+ "encoding_rs",
  "feed-rs",
  "futures",
  "html2md",

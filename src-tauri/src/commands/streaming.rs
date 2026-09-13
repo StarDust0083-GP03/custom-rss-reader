@@ -25,6 +25,11 @@ struct TranslateRequest {
 /// `source` is the raw content to translate. When `Some(item_id)`, the
 /// translation is cached in the database and the cache is consulted first.
 ///
+/// `run_id` is the caller's identity for this translation attempt. It is
+/// echoed on every event so a client can reject events from a run it has
+/// already cancelled or replaced; without it, a restarted run accepts the
+/// previous run's progress because events only identify the item.
+///
 /// Emits `translation-progress` events to the "main" window so the frontend
 /// can render partial results in real time.
 #[tauri::command]
@@ -34,6 +39,7 @@ pub async fn translate_html_content_streaming(
     item_id: i64,
     content: String,
     force: Option<bool>,
+    run_id: Option<u64>,
 ) -> Result<String> {
     run_translation_task(
         &app_handle,
@@ -42,6 +48,7 @@ pub async fn translate_html_content_streaming(
         TranslateRequest { content },
         force.unwrap_or(false),
         None,
+        run_id,
     )
     .await
 }
@@ -55,6 +62,7 @@ pub async fn translate_item_bilingual_streaming(
     state: State<'_, AppState>,
     item_id: i64,
     force: Option<bool>,
+    run_id: Option<u64>,
 ) -> Result<String> {
     // Lazily fill content_md first, then ALWAYS prefer it as the translation
     // source: text mode renders exactly this markdown, so the bilingual
@@ -79,6 +87,7 @@ pub async fn translate_item_bilingual_streaming(
         TranslateRequest { content },
         force.unwrap_or(false),
         Some(item.title),
+        run_id,
     )
     .await
 }
@@ -94,6 +103,7 @@ async fn run_translation_task(
     request: TranslateRequest,
     force: bool,
     title: Option<String>,
+    run_id: Option<u64>,
 ) -> Result<String> {
     let title = match title {
         Some(title) => Some(title),
@@ -110,7 +120,7 @@ async fn run_translation_task(
         .await;
     let result = with_ai_task(
         task.clone(),
-        translate_streaming_inner(app_handle, state, item_id, request, force),
+        translate_streaming_inner(app_handle, state, item_id, request, force, run_id),
     )
     .await;
     task.finish().await;
@@ -123,20 +133,35 @@ async fn translate_streaming_inner(
     item_id: i64,
     request: TranslateRequest,
     force: bool,
+    run_id: Option<u64>,
 ) -> Result<String> {
     // 1. Cache lookup — skipped when the user forces a re-translation
-    //    (right-click on the Translate button), which also drops the stale
-    //    stored translation so a failed re-run can't resurrect it.
-    if force {
-        if let Err(e) = state.feed_repo.update_translation(item_id, None, "").await {
-            eprintln!("Failed to clear translation for item {}: {}", item_id, e);
-        }
-    } else if let Some(cached) = lookup_cached_translation(state, item_id).await? {
+    //    (right-click on the Translate button).
+    //
+    //    A forced run no longer deletes the stored translation first: the last
+    //    good result stays available until the replacement actually commits,
+    //    so a failed re-translate doesn't leave the article with nothing.
+    let ai_service = get_or_build_ai_service(state).await?;
+    let source_hash = crate::ai::translation_source_hash(&request.content);
+    let cached = if force {
+        None
+    } else {
+        lookup_cached_translation(
+            &state.feed_repo,
+            item_id,
+            &source_hash,
+            &ai_service.model,
+            TRANSLATION_PROMPT_VERSION,
+        )
+        .await?
+    };
+    if let Some(cached) = cached {
         let _ = app_handle.emit_to(
             "main",
             "translation-progress",
             serde_json::json!({
                 "item_id": item_id,
+                "run_id": run_id,
                 "total": 1,
                 "completed": 1,
                 "html_chunk": cached,
@@ -152,7 +177,6 @@ async fn translate_streaming_inner(
 
     // 3. Extract blocks ONCE. The LlmAiService::translate_block method skips
     // re-extraction, so we don't pay the double-extract cost.
-    let ai_service = get_or_build_ai_service(state).await?;
     let is_html = is_html_content(&cleaned);
     let blocks = crate::ai::service::extract_blocks(&cleaned, ai_service.config_max_chars);
     let total = blocks.len();
@@ -193,6 +217,7 @@ async fn translate_streaming_inner(
                     "translation-progress",
                     serde_json::json!({
                         "item_id": item_id,
+                        "run_id": run_id,
                         "total": total,
                         "completed": completed,
                         "html_chunk": stripped,
@@ -210,6 +235,7 @@ async fn translate_streaming_inner(
                     "translation-error",
                     serde_json::json!({
                         "item_id": item_id,
+                        "run_id": run_id,
                         "error": error_msg,
                         "paragraph_index": completed + 1
                     }),
@@ -233,7 +259,14 @@ async fn translate_streaming_inner(
 
     if let Err(e) = state
         .feed_repo
-        .update_translation(item_id, None, &result_body)
+        .update_translation(
+            item_id,
+            None,
+            &result_body,
+            &source_hash,
+            &ai_service.model,
+            TRANSLATION_PROMPT_VERSION,
+        )
         .await
     {
         eprintln!("Failed to persist translation for item {}: {}", item_id, e);
@@ -242,6 +275,7 @@ async fn translate_streaming_inner(
     // 5. Final progress event
     let payload = serde_json::json!({
         "item_id": item_id,
+        "run_id": run_id,
         "total": total,
         "completed": completed,
         "is_complete": true,
@@ -259,9 +293,18 @@ async fn translate_streaming_inner(
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn lookup_cached_translation(state: &AppState, item_id: i64) -> Result<Option<String>> {
-    let item = state.feed_repo.find_by_id(item_id).await?;
-    let Some(translated) = item.translated_content else {
+/// A cached translation is only reusable when it describes the SAME source
+/// text, was produced by the SAME model, and came from the SAME prompt
+/// version. Anything else is reported as a cache miss and re-translated.
+pub(crate) async fn lookup_cached_translation(
+    repo: &std::sync::Arc<dyn crate::repositories::FeedItemRepository>,
+    item_id: i64,
+    source_hash: &str,
+    model: &str,
+    prompt_version: i64,
+) -> Result<Option<String>> {
+    let item = repo.find_by_id(item_id).await?;
+    let Some(translated) = item.translated_content.clone() else {
         return Ok(None);
     };
     // Legacy rows may hold an empty string instead of NULL — treat both as
@@ -276,7 +319,59 @@ async fn lookup_cached_translation(state: &AppState, item_id: i64) -> Result<Opt
     if (Utc::now() - translated_at).num_days() >= TRANSLATION_CACHE_DAYS {
         return Ok(None);
     }
+
+    // A row with no recorded source hash was written before validity tracking
+    // existed, or by a build that was rolled back after the upgrade. Adopting
+    // the stored source as its provenance (once) is the same decision
+    // migration v10 makes; refusing instead would re-bill the user for a
+    // translation that is almost certainly still correct.
+    let mut recorded_hash = item.translated_source_hash.clone();
+    let mut recorded_model = item.translated_model.clone();
+    let mut recorded_prompt = item.translated_prompt_version;
+    if recorded_hash.is_none() {
+        if let Some(stored) = translation_source_of(&item) {
+            let adopted = crate::ai::translation_source_hash(&stored);
+            repo.adopt_translation_provenance(item_id, &adopted).await?;
+            println!(
+                "[translate] adopted the stored source as provenance for item {}",
+                item_id
+            );
+            recorded_hash = Some(adopted);
+            recorded_model = Some(crate::ai::LEGACY_TRANSLATION_PROVENANCE.to_string());
+            recorded_prompt = Some(0);
+        }
+    }
+
+    // Rows upgraded from a version without validity tracking carry the
+    // `legacy` provenance and prompt version 0. Their *source* was hashed
+    // during the upgrade, so a source mismatch still invalidates them — which
+    // is the bug this machinery exists to fix — but an unknown model or
+    // prompt revision is not by itself a reason to re-bill the user.
+    let matches_source = recorded_hash.as_deref() == Some(source_hash);
+    let matches_model = recorded_model.as_deref() == Some(model)
+        || recorded_model.as_deref() == Some(crate::ai::LEGACY_TRANSLATION_PROVENANCE);
+    let matches_prompt = recorded_prompt == Some(prompt_version) || recorded_prompt == Some(0);
+    if !matches_source || !matches_model || !matches_prompt {
+        println!(
+            "[translate] cached translation for item {} is stale (source {} model {} prompt {}); re-translating",
+            item_id,
+            if matches_source { "same" } else { "changed" },
+            if matches_model { "same" } else { "changed" },
+            if matches_prompt { "same" } else { "changed" },
+        );
+        return Ok(None);
+    }
     Ok(Some(translated))
+}
+
+/// The text a stored translation was produced from, in the same precedence the
+/// translation pipeline uses (`content_md` → `content` → `description`).
+fn translation_source_of(item: &crate::models::FeedItem) -> Option<String> {
+    [item.content_md.as_ref(), item.content.as_ref(), item.description.as_ref()]
+        .into_iter()
+        .flatten()
+        .find(|text| !text.trim().is_empty())
+        .cloned()
 }
 
 fn wrap_bilingual(body: &str, cached: bool) -> String {
@@ -374,8 +469,13 @@ fn strip_markdown_links(s: &str) -> String {
 }
 
 /// Reduce HTML anchors `<a …>text</a>` to just `text` (case-insensitive).
+///
+/// ASCII-only lowercasing is deliberate: `str::to_lowercase` can change the
+/// byte length of the string (e.g. `İ` and `Ⱥ`), so offsets found in the
+/// lowered copy are not valid indices into the original and produced panics
+/// on article text. HTML tag names are ASCII, so ASCII folding is complete.
 fn strip_anchor_tags(s: &str) -> String {
-    let lower = s.to_lowercase();
+    let lower = s.to_ascii_lowercase();
     let bytes = s.as_bytes();
     let len = s.len();
     let mut out = String::with_capacity(len);
@@ -423,9 +523,11 @@ fn strip_anchor_tags(s: &str) -> String {
 async fn get_or_build_ai_service(state: &AppState) -> Result<AiHandle> {
     if let Some(service) = state.ai_service.read().await.clone() {
         let cfg_max = service.config_max_chars();
+        let model = service.config_model();
         return Ok(AiHandle {
             service,
             config_max_chars: cfg_max,
+            model,
         });
     }
 
@@ -434,10 +536,12 @@ async fn get_or_build_ai_service(state: &AppState) -> Result<AiHandle> {
         .max_chars_per_segment
         .unwrap_or(crate::ai::MAX_CHARS_PER_SEGMENT);
     let service: Arc<dyn AiService> = Arc::new(LlmAiService::new(config)?);
+    let model = service.config_model();
     *state.ai_service.write().await = Some(service.clone());
     Ok(AiHandle {
         service,
         config_max_chars: max,
+        model,
     })
 }
 
@@ -446,7 +550,16 @@ async fn get_or_build_ai_service(state: &AppState) -> Result<AiHandle> {
 struct AiHandle {
     service: Arc<dyn AiService>,
     config_max_chars: usize,
+    model: String,
 }
+
+/// Bumped whenever the translation prompts change. Cached translations
+/// record it so a prompt change does not silently reuse old text.
+///
+/// v3: paragraphs are numbered with `###P<n>###` markers that the model must
+/// repeat, which keeps one bilingual pair per paragraph even when a whole
+/// block is translated in a single batch request.
+pub const TRANSLATION_PROMPT_VERSION: i64 = 3;
 
 /// Load AI configuration from `~/.rss-reader/ai_config.json`.
 fn load_ai_config() -> Result<AiConfig> {
@@ -806,6 +919,17 @@ mod tests {
         );
         // Non-anchor tags starting with "a" survive
         assert_eq!(strip_anchor_tags("<abbr>HTML</abbr>"), "<abbr>HTML</abbr>");
+    }
+
+    /// `str::to_lowercase` can change a string's byte length (`İ` → 2 chars,
+    /// `Ⱥ` → 3 bytes), so offsets found in the lowered copy were not valid
+    /// indices into the original and the function panicked on such text.
+    #[test]
+    fn test_strip_anchor_tags_survives_length_changing_case_mapping() {
+        for text in ["İx", "Ⱥx", "Strasse Ⱥ İstanbul"] {
+            assert_eq!(strip_anchor_tags(text), text);
+        }
+        assert_eq!(strip_anchor_tags("<A HREF=\"x\">İ中文</A>Ⱥ"), "İ中文Ⱥ",);
     }
 
     #[test]

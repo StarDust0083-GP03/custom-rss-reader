@@ -23,12 +23,78 @@ const DEFAULT_COLLECTION_NAME: &str = "rss_articles";
 /// even after the server came back. This holder creates the connection on
 /// first use, caches it, and drops it when the server dies so the next
 /// call reconnects.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ChromaHolder {
     inner: Arc<tokio::sync::Mutex<Option<Arc<service::ChromaService>>>>,
+    /// Explicit configuration. `None` means "read the config file", which is
+    /// what production does; tests inject their own so they never connect to a
+    /// developer's running server or download a model.
+    config: Option<Arc<ChromaConfig>>,
+    /// Cached "semantic search is switched on" flag.
+    ///
+    /// Cached rather than read per call for two reasons: the worker asks on
+    /// every queue poll, and — more importantly — a decision that changes the
+    /// shape of the queue should be an explicit state change, not a side effect
+    /// of whatever happens to be in the config file at that instant.
+    enabled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Default for ChromaHolder {
+    fn default() -> Self {
+        Self::with_enabled(ChromaConfig::load().enabled)
+    }
 }
 
 impl ChromaHolder {
+    /// Holder with an explicit switch, for tests and for callers that already
+    /// know the configuration.
+    pub fn with_enabled(enabled: bool) -> Self {
+        Self {
+            inner: Arc::new(tokio::sync::Mutex::new(None)),
+            config: None,
+            enabled: Arc::new(std::sync::atomic::AtomicBool::new(enabled)),
+        }
+    }
+
+    /// Holder pinned to an explicit configuration.
+    ///
+    /// Used by tests so they never read a developer's `chroma_config.json` or
+    /// connect to a running server; production uses [`Self::default`] and
+    /// `refresh_from_config`.
+    #[cfg(test)]
+    pub fn with_config(config: ChromaConfig) -> Self {
+        let enabled = config.enabled;
+        Self {
+            inner: Arc::new(tokio::sync::Mutex::new(None)),
+            config: Some(Arc::new(config)),
+            enabled: Arc::new(std::sync::atomic::AtomicBool::new(enabled)),
+        }
+    }
+
+    /// The configuration to connect with: the injected one, or the file.
+    fn effective_config(&self) -> ChromaConfig {
+        match &self.config {
+            Some(config) => (**config).clone(),
+            None => ChromaConfig::load(),
+        }
+    }
+
+    /// Whether semantic search is configured, without connecting.
+    pub fn is_configured(&self) -> bool {
+        self.enabled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Re-read the config file and adopt its `enabled` flag, dropping any
+    /// cached connection when the feature was switched off.
+    pub async fn refresh_from_config(&self) {
+        let enabled = ChromaConfig::load().enabled;
+        self.enabled
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
+        if !enabled {
+            *self.inner.lock().await = None;
+        }
+    }
+
     /// Return the cached service, or create one on demand when enabled and
     /// reachable. Never fails the caller — returns `None` when disabled or
     /// unreachable (callers decide how to surface that).
@@ -36,10 +102,10 @@ impl ChromaHolder {
         if let Some(svc) = self.inner.lock().await.as_ref() {
             return Some(svc.clone());
         }
-        let config = ChromaConfig::load();
-        if !config.enabled {
+        if !self.is_configured() {
             return None;
         }
+        let config = self.effective_config();
         // Connect OUTSIDE the lock: ChromaService::new performs network I/O
         // (identity lookup + get-or-create), and holding the holder's mutex
         // across it would stall every concurrent health check or search.

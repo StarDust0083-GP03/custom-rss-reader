@@ -19,6 +19,12 @@ import type {
 export type Listener = () => void;
 
 export interface TranslationState {
+  /**
+   * Identity of this translation attempt. Events and terminal results carry
+   * the same id, so a listener can reject progress from a run the user has
+   * already cancelled or replaced. 0 means "no active run" (cache display).
+   */
+  runId: number;
   useTranslation: boolean;
   inProgressContent: string | null;
   abortController: AbortController | null;
@@ -42,6 +48,17 @@ export interface AppState {
   webviewPerSubscription: Map<number, boolean>;
   /** Per-item translation progress, keyed by item id. */
   translationStateByItemId: Map<number, TranslationState>;
+  /** Paging state for the visible list (offset + whether more rows exist). */
+  listPage: ListPageState;
+}
+
+export interface ListPageState {
+  /** How many rows are already held in `currentItems`. */
+  offset: number;
+  /** The last page came back full, so another page may exist. */
+  hasMore: boolean;
+  /** A `loadMoreItems` request is in flight. */
+  loading: boolean;
 }
 
 export const state: AppState = {
@@ -57,6 +74,7 @@ export const state: AppState = {
   chromaEnabled: false,
   webviewPerSubscription: new Map(),
   translationStateByItemId: new Map(),
+  listPage: { offset: 0, hasMore: false, loading: false },
 };
 
 const listeners = new Set<Listener>();

@@ -17,6 +17,8 @@ struct SubscriptionRow {
     pub use_website: bool,
     pub auto_classify: bool,
     pub opml_attributes: Option<String>,
+    pub http_etag: Option<String>,
+    pub http_last_modified: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -32,6 +34,8 @@ impl From<SubscriptionRow> for Subscription {
             use_website: r.use_website,
             auto_classify: r.auto_classify,
             opml_attributes: r.opml_attributes,
+            http_etag: r.http_etag,
+            http_last_modified: r.http_last_modified,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }
@@ -186,6 +190,28 @@ impl SubscriptionRepository for SqliteSubscriptionRepository {
         .ok_or_else(|| AppError::NotFound(format!("Subscription with id {} not found", id)))?;
 
         Ok(row.into())
+    }
+
+    async fn update_http_validators(
+        &self,
+        id: i64,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE subscriptions
+               SET http_etag = $2, http_last_modified = $3, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .bind(etag)
+        .bind(last_modified)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| map_sqlx_error(e, "updating HTTP validators"))?;
+        Ok(())
     }
 }
 

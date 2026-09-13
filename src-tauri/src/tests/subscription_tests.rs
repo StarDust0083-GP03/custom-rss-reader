@@ -537,3 +537,48 @@ async fn test_add_subscription_validates_optional_urls() {
         .expect("blank website_url should become None");
     assert_eq!(sub.website_url, None);
 }
+
+// ---------------------------------------------------------------------------
+// HTTP validators (conditional GET)
+// ---------------------------------------------------------------------------
+
+/// The fetcher only re-parses a feed when the server says it changed, so the
+/// validators have to survive a restart and be clearable when the server stops
+/// sending them.
+#[tokio::test]
+async fn http_validators_round_trip_and_clear() {
+    let env = TestEnv::new().await;
+    let sub = env
+        .service
+        .add_subscription(NewSubscription {
+            url: "https://validators.example.com/feed".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("add subscription");
+
+    assert!(sub.http_etag.is_none());
+    assert!(sub.http_last_modified.is_none());
+
+    env.repo
+        .update_http_validators(sub.id, Some("\"abc123\""), Some("Wed, 21 Oct 2026 07:28:00 GMT"))
+        .await
+        .expect("store validators");
+
+    let stored = env.repo.find_by_id(sub.id).await.expect("reload");
+    assert_eq!(stored.http_etag.as_deref(), Some("\"abc123\""));
+    assert_eq!(
+        stored.http_last_modified.as_deref(),
+        Some("Wed, 21 Oct 2026 07:28:00 GMT")
+    );
+
+    // Clearing must persist too: a stale If-None-Match would make every later
+    // fetch answer 304 and the feed would look frozen.
+    env.repo
+        .update_http_validators(sub.id, None, None)
+        .await
+        .expect("clear validators");
+    let cleared = env.repo.find_by_id(sub.id).await.expect("reload");
+    assert!(cleared.http_etag.is_none());
+    assert!(cleared.http_last_modified.is_none());
+}

@@ -31,11 +31,11 @@ describe("frontend security and IPC contracts", () => {
       return { id: 9 };
     });
 
-    await items.saveTags(9, ["rust", "rss"], null);
+    await items.saveTags(9, ["rust", "rss"]);
 
     expect(request).toEqual({
       command: "save_item_tags",
-      args: { itemId: 9, tags: ["rust", "rss"], category: null },
+      args: { itemId: 9, tags: ["rust", "rss"] },
     });
   });
 
@@ -79,11 +79,16 @@ describe("frontend security and IPC contracts", () => {
       return { enabled: true, similarity_threshold: 0.9 };
     });
 
-    const saved = await tags.setMatchConfig(true, 0.9);
+    const saved = await tags.setMatchConfig(true, 0.9, "community", 3);
 
     expect(request).toEqual({
       command: "set_tag_match_config",
-      args: { enabled: true, similarityThreshold: 0.9 },
+      args: {
+        enabled: true,
+        similarityThreshold: 0.9,
+        groupingMethod: "community",
+        communityMinWeight: 3,
+      },
     });
     expect(saved).toEqual({ enabled: true, similarity_threshold: 0.9 });
   });

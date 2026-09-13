@@ -14,6 +14,12 @@ import { success as toastSuccess, error as toastError, info as toastInfo } from 
 
 const S = state;
 
+// Identity of the newest translation run. A cancelled run's backend request
+// keeps streaming events after the frontend has moved on; the run id is the
+// only thing that distinguishes "this run's progress" from "the run the user
+// just abandoned", because the payload also identifies the item.
+let translationRunSeq = 0;
+
 // 翻译
 export async function translateItem(
   item: FeedItem,
@@ -42,6 +48,7 @@ export async function translateItem(
   } else if (item.translated_content?.trim()) {
     // 直接使用已有的翻译
     translationState = {
+      runId: 0,
       useTranslation: true,
       inProgressContent: null,
       abortController: null,
@@ -62,7 +69,9 @@ export async function translateItem(
 
   // 创建新的 AbortController 和翻译状态
   const abortController = new AbortController();
+  const runId = ++translationRunSeq;
   translationState = {
+    runId,
     useTranslation: false, // Don't show translation until complete
     inProgressContent: null,
     abortController,
@@ -85,10 +94,11 @@ export async function translateItem(
 
     try {
       // Listen for translation error events
-      unlistenError = await listen<{ item_id: number; error: string; paragraph_index: number }>(
+      unlistenError = await listen<{ item_id: number; run_id?: number; error: string; paragraph_index: number }>(
         "translation-error",
         (event) => {
           if (event.payload.item_id !== item.id) return;
+          if (event.payload.run_id !== runState.runId) return;
           const currentState = S.translationStateByItemId.get(item.id);
           if (currentState !== runState) return;
           currentState.hasError = true;
@@ -100,13 +110,20 @@ export async function translateItem(
       );
 
       // Listen for translation progress events
-      unlistenProgress = await listen<{ item_id: number; total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean; has_error?: boolean; error_messages?: string[]; partial_content?: string }>(
+      unlistenProgress = await listen<{ item_id: number; run_id?: number; total: number; completed: number; html_chunk: string; is_complete: boolean; cached?: boolean; has_error?: boolean; error_messages?: string[]; partial_content?: string }>(
         "translation-progress",
         (event) => {
-          const { item_id, completed, total, html_chunk, is_complete, cached, has_error, error_messages } = event.payload;
+          const { item_id, run_id, completed, total, html_chunk, is_complete, cached, has_error, error_messages } = event.payload;
 
           // 确保事件属于正确的文章
           if (item_id !== item.id) {
+            return;
+          }
+
+          // ...and to THIS run. Without the run check, a restarted translation
+          // accepts the previous run's chunks and completion (the payload used
+          // to identify only the item).
+          if (run_id !== runState.runId) {
             return;
           }
 
@@ -226,19 +243,23 @@ export async function translateItem(
 
       // 如果提供了 htmlContent（从 webview iframe 获取），使用新的翻译命令
       // 否则使用原来的翻译命令（翻译 RSS 内容）
+      let result: string;
       if (htmlContent) {
-        await invoke<string>("translate_html_content_streaming", {
+        result = await invoke<string>("translate_html_content_streaming", {
           itemId: item.id,
           content: htmlContent,
           force,
+          runId,
         });
       } else {
         // 使用流式双语对照翻译
-        await invoke<string>("translate_item_bilingual_streaming", {
+        result = await invoke<string>("translate_item_bilingual_streaming", {
           itemId: item.id,
           force,
+          runId,
         });
       }
+      reconcileCompletedRun(item, runState, result);
     } finally {
       // Always clean up listeners
       if (unlistenProgress) unlistenProgress();
@@ -279,6 +300,31 @@ export async function translateItem(
   }
 }
 
+/**
+ * Accept a command result as terminal truth.
+ *
+ * Progress events are a delivery mechanism, not a guarantee: if the final
+ * event is dropped, the run used to stay "translating" forever even though
+ * the command had already returned the finished document. The returned value
+ * is the authoritative snapshot, so reconcile it before cleanup.
+ */
+function reconcileCompletedRun(item: FeedItem, runState: TranslationState, result: string) {
+  const currentState = S.translationStateByItemId.get(item.id);
+  if (currentState !== runState) return;
+  if (runState.hasError) return;
+  if (runState.abortController?.signal.aborted) return; // cancelTranslation owns cleanup
+
+  runState.abortController = null;
+  runState.inProgressContent = null;
+  if (result?.trim()) {
+    if (!item.translated_content?.trim()) item.translated_content = result;
+    runState.hasError = false;
+    runState.useTranslation = true;
+  }
+  renderItems(true);
+  if (S.selectedItem?.id === item.id) renderItemDetail(item);
+}
+
 /** Cancel the visible translation run without allowing its late events to
  * update a newer run for the same item. The backend request may still finish
  * in the background because Tauri invoke has no transport cancellation here.
@@ -302,6 +348,7 @@ export function toggleCachedTranslation(item: FeedItem): boolean {
   const translationState = S.translationStateByItemId.get(item.id);
   if (!translationState) {
     S.translationStateByItemId.set(item.id, {
+      runId: 0,
       useTranslation: true,
       inProgressContent: null,
       abortController: null,
@@ -376,12 +423,11 @@ export async function classifyItem(item: FeedItem) {
 
     // Save through the typed API boundary. The adapter serializes the
     // structured tags to the Rust command's JSON contract.
-    const saved = await itemsApi.saveTags(item.id, result.tags, result.category);
+    const saved = await itemsApi.saveTags(item.id, result.tags);
 
     // The backend normalizes, resolves aliases, removes blocked names, and
     // caps article tags. Use its returned row as the local source of truth.
     item.tags = saved.tags;
-    item.category = saved.category;
 
     // Re-render detail and list items to show updated tags
     renderItemDetail(item);

@@ -23,6 +23,11 @@ devtools = ["tauri/devtools"]
 [build-dependencies]
 tauri-build = { version = "2.6.1", features = [] }
 
+[dev-dependencies]
+# Enables tauri::test (mock runtime) for the IPC contract tests. Cargo
+# features are additive, so this only affects test builds.
+tauri = { version = "2.11.1", features = ["test"] }
+
 [dependencies]
 tauri = { version = "2.11.1", features = [] }
 tauri-plugin-opener = "2.5.4"
@@ -34,6 +39,9 @@ sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono"] }
 feed-rs = "2.1"
 quick-xml = { version = "0.36", features = ["serialize"] }
 reqwest = { version = "0.12", features = ["json", "gzip", "brotli"] }
+# Already compiled as part of reqwest; used directly to honour the charset a
+# page declares (GB18030 pages are common in this reader's feed list).
+encoding_rs = "0.8"
 scraper = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1.0"

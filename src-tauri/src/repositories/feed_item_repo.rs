@@ -7,11 +7,14 @@ use super::FeedItemRepository;
 use super::IndexRow;
 use crate::error::{AppError, Result};
 use crate::models::{
-    tag::{normalize_tag, MAX_TAGS_PER_ITEM},
-    FeedItem, FeedItemSummary, NewFeedItem,
+    tag::{decode_embedding, encode_embedding, normalize_tag, MAX_TAGS_PER_ITEM},
+    FeedItem, FeedItemSummary, NewFeedItem, NewJob,
 };
 
 use super::TagCatalogEntry;
+use super::TagOverviewCoverage;
+use super::TopicAssignment;
+use super::TopicCategory;
 
 /// Character cap applied to `description`/`content` in the [`IndexRow`]
 /// projection queries. Generously above what the embedding-document builder
@@ -25,7 +28,7 @@ const INDEX_TEXT_CHARS_SQL: i64 = 2000;
 /// `subscriptions s` to carry the source title/url (issue #3).
 const SUMMARY_COLS: &str = "f.id, f.subscription_id, f.title, f.link, f.description, f.author, \
     f.published_at, f.fetched_at, f.is_website_content, f.is_read, f.is_favorite, f.is_read_later, \
-    f.is_ignored, f.tags, f.category, f.translated_title, \
+    f.is_ignored, f.tags, f.translated_title, \
     (f.translated_content IS NOT NULL AND f.translated_content != '') AS has_translation, \
     s.title AS source_title, s.url AS source_url";
 
@@ -52,10 +55,12 @@ struct FeedItemRow {
     pub is_read_later: bool,
     pub is_ignored: bool,
     pub tags: Option<String>,
-    pub category: Option<String>,
     pub translated_title: Option<String>,
     pub translated_content: Option<String>,
     pub translated_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub translated_source_hash: Option<String>,
+    pub translated_model: Option<String>,
+    pub translated_prompt_version: Option<i64>,
 }
 
 /// Row type for summary queries (projection of `feed_items`).
@@ -75,7 +80,6 @@ struct FeedItemSummaryRow {
     pub is_read_later: bool,
     pub is_ignored: bool,
     pub tags: Option<String>,
-    pub category: Option<String>,
     pub translated_title: Option<String>,
     pub has_translation: bool,
     pub source_title: Option<String>,
@@ -102,10 +106,12 @@ impl From<FeedItemRow> for FeedItem {
             is_read_later: r.is_read_later,
             is_ignored: r.is_ignored,
             tags: r.tags,
-            category: r.category,
             translated_title: r.translated_title,
             translated_content: r.translated_content,
             translated_at: r.translated_at,
+            translated_source_hash: r.translated_source_hash,
+            translated_model: r.translated_model,
+            translated_prompt_version: r.translated_prompt_version,
         }
     }
 }
@@ -118,7 +124,6 @@ struct IndexRowImpl {
     pub link: Option<String>,
     pub author: Option<String>,
     pub published_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub category: Option<String>,
     pub description: Option<String>,
     pub content: Option<String>,
 }
@@ -131,7 +136,6 @@ impl From<IndexRowImpl> for IndexRow {
             link: r.link,
             author: r.author,
             published_at: r.published_at,
-            category: r.category,
             description: r.description,
             content: r.content,
         }
@@ -155,7 +159,6 @@ impl From<FeedItemSummaryRow> for FeedItemSummary {
             is_read_later: r.is_read_later,
             is_ignored: r.is_ignored,
             tags: r.tags,
-            category: r.category,
             translated_title: r.translated_title,
             has_translation: r.has_translation,
             source_title: r.source_title,
@@ -209,58 +212,53 @@ fn resolve_tag(mut tag: String, aliases: &HashMap<String, String>) -> String {
     tag
 }
 
-/// Rewrite all JSON tag arrays in one transaction. This is intentionally a
-/// simple table scan because tag merges and deletes are rare administrative
-/// operations, not an article-ingest hot path.
+/// SQLite implementation of the feed-item and tag vocabulary repository.
+pub struct SqliteFeedItemRepository {
+    pub(crate) pool: SqlitePool,
+}
+
+
+/// Rewrite the derived display cache after a vocabulary rename/merge/delete.
+/// Raw names are kept as the source of truth; replacements are applied to the
+/// raw record for an explicit rename/merge, while blocked names are omitted
+/// only from the display cache.
 async fn rewrite_feed_item_tags(
     conn: &mut sqlx::SqliteConnection,
     replacements: &HashMap<String, String>,
     removed: &HashSet<String>,
 ) -> Result<()> {
+    let (aliases, blocked) = load_tag_maps(conn).await?;
     let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
-        "SELECT id, tags FROM feed_items WHERE tags IS NOT NULL AND json_valid(tags)",
+        "SELECT id, raw_tags FROM feed_items WHERE raw_tags IS NOT NULL AND json_valid(raw_tags)",
     )
     .fetch_all(&mut *conn)
     .await?;
-
-    for (item_id, raw_tags) in rows {
-        let Some(raw_tags) = raw_tags else { continue };
-        let Ok(tags) = serde_json::from_str::<Vec<String>>(&raw_tags) else {
-            continue;
-        };
-        let mut normalized = Vec::new();
-        for raw in tags {
-            let Some(tag) = normalize_tag(&raw) else {
-                continue;
-            };
-            if removed.contains(&tag) {
-                continue;
-            }
-            let tag = resolve_tag(tag, replacements);
-            if !normalized.contains(&tag) {
-                normalized.push(tag);
-            }
-            if normalized.len() == MAX_TAGS_PER_ITEM {
-                break;
+    for (id, raw) in rows {
+        let Some(raw) = raw else { continue };
+        let Ok(names) = serde_json::from_str::<Vec<String>>(&raw) else { continue };
+        let mut raw_out = Vec::new();
+        let mut display = Vec::new();
+        for item in names {
+            let Some(normalized) = normalize_tag(&item) else { continue };
+            // Raw tags are the classifier's answer and must never be rewritten
+            // by an administrative synonym/delete operation.
+            if !raw_out.contains(&normalized) { raw_out.push(normalized.clone()); }
+            if removed.contains(&normalized) { continue; }
+            let rewritten = replacements.get(&normalized).cloned().unwrap_or(normalized);
+            let shown = resolve_tag(rewritten, &aliases);
+            if !blocked.contains(&shown) && !display.contains(&shown) {
+                display.push(shown);
+                if display.len() == MAX_TAGS_PER_ITEM { break; }
             }
         }
-        let normalized_json = serde_json::to_string(&normalized)
-            .map_err(|e| AppError::Internal(format!("Failed to serialize tags: {}", e)))?;
-        if normalized_json != raw_tags {
-            sqlx::query("UPDATE feed_items SET tags = $2 WHERE id = $1")
-                .bind(item_id)
-                .bind(normalized_json)
-                .execute(&mut *conn)
-                .await?;
-        }
+        sqlx::query("UPDATE feed_items SET raw_tags = $2, tags = $3 WHERE id = $1")
+            .bind(id)
+            .bind(serde_json::to_string(&raw_out).map_err(|e| AppError::Internal(e.to_string()))?)
+            .bind(serde_json::to_string(&display).map_err(|e| AppError::Internal(e.to_string()))?)
+            .execute(&mut *conn)
+            .await?;
     }
     Ok(())
-}
-
-/// Production implementation backed by a real SQLite pool.
-#[derive(Clone)]
-pub struct SqliteFeedItemRepository {
-    pool: SqlitePool,
 }
 
 impl SqliteFeedItemRepository {
@@ -295,19 +293,30 @@ impl SqliteFeedItemRepository {
 #[async_trait]
 impl FeedItemRepository for SqliteFeedItemRepository {
     async fn create(&self, input: NewFeedItem) -> Result<FeedItem> {
+        self.create_with_jobs(input, Vec::new()).await
+    }
+
+    async fn create_with_jobs(&self, input: NewFeedItem, jobs: Vec<NewJob>) -> Result<FeedItem> {
         // ON CONFLICT DO NOTHING relies on the (subscription_id, guid) unique
         // index as a last-resort dedup guard; in-memory dedup during fetch is
         // the primary mechanism. A conflicting insert returns no row, which we
         // surface as a Duplicate error that callers treat as "already exists".
+        //
+        // The article and its enrichment jobs share one transaction: either
+        // both are durable, or neither is. A job can therefore never reference
+        // an article that was rolled back, and an article can never be
+        // committed with its enrichment silently forgotten.
+        let mut tx = self.pool.begin().await.map_err(AppError::Database)?;
+
         let row = sqlx::query_as::<_, FeedItemRow>(
             r#"
             INSERT INTO feed_items (
                 subscription_id, guid, title, link, content, content_md,
                 description, author, published_at,
                 is_website_content, is_read, is_favorite, is_read_later, is_ignored,
-                tags, category,
+                tags,
                 translated_title, translated_content, translated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             ON CONFLICT DO NOTHING
             RETURNING *
             "#,
@@ -327,11 +336,10 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         .bind(input.is_read_later)
         .bind(input.is_ignored)
         .bind(&input.tags)
-        .bind(&input.category)
         .bind(&input.translated_title)
         .bind(&input.translated_content)
         .bind(input.translated_at)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| map_feed_item_sqlx_error(e, "creating feed item"))?
         .ok_or_else(|| {
@@ -341,6 +349,33 @@ impl FeedItemRepository for SqliteFeedItemRepository {
             ))
         })?;
 
+        if !jobs.is_empty() {
+            let item_id = row.id;
+            for job in &jobs {
+                sqlx::query(
+                    r#"
+                    INSERT INTO jobs (kind, item_id, payload, state, priority, max_attempts)
+                    VALUES ($1, $2, $3, 'queued', $4, $5)
+                    "#,
+                )
+                .bind(job.kind.as_str())
+                // `None` (or a stale 0 placeholder) means the article row this
+                // job was committed with.
+                .bind(
+                    job.item_id
+                        .filter(|id| *id > 0)
+                        .unwrap_or(item_id),
+                )
+                .bind(&job.payload)
+                .bind(job.kind.priority())
+                .bind(job.kind.max_attempts())
+                .execute(&mut *tx)
+                .await
+                .map_err(AppError::Database)?;
+            }
+        }
+
+        tx.commit().await.map_err(AppError::Database)?;
         Ok(row.into())
     }
 
@@ -387,7 +422,7 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         // IndexRow docs.
         let rows = sqlx::query_as::<_, IndexRowImpl>(
             r#"
-            SELECT id, title, link, author, published_at, category,
+            SELECT id, title, link, author, published_at,
                    substr(description, 1, $2) AS description,
                    substr(COALESCE(NULLIF(content_md, ''), content), 1, $2) AS content
             FROM feed_items
@@ -410,7 +445,7 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         }
         let mut qb = sqlx::QueryBuilder::new(
             r#"
-            SELECT id, title, link, author, published_at, category,
+            SELECT id, title, link, author, published_at,
                    substr(description, 1, "#,
         );
         qb.push_bind(INDEX_TEXT_CHARS_SQL)
@@ -516,15 +551,21 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         item_id: i64,
         translated_title: Option<&str>,
         translated_content: &str,
+        source_hash: &str,
+        model: &str,
+        prompt_version: i64,
     ) -> Result<FeedItem> {
         let row = sqlx::query_as::<_, FeedItemRow>(
             r#"
             UPDATE feed_items
-            -- An empty string clears the translation (force re-translate path):
-            -- NULLIF keeps the column NULL so the cache lookup sees "no
-            -- translation" instead of a stale empty value.
+            -- An empty string clears the translation: NULLIF keeps the column
+            -- NULL so the cache lookup sees "no translation" instead of a
+            -- stale empty value.
             SET translated_content = NULLIF($2, ''),
                 translated_title = COALESCE($3, translated_title),
+                translated_source_hash = CASE WHEN $2 = '' THEN NULL ELSE $4 END,
+                translated_model = CASE WHEN $2 = '' THEN NULL ELSE $5 END,
+                translated_prompt_version = CASE WHEN $2 = '' THEN NULL ELSE $6 END,
                 translated_at = CURRENT_TIMESTAMP
             WHERE id = $1
             RETURNING *
@@ -533,11 +574,33 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         .bind(item_id)
         .bind(translated_content)
         .bind(translated_title)
+        .bind(source_hash)
+        .bind(model)
+        .bind(prompt_version)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("FeedItem with id {} not found", item_id)))?;
 
         Ok(row.into())
+    }
+
+    async fn adopt_translation_provenance(&self, item_id: i64, source_hash: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE feed_items
+               SET translated_source_hash = $2,
+                   translated_model = COALESCE(translated_model, $3),
+                   translated_prompt_version = COALESCE(translated_prompt_version, 0)
+             WHERE id = $1
+            "#,
+        )
+        .bind(item_id)
+        .bind(source_hash)
+        .bind(crate::ai::LEGACY_TRANSLATION_PROVENANCE)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| map_feed_item_sqlx_error(e, "adopting translation provenance"))?;
+        Ok(())
     }
 
     async fn find_all(
@@ -604,10 +667,13 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<FeedItemSummary>> {
-        // Exact element match inside the tags JSON array
+        // Exact element match inside the tags JSON array. `json_valid` is
+        // required, not defensive: `json_each` raises on a malformed value,
+        // so one legacy row would abort the tag filter for the whole library.
         let base = format!(
             r#"SELECT {} FROM {}
-               WHERE EXISTS (SELECT 1 FROM json_each(f.tags) WHERE value = $1)"#,
+               WHERE json_valid(f.tags)
+                 AND EXISTS (SELECT 1 FROM json_each(f.tags) WHERE value = $1)"#,
             SUMMARY_COLS, SUMMARY_FROM
         );
         let rows = if let Some(sub_id) = subscription_id {
@@ -637,44 +703,43 @@ impl FeedItemRepository for SqliteFeedItemRepository {
     }
 
     async fn find_all_tags(&self, subscription_id: Option<i64>) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = if let Some(sub_id) = subscription_id {
-            sqlx::query_as(
-                r#"SELECT DISTINCT t.name
-                   FROM tag_catalog t
-                   JOIN feed_items f
-                     ON json_valid(f.tags)
-                    AND f.subscription_id = $1
-                    AND EXISTS (SELECT 1 FROM json_each(f.tags) j WHERE j.value = t.name)
-                   ORDER BY t.name"#,
-            )
-            .bind(sub_id)
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            sqlx::query_as(
-                r#"SELECT DISTINCT t.name
-                   FROM tag_catalog t
-                   JOIN feed_items f
-                     ON json_valid(f.tags)
-                    AND EXISTS (SELECT 1 FROM json_each(f.tags) j WHERE j.value = t.name)
-                   ORDER BY t.name"#,
-            )
-            .fetch_all(&self.pool)
-            .await?
-        };
+        let rows: Vec<(String,)> = sqlx::query_as(
+            r#"WITH src AS (
+                   SELECT tags AS names
+                     FROM feed_items
+                    WHERE json_valid(tags)
+                      AND ($1 IS NULL OR subscription_id = $1)
+               ), used AS (
+                   SELECT DISTINCT j.value AS name
+                     FROM src, json_each(src.names) j
+               )
+               SELECT t.name
+                 FROM tag_catalog t
+                 JOIN used u ON u.name = t.name
+                ORDER BY t.name"#,
+        )
+        .bind(subscription_id)
+        .fetch_all(&self.pool)
+        .await?;
 
         Ok(rows.into_iter().map(|(tag,)| tag).collect())
     }
 
     async fn find_tag_catalog(&self) -> Result<Vec<TagCatalogEntry>> {
         let rows: Vec<(String, i64)> = sqlx::query_as(
-            r#"SELECT t.name, COUNT(DISTINCT f.id) AS usage_count
-               FROM tag_catalog t
-               LEFT JOIN feed_items f
-                 ON json_valid(f.tags)
-                AND EXISTS (SELECT 1 FROM json_each(f.tags) j WHERE j.value = t.name)
-               GROUP BY t.name
-               ORDER BY t.name"#,
+            r#"WITH src AS (
+                   SELECT id, tags AS names
+                     FROM feed_items
+                    WHERE json_valid(tags)
+               ), usage AS (
+                   SELECT j.value AS name, COUNT(DISTINCT src.id) AS usage_count
+                     FROM src, json_each(src.names) j
+                    GROUP BY j.value
+               )
+               SELECT t.name, COALESCE(u.usage_count, 0) AS usage_count
+                 FROM tag_catalog t
+                 LEFT JOIN usage u ON u.name = t.name
+                ORDER BY t.name"#,
         )
         .fetch_all(&self.pool)
         .await?;
@@ -698,11 +763,251 @@ impl FeedItemRepository for SqliteFeedItemRepository {
             .collect())
     }
 
-    async fn find_active_tag_names(&self) -> Result<Vec<String>> {
+    async fn find_vocabulary_names(&self) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as("SELECT name FROM tag_catalog ORDER BY name")
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.into_iter().map(|(name,)| name).collect())
+    }
+
+    async fn find_tags_missing_explanation(&self, limit: i64) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            r#"SELECT t.name
+               FROM tag_catalog t
+               LEFT JOIN tag_dictionary d ON d.name = t.name
+               WHERE d.name IS NULL
+               ORDER BY t.name
+               LIMIT $1"#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(name,)| name).collect())
+    }
+
+    async fn tag_dictionary_status(&self) -> Result<(i64, i64, i64)> {
+        let row: (i64, i64, i64) = sqlx::query_as(
+            r#"SELECT
+                 (SELECT COUNT(*) FROM tag_catalog),
+                 (SELECT COUNT(*) FROM tag_catalog t
+                    JOIN tag_dictionary d ON d.name = t.name AND d.explanation <> ''),
+                 (SELECT COUNT(*) FROM tag_catalog t
+                    JOIN tag_dictionary d ON d.name = t.name AND d.embedding IS NOT NULL)"#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    async fn save_tag_explanations(
+        &self,
+        entries: &[(String, String)],
+        prompt_version: i64,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for (name, explanation) in entries {
+            // A new definition invalidates any vector computed from the old one.
+            sqlx::query(
+                r#"INSERT INTO tag_dictionary (name, explanation, prompt_version)
+                   VALUES ($1, $2, $3)
+                   ON CONFLICT(name) DO UPDATE SET
+                     explanation = excluded.explanation,
+                     prompt_version = excluded.prompt_version,
+                     embedding = NULL,
+                     embedding_key = NULL,
+                     updated_at = CURRENT_TIMESTAMP"#,
+            )
+            .bind(name)
+            .bind(explanation)
+            .bind(prompt_version)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn find_tag_explanations(&self) -> Result<Vec<(String, String)>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT name, explanation FROM tag_dictionary WHERE explanation <> '' ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn save_tag_embeddings(
+        &self,
+        key: &str,
+        entries: &[(String, Vec<f32>)],
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for (name, vector) in entries {
+            sqlx::query(
+                "UPDATE tag_dictionary SET embedding = $2, embedding_key = $3, updated_at = CURRENT_TIMESTAMP WHERE name = $1",
+            )
+            .bind(name)
+            .bind(encode_embedding(vector))
+            .bind(key)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn find_tag_embeddings(&self, key: &str) -> Result<HashMap<String, Vec<f32>>> {
+        let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+            "SELECT name, embedding FROM tag_dictionary WHERE embedding_key = $1 AND embedding IS NOT NULL",
+        )
+        .bind(key)
+        .fetch_all(&self.pool)
+        .await?;
+        // A row whose BLOB is truncated is skipped rather than guessed at.
+        Ok(rows
+            .into_iter()
+            .filter_map(|(name, bytes)| decode_embedding(&bytes).map(|vector| (name, vector)))
+            .collect())
+    }
+
+    async fn find_topic_categories(&self) -> Result<Vec<TopicCategory>> {
+        let rows: Vec<(i64, String, String, i64)> = sqlx::query_as(
+            "SELECT id, label, definition, sort_order FROM topic_categories ORDER BY sort_order, id",
+        ).fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(|(id,label,definition,sort_order)| TopicCategory { id,label,definition,sort_order }).collect())
+    }
+
+    async fn save_topic_suggestions(&self, entries: &[(String, String, String)]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for (name, json, key) in entries {
+            sqlx::query(r#"INSERT INTO tag_dictionary (name, explanation, suggestion_json, suggestion_key)
+                VALUES ($1, '', $2, $3)
+                ON CONFLICT(name) DO UPDATE SET suggestion_json=excluded.suggestion_json,
+                    suggestion_key=excluded.suggestion_key, updated_at=CURRENT_TIMESTAMP"#)
+                .bind(name).bind(json).bind(key).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn find_topic_suggestions(&self, names: &[String]) -> Result<HashMap<String, (String, String)>> {
+        if names.is_empty() { return Ok(HashMap::new()); }
+        let json = serde_json::to_string(names).map_err(|e| AppError::Internal(e.to_string()))?;
+        let rows: Vec<(String,String,String)> = sqlx::query_as(
+            "SELECT name, suggestion_json, suggestion_key FROM tag_dictionary
+             WHERE suggestion_json IS NOT NULL AND suggestion_key IS NOT NULL
+               AND name IN (SELECT value FROM json_each($1))")
+            .bind(json).fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(|(n,j,k)|(n,(j,k))).collect())
+    }
+
+    async fn find_topic_assignments(&self) -> Result<Vec<TopicAssignment>> {
+        let rows: Vec<(String, Option<i64>, String, String)> = sqlx::query_as(
+            "SELECT tag_name, category_id, state, source FROM tag_topic_assignments ORDER BY tag_name",
+        ).fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(|(tag_name,category_id,state,source)| TopicAssignment { tag_name,category_id,state,source }).collect())
+    }
+
+    async fn replace_topic_state(&self, categories: &[TopicCategory], assignments: &[TopicAssignment]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for category in categories {
+            sqlx::query(r#"INSERT INTO topic_categories (id,label,definition,sort_order) VALUES ($1,$2,$3,$4)
+                ON CONFLICT(id) DO UPDATE SET label=excluded.label, definition=excluded.definition,
+                sort_order=excluded.sort_order, updated_at=CURRENT_TIMESTAMP"#)
+                .bind(category.id).bind(&category.label).bind(&category.definition).bind(category.sort_order)
+                .execute(&mut *tx).await?;
+        }
+        sqlx::query("DELETE FROM tag_topic_assignments").execute(&mut *tx).await?;
+        for assignment in assignments {
+            sqlx::query("INSERT INTO tag_topic_assignments (tag_name,category_id,state,source) VALUES ($1,$2,$3,$4)")
+                .bind(&assignment.tag_name).bind(assignment.category_id).bind(&assignment.state).bind(&assignment.source)
+                .execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn find_raw_tag_usage(&self, subscription_id: Option<i64>) -> Result<HashMap<String, i64>> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            r#"WITH src AS (
+                   SELECT id, CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END AS names
+                     FROM feed_items
+                    WHERE ($1 IS NULL OR subscription_id = $1)
+               )
+               SELECT j.value, COUNT(DISTINCT src.id)
+                 FROM src, json_each(src.names) j
+                WHERE json_valid(src.names)
+                GROUP BY j.value"#,
+        )
+        .bind(subscription_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    async fn find_raw_tag_cooccurrence(
+        &self,
+        subscription_id: Option<i64>,
+    ) -> Result<Vec<(String, String, i64)>> {
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            r#"WITH src AS (
+                   SELECT id, CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END AS names
+                     FROM feed_items
+                    WHERE ($1 IS NULL OR subscription_id = $1)
+               )
+               SELECT a.value, b.value, COUNT(DISTINCT src.id)
+                 FROM src, json_each(src.names) a, json_each(src.names) b
+                WHERE json_valid(src.names) AND a.value < b.value
+                GROUP BY a.value, b.value"#,
+        )
+        .bind(subscription_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn find_raw_tag_items(&self, subscription_id: Option<i64>) -> Result<Vec<(i64, String)>> {
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            r#"WITH src AS (
+                   SELECT id, CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END AS names
+                     FROM feed_items
+                    WHERE ($1 IS NULL OR subscription_id = $1)
+                      AND json_valid(CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END)
+               )
+               SELECT src.id, j.value
+                 FROM src, json_each(src.names) j"#,
+        )
+        .bind(subscription_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn tag_overview_coverage(
+        &self,
+        subscription_id: Option<i64>,
+    ) -> Result<TagOverviewCoverage> {
+        // `json_valid` is NULL for a NULL column, so the two sums below count
+        // only rows that really hold a JSON array.
+        let row: (i64, i64, i64) = sqlx::query_as(
+            r#"SELECT COUNT(*),
+                      SUM(CASE WHEN json_valid(CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END)
+                                AND json_array_length(CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END) > 0
+                               THEN 1 ELSE 0 END),
+                      SUM(CASE WHEN CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END IS NOT NULL
+                                AND NOT json_valid(CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END)
+                               THEN 1 ELSE 0 END)
+                 FROM feed_items
+                WHERE ($1 IS NULL OR subscription_id = $1)"#,
+        )
+        .bind(subscription_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(TagOverviewCoverage {
+            total_items: row.0,
+            tagged_items: row.1,
+            unreadable_items: row.2,
+        })
     }
 
     async fn find_blocked_tags(&self) -> Result<Vec<String>> {
@@ -947,6 +1252,8 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         }
 
         let mut tx = self.pool.begin().await?;
+        // The target of a synonym has to be a known name, or the alias would
+        // point at nothing.
         let head_exists: Option<String> =
             sqlx::query_scalar("SELECT name FROM tag_catalog WHERE name = $1")
                 .bind(&canonical_name)
@@ -1121,11 +1428,20 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 
-    async fn save_tags(&self, item_id: i64, tags: &str, category: &str) -> Result<FeedItem> {
+    /// Persist the classifier's (or the user's) names for one article.
+    ///
+    /// `tags` is the ORIGINAL list, before synonym resolution. `raw_tags` keeps
+    /// all of it — that is the point of the raw column: renaming a tag, folding
+    /// in a synonym or filing the words under topics later must not need the
+    /// model's answer again. The displayed `tags` column holds at most
+    /// [`MAX_TAGS_PER_ITEM`] resolved names, so a fourth proposal is recorded
+    /// but not shown.
+    async fn save_tags(&self, item_id: i64, tags: &str) -> Result<FeedItem> {
         let proposed: Vec<String> = serde_json::from_str(tags)
             .map_err(|e| AppError::Validation(format!("Invalid tags JSON: {}", e)))?;
         let mut tx = self.pool.begin().await?;
         let (aliases, blocked) = load_tag_maps(&mut tx).await?;
+        let mut raw_names: Vec<String> = Vec::new();
         let mut normalized = Vec::new();
 
         for raw in proposed {
@@ -1135,35 +1451,47 @@ impl FeedItemRepository for SqliteFeedItemRepository {
             if blocked.contains(&tag) {
                 continue;
             }
+            if !raw_names.contains(&tag) {
+                raw_names.push(tag.clone());
+            }
+            // The display cap must not truncate the raw record, so exceeding
+            // it skips the display path instead of leaving the loop.
+            if normalized.len() == MAX_TAGS_PER_ITEM {
+                continue;
+            }
             let tag = resolve_tag(tag, &aliases);
             if blocked.contains(&tag) {
                 continue;
             }
-            if !normalized.contains(&tag) {
-                sqlx::query("INSERT OR IGNORE INTO tag_catalog (name) VALUES ($1)")
-                    .bind(&tag)
-                    .execute(&mut *tx)
-                    .await?;
-                normalized.push(tag);
+            if normalized.contains(&tag) {
+                continue;
             }
-            if normalized.len() == MAX_TAGS_PER_ITEM {
-                break;
-            }
+            // Every name that reaches the article view joins the vocabulary,
+            // so the classifier is offered it next time instead of inventing a
+            // near-duplicate. Names past the display cap stay in `raw_tags`
+            // only, which is why they are not added here.
+            sqlx::query("INSERT OR IGNORE INTO tag_catalog (name) VALUES ($1)")
+                .bind(&tag)
+                .execute(&mut *tx)
+                .await?;
+            normalized.push(tag);
         }
 
         let normalized_json = serde_json::to_string(&normalized)
             .map_err(|e| AppError::Internal(format!("Failed to serialize tags: {}", e)))?;
+        let raw_json = serde_json::to_string(&raw_names)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize raw tags: {}", e)))?;
         let row = sqlx::query_as::<_, FeedItemRow>(
             r#"
             UPDATE feed_items
-            SET tags = $2, category = $3
+            SET tags = $2, raw_tags = $3
             WHERE id = $1
             RETURNING *
             "#,
         )
         .bind(item_id)
         .bind(normalized_json)
-        .bind(category)
+        .bind(raw_json)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("FeedItem with id {} not found", item_id)))?;

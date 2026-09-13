@@ -59,9 +59,14 @@
     --warning-color: #b07d10;   /* ochre */
     --shadow: 0 2px 10px rgba(60, 48, 32, 0.10);
     --shadow-lg: 0 12px 40px rgba(60, 48, 32, 0.22);
+    /* The masthead and headings keep the codified Radon identity; the reading
+       surface uses a text face. Radon is a code font — long-form articles in a
+       monospace grid read slower than a normal text measure. */
     --font-display: 'Monaspace Radon', var(--cjk-sans);
-    --font-body: 'Monaspace Radon', var(--cjk-sans);
+    --font-body: 'Public Sans', var(--cjk-sans);
     --font-ui: 'Public Sans', var(--cjk-sans);
+    /* Code stays monospace regardless of the reading face. */
+    --font-mono: 'Monaspace Radon', ui-monospace, SFMono-Regular, monospace;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -981,8 +986,11 @@ body::after {
    generous side padding instead of a fixed measure. */
 .detail-body {
     font-family: var(--font-body);
-    line-height: 1.8;
-    font-size: 1rem;
+    line-height: 1.75;
+    font-size: 1.02rem;
+    /* Long lines are hard to track; cap the measure while letting the column
+       keep its full width for tables, images, and code. */
+    max-width: 72ch;
     width: 100%;
 }
 
@@ -1052,6 +1060,12 @@ body::after {
         max-width: 100%;
         max-height: none;
     }
+}
+
+.detail-body pre,
+.detail-body code,
+.bilingual-content code {
+    font-family: var(--font-mono);
 }
 
 .detail-body pre {
@@ -1778,6 +1792,257 @@ body::after {
     color: var(--text-secondary);
 }
 
+/* Semantic-DB index status: a status chip, a progress meter, one line of
+   numbers. Everything else (queue depth, sync phase, collection id) belongs in
+   the terminal, not in a settings dialog. */
+.index-status {
+    --index-ok: #2f6b4f;
+    --index-warn: #9a5b2e;
+    --index-track: color-mix(in srgb, currentColor 12%, transparent);
+    margin-top: 1.25rem;
+    padding: 0.85rem 0.95rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+}
+
+.index-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.65rem;
+}
+
+.index-head h3 {
+    margin: 0;
+    font-family: var(--font-ui);
+    font-size: 0.8rem;
+    font-weight: 650;
+    color: var(--text-primary);
+}
+
+.index-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.18rem 0.55rem 0.18rem 0.45rem;
+    border-radius: 999px;
+    background: var(--index-track);
+    font-family: var(--font-ui);
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.index-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+    flex: none;
+}
+
+.index-status[data-state="ready"] .index-chip {
+    color: var(--index-ok);
+    background: color-mix(in srgb, var(--index-ok) 14%, transparent);
+}
+
+.index-status[data-state="running"] .index-chip {
+    color: var(--accent-color);
+    background: color-mix(in srgb, var(--accent-color) 14%, transparent);
+}
+
+.index-status[data-state="behind"] .index-chip {
+    color: var(--index-warn);
+    background: color-mix(in srgb, var(--index-warn) 14%, transparent);
+}
+
+.index-status[data-state="running"] .index-dot {
+    animation: index-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes index-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.35; transform: scale(0.72); }
+}
+
+.index-meter {
+    height: 6px;
+    border-radius: 999px;
+    background: var(--index-track);
+    overflow: hidden;
+}
+
+.index-meter-fill {
+    display: block;
+    height: 100%;
+    width: 0;
+    border-radius: inherit;
+    background: var(--accent-color);
+    transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.index-status[data-state="running"] .index-meter-fill {
+    background-image: linear-gradient(
+        115deg,
+        color-mix(in srgb, #fff 20%, transparent) 0 12px,
+        transparent 12px 26px
+    );
+    background-size: 26px 100%;
+    animation: index-stripes 0.9s linear infinite;
+}
+
+@keyframes index-stripes {
+    from { background-position: 0 0; }
+    to { background-position: 26px 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .index-meter-fill { transition: none; animation: none; }
+    .index-status[data-state="running"] .index-dot { animation: none; }
+}
+
+.index-status[data-state="behind"] .index-meter-fill {
+    background: var(--index-warn);
+}
+
+.index-status[data-state="off"] .index-meter-fill {
+    background: var(--text-secondary);
+    opacity: 0.45;
+}
+
+/* Summary on the left, live detail on the right. The detail only exists while
+   there is something moving (phase, rows scanned, elapsed, queued) — it is the
+   one place that information is worth showing. */
+.index-foot {
+    margin: 0.6rem 0 0;
+}
+
+.index-summary {
+    margin: 0;
+    font-family: var(--font-body);
+    font-size: 0.82rem;
+    color: var(--text-primary);
+}
+
+.index-detail {
+    margin: 0.2rem 0 0;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    line-height: 1.45;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary);
+    text-align: right;
+}
+
+.index-detail:empty {
+    display: none;
+}
+
+.index-summary strong {
+    font-family: var(--font-mono);
+    font-size: 0.86rem;
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+}
+
+.index-note {
+    margin: 0.35rem 0 0;
+    font-family: var(--font-body);
+    font-size: 0.76rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+}
+
+.index-note:empty {
+    display: none;
+}
+
+/* "Load more" footer: the list is paged, and the reader must be able to see
+   that more articles exist instead of assuming the first page is the library. */
+.subscription-item {
+    /* Rendered as a <button> for keyboard access; keep the row look. */
+    width: 100%;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+}
+
+.load-more {
+    padding: 1rem;
+    display: flex;
+    justify-content: center;
+    border-top: 1px solid var(--border-color);
+}
+
+.load-more-btn {
+    font-family: var(--font-ui);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--text-primary);
+    background: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    padding: 0.45rem 1rem;
+    cursor: pointer;
+}
+
+.load-more-btn:hover:not(:disabled) {
+    background: var(--text-primary);
+    color: var(--bg-primary);
+}
+
+.load-more-btn:disabled {
+    opacity: 0.5;
+    cursor: progress;
+}
+
+/* Narrow-window navigation. The responsive rules below hide the detail pane
+   (≤1024px) and push the sidebar offscreen (≤768px); these controls are the
+   only way back, so they must stay visible exactly where those rules apply. */
+.mobile-nav-btn {
+    display: none;
+    align-items: center;
+    gap: 0.35rem;
+    font-family: var(--font-ui);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--text-primary);
+    background: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    padding: 0.38rem 0.65rem;
+    cursor: pointer;
+    align-self: flex-start;
+}
+
+.mobile-nav-btn:hover {
+    background: var(--text-primary);
+    color: var(--bg-primary);
+    border-color: var(--text-primary);
+}
+
+@media (max-width: 1024px) {
+    #detail-back-btn {
+        display: inline-flex;
+    }
+}
+
+@media (max-width: 768px) {
+    #open-sidebar-btn {
+        display: inline-flex;
+    }
+}
+
 /* Responsive */
 @media (max-width: 1024px) {
     .app-container {
@@ -2149,6 +2414,29 @@ body::after {
     display: flex;
     align-items: center;
     gap: 0.55rem;
+    /* Rows must wrap: the settings column is ~300px wide and a label, a
+       control, and a hint on one line overflow it. */
+    flex-wrap: wrap;
+}
+
+.tag-match-row > small {
+    flex-basis: 100%;
+    color: var(--text-secondary);
+    font-size: 0.66rem;
+}
+
+.tag-graph-settings select,
+.tag-graph-settings input[type="number"] {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    padding: 0.25rem 0.35rem;
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 0.72rem;
 }
 
 .tag-match-row + .tag-match-row {
@@ -2722,4 +3010,890 @@ html[data-theme="vscode-dark"] {
     0% { background: var(--accent-soft); color: var(--accent-color); }
     70% { background: var(--accent-soft); color: var(--accent-color); }
     100% { background: transparent; color: inherit; }
+}
+
+/* ==========================================================================
+   Tag workspace — semantic map, adoption controls, matching settings
+   ========================================================================== */
+
+/* The Tags pill is a container, not a button: its settings gear lives inside
+   the same pill and a button may not be nested in another button. */
+.filter-tab-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding-right: 0.3rem;
+}
+
+.filter-tab-gear {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 0.9rem;
+    height: 0.9rem;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    opacity: 0.55;
+    cursor: pointer;
+    transition: opacity 0.15s ease;
+}
+
+.filter-tab-gear:hover,
+.filter-tab-gear:focus-visible {
+    opacity: 1;
+}
+
+.filter-tab-gear svg {
+    width: 0.72rem;
+    height: 0.72rem;
+}
+
+.tag-graph-content {
+    width: min(94%, 1080px);
+    max-width: 1080px;
+    padding: 1.35rem;
+}
+
+/* ---------- Tag workspace views ---------- */
+
+.tag-view-switch {
+    display: flex;
+    gap: 0.15rem;
+    margin: 0.55rem 0 0.7rem;
+    border-bottom: 1px dotted var(--border-color);
+}
+
+.tag-view-tab {
+    background: none;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-family: var(--font-ui);
+    font-size: 0.78rem;
+    padding: 0.4rem 0.7rem;
+}
+
+.tag-view-tab:hover {
+    color: var(--text-primary);
+}
+
+.tag-view-tab.is-active {
+    border-bottom-color: var(--accent-color);
+    color: var(--text-primary);
+}
+
+.tag-view-panel[hidden],
+/* Every view that sets its own display needs to opt out of it here, or it
+   stays on screen underneath the tab that should be showing: author rules beat
+   the user-agent `[hidden] { display: none }`, so `display: grid` on a panel is
+   enough to make `hidden` mean nothing. */
+#tag-view-overview[hidden],
+#tag-view-topics[hidden],
+#tag-view-tags[hidden] {
+    display: none;
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* ---------- Community map ---------- */
+
+#tag-view-overview {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 260px;
+    gap: 0.9rem;
+}
+
+.tag-map-stage {
+    position: relative;
+    /* An explicit height breaks the circular sizing between the grid row and the
+       canvas: with an auto height the canvas reported one size to fit() and
+       another to the browser, and the map was laid out against the wrong one. */
+    height: min(62vh, 640px);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--bg-primary);
+}
+
+.tag-map-stage canvas {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    cursor: grab;
+    outline-offset: -4px;
+}
+
+.tag-map-legend {
+    position: absolute;
+    top: 9px;
+    left: 11px;
+    display: flex;
+    gap: 0.85rem;
+    font-family: var(--font-ui);
+    font-size: 0.68rem;
+    color: var(--text-secondary);
+    pointer-events: none;
+}
+
+.tag-map-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.tag-map-legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-secondary);
+}
+
+.tag-map-legend-area {
+    width: 15px;
+    height: 10px;
+    border-radius: 4px;
+    background: rgba(120, 140, 150, 0.22);
+    border: 1px solid var(--border-color);
+}
+
+.tag-map-legend-edge {
+    width: 15px;
+    height: 0;
+    border-top: 2px solid var(--text-secondary);
+}
+
+.tag-map-zoom {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    display: flex;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.tag-map-zoom button {
+    background: none;
+    border: 0;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-family: var(--font-ui);
+    font-size: 0.8rem;
+    min-width: 34px;
+    padding: 0.35rem 0.5rem;
+}
+
+.tag-map-zoom button:hover {
+    background: var(--bg-tertiary);
+}
+
+.tag-map-zoom button:focus-visible {
+    outline-offset: -3px;
+}
+
+.tag-map-tip {
+    position: absolute;
+    z-index: 3;
+    pointer-events: none;
+    padding: 0.45rem 0.6rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    box-shadow: var(--shadow);
+    max-width: 240px;
+}
+
+.tag-map-tip-name {
+    margin: 0 0 0.1rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+}
+
+.tag-map-tip-meta {
+    margin: 0;
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.68rem;
+}
+
+.tag-map-side {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.tag-map-search input,
+.topic-search {
+    width: 100%;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 0.76rem;
+}
+
+.tag-map-results:empty {
+    display: none;
+}
+
+.tag-map-result,
+.tag-map-result-empty {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    margin-top: 0.25rem;
+    font-family: var(--font-ui);
+    font-size: 0.74rem;
+    cursor: pointer;
+}
+
+.tag-map-result[aria-selected="true"],
+.tag-map-result:hover {
+    background: var(--bg-tertiary);
+}
+
+.tag-map-result small {
+    display: block;
+    color: var(--text-secondary);
+    font-size: 0.64rem;
+}
+
+.tag-map-result-empty {
+    cursor: default;
+    color: var(--text-secondary);
+}
+
+.tag-map-swatch {
+    width: 9px;
+    height: 9px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+}
+
+.tag-map-status,
+.tag-map-warnings,
+.tag-map-hint {
+    margin: 0;
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.7rem;
+    line-height: 1.45;
+}
+
+.tag-map-warnings:empty {
+    display: none;
+}
+
+.tag-map-warnings {
+    color: var(--warning-color);
+}
+
+/* ---------- Topic workspace ---------- */
+
+#tag-view-topics {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.topic-layout {
+    display: grid;
+    grid-template-columns: 240px minmax(0, 1fr);
+    /* Without the minmax row the auto row grows to max-content and the word
+       list pushes the modal instead of scrolling inside it. */
+    grid-template-rows: minmax(0, 1fr);
+    gap: 0.8rem;
+    /* Same explicit height as the map stage: an auto-height grid row inside a
+       scrollable modal collapses the word list to a couple of rows. */
+    height: min(62vh, 640px);
+}
+
+.topic-column {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    min-width: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 0.6rem;
+    background: var(--bg-primary);
+}
+
+.topic-column-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.4rem;
+    border-bottom: 1px dotted var(--border-color);
+    padding-bottom: 0.35rem;
+}
+
+.topic-column-head h3 {
+    margin: 0;
+    font-size: 0.85rem;
+}
+
+.topic-hint {
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.66rem;
+}
+
+.topic-category-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+}
+
+.topic-category-button {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.45rem;
+    width: 100%;
+    background: none;
+    border: 0;
+    border-radius: 7px;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-family: var(--font-ui);
+    font-size: 0.75rem;
+    padding: 0.3rem 0.4rem;
+    text-align: left;
+}
+
+.topic-category.is-selected .topic-category-button {
+    background: var(--accent-soft);
+}
+
+.topic-category-button:hover {
+    background: var(--bg-tertiary);
+}
+
+.topic-category-name.is-staged {
+    color: var(--accent-color);
+}
+
+.topic-category-count {
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.topic-word-list {
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.topic-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    border-top: 1px dotted var(--border-color);
+    padding-top: 0.4rem;
+    font-family: var(--font-ui);
+    font-size: 0.68rem;
+}
+
+.topic-page-button {
+    padding: 0.25rem 0.45rem;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    cursor: pointer;
+    font: inherit;
+}
+
+.topic-page-button:disabled {
+    cursor: default;
+    opacity: 0.45;
+}
+
+.topic-page-label {
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+.topic-word {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 2.5rem 210px;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0.35rem;
+    border-bottom: 1px dotted var(--border-color);
+    font-family: var(--font-ui);
+    font-size: 0.75rem;
+}
+
+.topic-word.is-staged {
+    background: var(--accent-soft);
+}
+
+.topic-word-name {
+    font-family: var(--font-mono);
+    overflow-wrap: anywhere;
+}
+
+.topic-word-usage {
+    color: var(--text-secondary);
+    font-size: 0.68rem;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+.topic-word-select {
+    width: 100%;
+    padding: 0.2rem 0.3rem;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 0.72rem;
+}
+
+.topic-empty {
+    margin: 0.4rem 0;
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.74rem;
+}
+
+.topic-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    border-top: 1px solid var(--border-color);
+    padding-top: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.topic-status {
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.72rem;
+}
+
+.topic-status.is-error {
+    color: var(--danger-color);
+}
+
+.topic-suggest-progress {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 190px;
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.68rem;
+}
+
+.topic-suggest-progress progress {
+    width: 92px;
+    height: 0.45rem;
+    accent-color: var(--accent-color);
+}
+
+.topic-actions {
+    display: flex;
+    gap: 0.4rem;
+}
+
+@media (max-width: 880px) {
+    #tag-view-overview,
+    .topic-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .topic-word {
+        grid-template-columns: minmax(0, 1fr) 2.5rem;
+    }
+
+    .topic-word-select {
+        grid-column: 1 / -1;
+    }
+}
+
+.tag-graph-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.9rem;
+    flex-wrap: wrap;
+    padding-bottom: 0.8rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.tag-graph-title h2 {
+    margin: 0 0 0.15rem;
+    padding: 0;
+    border: 0;
+}
+
+.tag-graph-sub {
+    margin: 0;
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.74rem;
+}
+
+.tag-graph-tools {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+}
+
+.tag-graph-tools input[type="search"] {
+    min-width: 148px;
+    padding: 0.3rem 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 0.72rem;
+}
+
+.tag-graph-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.7rem;
+    cursor: pointer;
+}
+
+.tag-graph-filter input {
+    accent-color: var(--accent-color);
+}
+
+.tag-view-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    grid-template-rows: minmax(0, 1fr);
+    gap: 0.9rem;
+    padding: 0.9rem 0;
+    /* An explicit height plus a minmax row: an auto row grows to max-content
+       and the tag list pushes the modal instead of scrolling inside it. */
+    height: min(66vh, 660px);
+}
+
+.tag-view-main {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    min-width: 0;
+    min-height: 0;
+}
+
+.tag-view-main .tag-graph-list {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
+    overflow-y: auto;
+}
+
+.tag-view-main .tag-graph-detail {
+    flex: 0 0 auto;
+}
+
+.tag-graph-side {
+    overflow-y: auto;
+    min-height: 0;
+    display: grid;
+    /* Fixed rows: overview, detail, list, settings. Hovering a tag rewrites
+       the detail text, and an auto-height row would resize the list beneath
+       the cursor, which walks the pointer onto another row and oscillates. */
+    grid-template-rows: auto auto 118px minmax(96px, 1fr) auto;
+    gap: 0.5rem;
+    height: min(70vh, 680px);
+    min-height: 380px;
+    min-width: 0;
+    overflow-y: auto;
+}
+
+.tag-graph-panel {
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    background: var(--bg-secondary);
+}
+
+.tag-graph-panel > summary {
+    padding: 0.4rem 0.55rem;
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    cursor: pointer;
+}
+
+.tag-graph-panel[open] > summary {
+    border-bottom: 1px solid var(--border-color);
+}
+
+.tag-graph-stats {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 0.2rem 0.6rem;
+    margin: 0;
+    padding: 0.5rem 0.55rem;
+    font-family: var(--font-ui);
+    font-size: 0.74rem;
+}
+
+.tag-graph-stats dt {
+    color: var(--text-secondary);
+}
+
+.tag-graph-stats dd {
+    margin: 0;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.tag-graph-detail {
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    padding: 0.6rem;
+    background: var(--bg-secondary);
+    overflow-y: auto;
+}
+
+.tag-graph-detail h3 {
+    margin: 0 0 0.45rem;
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 0.84rem;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.tag-graph-facts {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.2rem 0.6rem;
+    margin: 0 0 0.55rem;
+    font-family: var(--font-ui);
+    font-size: 0.74rem;
+}
+
+.tag-graph-facts dt {
+    color: var(--text-secondary);
+}
+
+.tag-graph-facts dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.tag-graph-list {
+    min-height: 0;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+}
+
+.tag-graph-row {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    width: 100%;
+    padding: 0.35rem 0.5rem;
+    border: 0;
+    border-bottom: 1px solid var(--border-color);
+    border-left: 2px solid transparent;
+    background: transparent;
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 0.74rem;
+    text-align: left;
+    cursor: pointer;
+}
+
+.tag-graph-row:last-child {
+    border-bottom: 0;
+}
+
+.tag-graph-row:hover {
+    background: var(--bg-tertiary);
+}
+
+.tag-graph-row.is-selected {
+    border-left-color: var(--accent-color);
+    background: var(--accent-soft);
+}
+
+.tag-graph-row[aria-pressed="true"] .tag-graph-row-name {
+    font-weight: 600;
+}
+
+.tag-graph-row small {
+    margin-left: auto;
+    color: var(--muted-color);
+    font-size: 0.66rem;
+    white-space: nowrap;
+}
+
+.tag-graph-row-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tag-graph-swatch {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex: none;
+    border: 1px solid color-mix(in srgb, var(--text-primary) 20%, transparent);
+}
+
+.tag-graph-settings .tag-match-form {
+    margin: 0;
+    padding: 0.55rem;
+}
+
+.tag-match-label {
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.72rem;
+    white-space: nowrap;
+}
+
+.tag-graph-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.7rem;
+    flex-wrap: wrap;
+    padding-top: 0.8rem;
+    border-top: 1px solid var(--border-color);
+}
+
+.tag-graph-status {
+    color: var(--accent-color);
+    font-family: var(--font-ui);
+    font-size: 0.72rem;
+}
+
+.tag-graph-actions {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    margin-left: auto;
+}
+
+@media (max-width: 900px) {
+    .tag-graph-body {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .tag-graph-stage {
+        height: min(44vh, 400px);
+    }
+
+    .tag-graph-side {
+        height: auto;
+        grid-template-rows: auto auto auto minmax(120px, 1fr) auto;
+    }
+
+    .tag-graph-list {
+        max-height: 200px;
+    }
+}
+
+.tag-menu-active {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 4px;
+    padding: 0.35rem 0.5rem;
+    border-radius: 2px;
+    background: var(--accent-soft);
+    color: var(--accent-color);
+    font-family: var(--font-ui);
+    font-size: 0.72rem;
+    font-weight: 600;
+}
+
+.tag-menu-clear {
+    padding: 0.1rem 0.4rem;
+    border: 1px solid var(--accent-color);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--accent-color);
+    font-family: var(--font-ui);
+    font-size: 0.66rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.tag-menu-clear:hover {
+    background: var(--accent-color);
+    color: var(--bg-primary);
+}
+
+.tag-graph-dict {
+    padding: 0.5rem 0.55rem;
+}
+
+.tag-graph-dict .tag-graph-stats {
+    padding: 0 0 0.45rem;
+}
+
+.tag-graph-dict-hint {
+    margin: 0 0 0.5rem;
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 0.7rem;
+    line-height: 1.45;
+}
+
+.tag-graph-dict-progress {
+    margin: 0.45rem 0 0;
+    color: var(--accent-color);
+    font-family: var(--font-ui);
+    font-size: 0.7rem;
+    min-height: 1em;
 }

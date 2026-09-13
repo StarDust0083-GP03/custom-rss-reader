@@ -5,13 +5,14 @@
  * also lives here because the result is rendered immediately.
  */
 
-import { items as itemsApi } from "../api";
+import { items as itemsApi, ITEM_PAGE_SIZE } from "../api";
 import type { FeedItem, FeedItemSummary } from "../types";
 import { setSafeHtml, setText, htmlToPlainText, dedupeImages } from "../sanitize";
 import { IframeManager } from "../iframe";
 import { configureMarked, renderMarkdown } from "../markdown";
 import { state } from "../state";
 import { resetFiltersForSubscription } from "./filter-state";
+import { beginLibraryQuery, isCurrentLibraryQuery, libraryQueryGeneration } from "./library-query";
 // Selection / subscription actions are defined in features/actions.ts and
 // invoked from click handlers below. This is a function-level module cycle:
 // both sides use hoisted function declarations, so it resolves at call time.
@@ -36,10 +37,6 @@ const GLOBE_ICON =
 
 // Iframe manager — every load bumps a generation so stale loads are dropped.
 export const iframeManager = new IframeManager();
-
-// Monotonic counter for `loadItems` results, so a slow in-flight query for
-// subscription A doesn't paint over the fresh results for subscription B.
-let loadItemsSeq = 0;
 
 // Sync the Markdown / Web View buttons to the current render mode.
 //
@@ -98,10 +95,13 @@ export function renderSubscriptions() {
 
   list.replaceChildren();
 
-  // "All Items" entry
-  const allItem = document.createElement("div");
+  // "All Items" entry. Native <button> so the source list is reachable and
+  // activatable with the keyboard instead of being a click-only <div>.
+  const allItem = document.createElement("button");
+  allItem.type = "button";
   allItem.className = `subscription-item ${S.currentSubscriptionId === null && S.currentFilter === "all" ? "active" : ""}`;
   allItem.dataset.id = "all";
+  allItem.setAttribute("aria-pressed", String(S.currentSubscriptionId === null && S.currentFilter === "all"));
   const allTitle = document.createElement("span");
   allTitle.className = "subscription-title";
   allTitle.textContent = "All Items";
@@ -112,9 +112,11 @@ export function renderSubscriptions() {
   list.appendChild(allItem);
 
   S.subscriptions.forEach((sub) => {
-    const item = document.createElement("div");
+    const item = document.createElement("button");
+    item.type = "button";
     item.className = `subscription-item ${S.currentSubscriptionId === sub.id ? "active" : ""}`;
     item.dataset.id = sub.id.toString();
+    item.setAttribute("aria-pressed", String(S.currentSubscriptionId === sub.id));
 
     const info = document.createElement("div");
     info.className = "subscription-info";
@@ -214,42 +216,77 @@ export function revealSubscription(subscriptionId: number) {
   window.setTimeout(() => row.classList.remove("reveal"), 1600);
 }
 
+/** Fetch one page for the active filter, starting at `offset`. */
+function fetchItemPage(offset: number): Promise<FeedItemSummary[]> {
+  const subId = S.currentSubscriptionId;
+  if (S.currentFilter === "unread") return itemsApi.unread(subId, offset);
+  if (S.currentFilter === "favorites") return itemsApi.favorites(subId, offset);
+  if (S.currentFilter === "read-later") return itemsApi.readLater(subId, offset);
+  // unreadFilterEnabled drives the "Today + Unread" combination; without
+  // threading it through, the toggle had no functional effect.
+  if (S.currentFilter === "today") return itemsApi.today(subId, S.unreadFilterEnabled, offset);
+  if (S.currentFilter === "tag" && S.currentTagFilter) {
+    return itemsApi.byTag(S.currentTagFilter, subId, offset);
+  }
+  return itemsApi.list({ subscriptionId: subId, offset });
+}
+
 // 加载内容
 export async function loadItems() {
-  const seq = ++loadItemsSeq;
+  // Shares the library-query generation with search/similar: a filter load
+  // and a search are competing writers for the same list, so whichever the
+  // user asked for last owns the result.
+  const seq = beginLibraryQuery();
   setLoadingWithStatusLocal("", "Loading items...");
   try {
-    let items: FeedItemSummary[] = [];
-    const subId = S.currentSubscriptionId;
+    const items = await fetchItemPage(0);
 
-    if (S.currentFilter === "unread") {
-      items = await itemsApi.unread(subId);
-    } else if (S.currentFilter === "favorites") {
-      items = await itemsApi.favorites(subId);
-    } else if (S.currentFilter === "read-later") {
-      items = await itemsApi.readLater(subId);
-    } else if (S.currentFilter === "today") {
-      // unreadFilterEnabled drives the "Today + Unread" combination; without
-      // threading it through, the toggle had no functional effect.
-      items = await itemsApi.today(subId, S.unreadFilterEnabled);
-    } else if (S.currentFilter === "tag" && S.currentTagFilter) {
-      items = await itemsApi.byTag(S.currentTagFilter, subId);
-    } else {
-      items = await itemsApi.list({ subscriptionId: subId });
-    }
-
-    // Drop a stale response if the user switched filters or subscriptions
-    // while the request was in flight.
-    if (seq !== loadItemsSeq) return;
+    // Drop a stale response if the user switched filters, subscriptions, or
+    // started a search while the request was in flight.
+    if (!isCurrentLibraryQuery(seq)) return;
 
     S.currentItems = items;
+    S.listPage = {
+      offset: items.length,
+      hasMore: items.length >= ITEM_PAGE_SIZE,
+      loading: false,
+    };
     renderItems();
     clearLoadingStatusLocal(true, "Ready");
   } catch (error) {
-    if (seq !== loadItemsSeq) return;
+    if (!isCurrentLibraryQuery(seq)) return;
     console.error("Failed to load items:", error);
     clearLoadingStatusLocal(false, "Load failed");
     toastErrorLocal("Failed to load items");
+  }
+}
+
+/// Append the next page of the active list.
+///
+/// The library used to show only the first 50 articles with no way to reach
+/// the rest. Offset paging is enough to make them reachable; a keyset cursor
+/// is the follow-up once a stable page size is in place.
+export async function loadMoreItems() {
+  if (S.listPage.loading || !S.listPage.hasMore) return;
+  const seq = libraryQueryGeneration();
+  S.listPage.loading = true;
+  renderItems(true);
+  try {
+    const more = await fetchItemPage(S.currentItems.length);
+    if (!isCurrentLibraryQuery(seq)) return;
+    S.currentItems = [...S.currentItems, ...more];
+    S.listPage = {
+      offset: S.currentItems.length,
+      hasMore: more.length >= ITEM_PAGE_SIZE,
+      loading: false,
+    };
+    renderItems(true);
+  } catch (error) {
+    if (!isCurrentLibraryQuery(seq)) return;
+    console.error("Failed to load more items:", error);
+    S.listPage.loading = false;
+    toastErrorLocal("Failed to load more items");
+    renderItems(true);
   }
 }
 
@@ -273,6 +310,7 @@ export function renderItems(preserveScroll = false) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     empty.textContent = "No items found";
+    empty.setAttribute("role", "status");
     list.appendChild(empty);
     return;
   }
@@ -281,6 +319,19 @@ export function renderItems(preserveScroll = false) {
     const div = document.createElement("div");
     div.className = `item-card ${!item.is_read ? "unread" : ""} ${S.selectedItem?.id === item.id ? "active" : ""}`;
     div.dataset.id = item.id.toString();
+    // The card is a keyboard-reachable control. It cannot be a <button>
+    // because it contains independently clickable tag chips (nested
+    // interactive elements are invalid), so it carries the button role and
+    // the two activation keys a button would have.
+    div.setAttribute("role", "button");
+    div.setAttribute("tabindex", "0");
+    div.setAttribute("aria-current", S.selectedItem?.id === item.id ? "true" : "false");
+    div.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        selectItemLocal(item);
+      }
+    });
 
     // Header: title + date
     const header = document.createElement("div");
@@ -320,7 +371,16 @@ export function renderItems(preserveScroll = false) {
             tagEl.className = "tag clickable-tag";
             tagEl.dataset.tag = t;
             tagEl.textContent = "#" + t;
+            tagEl.setAttribute("role", "button");
+            tagEl.setAttribute("tabindex", "0");
+            tagEl.setAttribute("aria-label", `Filter by tag ${t}`);
             tagEl.addEventListener("click", (e) => {
+              e.stopPropagation();
+              filterByTagLocal(t);
+            });
+            tagEl.addEventListener("keydown", (e) => {
+              if (e.key !== "Enter" && e.key !== " ") return;
+              e.preventDefault();
               e.stopPropagation();
               filterByTagLocal(t);
             });
@@ -376,15 +436,64 @@ export function renderItems(preserveScroll = false) {
     list.appendChild(div);
   });
 
+  // The list is paged. Without a visible "load more" path the library simply
+  // ended at the first page with no hint that more articles exist.
+  if (S.listPage.loading || S.listPage.hasMore) {
+    const footer = document.createElement("div");
+    footer.className = "load-more";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "load-more-btn";
+    button.disabled = S.listPage.loading;
+    button.textContent = S.listPage.loading ? "Loading…" : "Load more articles";
+    button.addEventListener("click", () => void loadMoreItems());
+    footer.appendChild(button);
+    list.appendChild(footer);
+  }
+
   if (preserveScroll) {
     list.scrollTop = scrollPos;
   }
 }
 
+// ---------------------------------------------------------------------------
+// Article media URLs
+// ---------------------------------------------------------------------------
+
+/**
+ * Point relative `src`/`href` values at the publisher's URL.
+ *
+ * The reader document is served from the app origin, so `./diagram.png` in an
+ * article body resolved to the app itself. `item.link` is the article URL and
+ * acts as the base, exactly like a browser would use the document URL.
+ */
+function resolveRelativeMedia(root: HTMLElement, baseUrl: string | null) {
+  if (!baseUrl) return;
+  let base: URL;
+  try {
+    base = new URL(baseUrl);
+  } catch {
+    return;
+  }
+  if (base.protocol !== "http:" && base.protocol !== "https:") return;
+
+  root.querySelectorAll<HTMLElement>("img[src], source[src], a[href]").forEach((el) => {
+    const attr = el.tagName === "A" ? "href" : "src";
+    const value = el.getAttribute(attr);
+    // Already absolute, protocol-relative, or an in-page anchor — leave it.
+    if (!value || value.startsWith("//") || value.startsWith("#")) return;
+    if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return;
+    try {
+      el.setAttribute(attr, new URL(value, base).href);
+    } catch {
+      // Malformed value — keep the original text rather than dropping it.
+    }
+  });
+}
+
 // selectItem lives in features/actions.ts (it performs read/ignore side
 // effects). Imported lazily by name to keep the module cycle safe.
 import { selectItem as selectItemLocal } from "../features/actions";
-
 // 格式化日期
 export function formatDate(dateString: string): string {
   const date = new Date(dateString);
@@ -417,7 +526,12 @@ export interface RenderDetailOptions {
 }
 
 export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {}) {
-  cancelIgnoreTimerLocal();
+  // Reader ownership: background work (a translation finishing, a fetch
+  // completing) may only paint the article the reader is still looking at.
+  // Without this, a slow action for the previous selection repainted the pane
+  // after the user had moved on.
+  if (S.selectedItem && S.selectedItem.id !== item.id) return;
+
   const detail = document.getElementById("detail-content");
   if (!detail) return;
 
@@ -481,10 +595,10 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
     }
   }
 
-  // ---- Header (source + category) ----
+  // ---- Header (source) ----
   const source = document.createElement("div");
   source.className = "detail-source";
-  source.textContent = subName + (item.category ? ` • ${item.category}` : "");
+  source.textContent = subName;
   source.title = "Go to source";
   // Peek navigation (same rule as the list kicker): scroll + highlight the
   // source in the sidebar, but do NOT select it.
@@ -608,6 +722,7 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
     // often appears in several translated pairs and again in the
     // untranslated tail — keep only the first occurrence. The hidden
     // translated side never claims a URL.
+    resolveRelativeMedia(body, item.link);
     dedupeImages(body, ".paragraph-translated");
     return;
   }
@@ -648,6 +763,9 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
     // sanitiser to drop event handlers and dangerous schemes.
     const html = renderMarkdown(item.content_md);
     setSafeHtml(body, html);
+    // Article markup uses relative media (`./diagram.png`, `/img/hero.jpg`);
+    // without a base they resolve against the app origin and 404.
+    resolveRelativeMedia(body, item.link);
     // The same image often appears twice in one article (hero + inline) —
     // render it once.
     dedupeImages(body);
@@ -659,7 +777,5 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
   }
 }
 
-// cancelIgnoreTimer lives with the selection logic in features/actions.ts.
-import { cancelIgnoreTimer as cancelIgnoreTimerLocal } from "../features/actions";
 // filterByTag lives in ui/filters.ts (which imports loadItems from here).
 import { filterByTag as filterByTagLocal } from "./filters";

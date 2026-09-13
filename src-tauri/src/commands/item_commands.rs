@@ -212,12 +212,8 @@ pub async fn save_item_tags(
     state: State<'_, AppState>,
     item_id: i64,
     tags: Vec<String>,
-    category: Option<String>,
 ) -> Result<FeedItem> {
     let tags = serde_json::to_string(&tags)
         .map_err(|e| crate::error::AppError::Validation(format!("Invalid tags: {}", e)))?;
-    state
-        .feed_repo
-        .save_tags(item_id, &tags, category.as_deref().unwrap_or_default())
-        .await
+    state.feed_repo.save_tags(item_id, &tags).await
 }

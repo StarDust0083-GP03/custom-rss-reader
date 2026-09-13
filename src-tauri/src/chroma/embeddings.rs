@@ -39,6 +39,13 @@ use tokio::io::AsyncWriteExt;
 
 /// Sentence-transformers model used for embedding articles and queries.
 const MODEL_REPO: &str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2";
+
+/// Identity of the model producing tag vectors, recorded alongside stored
+/// embeddings so a model change invalidates the index instead of mixing two
+/// vector spaces.
+pub fn model_id() -> &'static str {
+    MODEL_REPO
+}
 /// Immutable upstream revision reviewed for this build. Never execute a model
 /// fetched from the mutable `main` ref.
 const MODEL_REVISION: &str = "e8f8c211226b894fcb81acc59f3b34ba3efd5f42";
@@ -107,7 +114,9 @@ fn model_dir() -> PathBuf {
 }
 
 /// Tokenizer + session once the model files exist. Stored behind a
-/// `OnceCell` so the (expensive) load happens exactly once per process.
+/// process-global `OnceCell` so the (expensive) load happens exactly once
+/// no matter how many embedders the app constructs — the tag matcher and the
+/// Chroma client used to load separate ORT sessions of the same model.
 struct Loaded {
     tokenizer: Tokenizer,
     /// ort's `run` takes `&mut self`; a Mutex makes the session usable
@@ -116,39 +125,40 @@ struct Loaded {
     session: Mutex<Session>,
 }
 
+/// The one loaded model per process.
+static SHARED_MODEL: tokio::sync::OnceCell<Loaded> = tokio::sync::OnceCell::const_new();
+
+/// Bounds concurrent ONNX inference. `Session::run` is CPU-bound synchronous
+/// work: without a cap, a bulk re-index could occupy every blocking thread
+/// and starve an interactive semantic search.
+static INFERENCE_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
 /// ONNX sentence-transformers pipeline: tokenize → BERT → mean-pool → L2
 /// normalize, producing one 384-dim vector per document.
 #[derive(Clone)]
-pub struct OnnxEmbeddingFunction {
-    /// Directory holding the model + tokenizer files (shared between clones,
-    /// all of which race on the same `OnceCell` init).
-    model_dir: Arc<PathBuf>,
-    loaded: Arc<tokio::sync::OnceCell<Loaded>>,
-}
+pub struct OnnxEmbeddingFunction;
 
 impl OnnxEmbeddingFunction {
     /// Cheap constructor — no I/O. The model is downloaded and loaded on the
     /// first `embed` call (and cached for the process lifetime).
     pub fn new() -> Self {
-        Self {
-            model_dir: Arc::new(model_dir().join(MODEL_REPO)),
-            loaded: Arc::new(tokio::sync::OnceCell::new()),
-        }
+        Self
     }
 
     /// Ensure the model files exist (downloading them if necessary) and load
     /// tokenizer + session. Only runs once; concurrent first calls race on
     /// the `OnceCell` and a failure is retried by the next caller.
-    async fn loaded(&self) -> anyhow::Result<&Loaded> {
-        self.loaded
+    async fn loaded(&self) -> anyhow::Result<&'static Loaded> {
+        SHARED_MODEL
             .get_or_try_init(|| async {
+                let model_dir = Arc::new(model_dir().join(MODEL_REPO));
                 let t0 = std::time::Instant::now();
                 let spec = model_spec();
-                let tokenizer_path = self.model_dir.join(TOKENIZER_FILE);
-                let model_path = self.model_dir.join(spec.file);
+                let tokenizer_path = model_dir.join(TOKENIZER_FILE);
+                let model_path = model_dir.join(spec.file);
                 let files_pre_present = tokenizer_path.exists() && model_path.exists();
-                std::fs::create_dir_all(&*self.model_dir)
-                    .with_context(|| format!("create model dir {}", self.model_dir.display()))?;
+                std::fs::create_dir_all(&*model_dir)
+                    .with_context(|| format!("create model dir {}", model_dir.display()))?;
                 ensure_model_file(&tokenizer_path, TOKENIZER_FILE, TOKENIZER_SHA256).await?;
                 ensure_model_file(&model_path, spec.file, spec.sha256).await?;
                 // tokenizers' error type is `Box<dyn StdError + Send + Sync>`,
@@ -189,13 +199,17 @@ impl OnnxEmbeddingFunction {
             })
             .await
     }
+}
 
-    /// Run the model on one padded batch and mean-pool + normalize.
-    fn pool_batch(
-        &self,
-        session: &mut Session,
-        encodings: &[tokenizers::Encoding],
-    ) -> anyhow::Result<Vec<Vec<f32>>> {
+/// Run the model on one padded batch and mean-pool + normalize.
+///
+/// A free function so it can run inside `spawn_blocking` against the shared
+/// session without carrying an embedder instance along.
+fn pool_batch(
+    session: &mut Session,
+    encodings: &[tokenizers::Encoding],
+) -> anyhow::Result<Vec<Vec<f32>>> {
+    {
         let batch = encodings.len();
         let seq_len = encodings.first().map(|e| e.get_ids().len()).unwrap_or(0);
         if batch == 0 || seq_len == 0 {
@@ -293,17 +307,36 @@ impl Default for OnnxEmbeddingFunction {
 impl EmbeddingFunction for OnnxEmbeddingFunction {
     async fn embed(&self, docs: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
         let t0 = std::time::Instant::now();
-        let loaded = self.loaded().await?;
-        let encodings = loaded
-            .tokenizer
-            .encode_batch(docs.to_vec(), true)
-            .map_err(|e| anyhow::anyhow!("tokenize batch: {}", e))?;
-        let mut session = loaded
-            .session
-            .lock()
-            .map_err(|_| anyhow::anyhow!("ONNX session lock is poisoned"))?;
-        let vectors = self.pool_batch(&mut session, &encodings)?;
-        println!("[chroma] embed {} doc(s) in {:?}", docs.len(), t0.elapsed());
+        let loaded: &'static Loaded = self.loaded().await?;
+
+        // Tokenizing and running the model are synchronous CPU work. Doing
+        // them directly on the async worker stalled the runtime for the whole
+        // batch; a bounded blocking task keeps the executor responsive and
+        // stops bulk indexing from starving an interactive search.
+        let _permit = INFERENCE_PERMITS
+            .acquire()
+            .await
+            .map_err(|_| anyhow::anyhow!("inference limiter closed"))?;
+        let docs: Vec<String> = docs.iter().map(|doc| doc.to_string()).collect();
+        let vectors = tokio::task::spawn_blocking(move || {
+            let encodings = loaded
+                .tokenizer
+                .encode_batch(docs, true)
+                .map_err(|e| anyhow::anyhow!("tokenize batch: {}", e))?;
+            let mut session = loaded
+                .session
+                .lock()
+                .map_err(|_| anyhow::anyhow!("ONNX session lock is poisoned"))?;
+            pool_batch(&mut session, &encodings)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("embedding task failed: {}", e))??;
+
+        println!(
+            "[chroma] embed {} doc(s) in {:?}",
+            vectors.len(),
+            t0.elapsed()
+        );
         Ok(vectors)
     }
 }

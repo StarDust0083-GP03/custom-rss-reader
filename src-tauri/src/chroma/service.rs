@@ -63,7 +63,6 @@ impl ChromaService {
             link: item.link.clone(),
             author: item.author.clone(),
             published_at: item.published_at,
-            category: item.category.clone(),
             // The embedding document is truncated anyway; truncating here too
             // keeps the borrow checker happy without cloning full articles.
             description: item
@@ -321,10 +320,6 @@ impl ChromaService {
                             .map(|dt| dt.to_rfc3339())
                             .unwrap_or_default()
                             .into(),
-                    );
-                    m.insert(
-                        "category".into(),
-                        r.category.clone().unwrap_or_default().into(),
                     );
                     m
                 })
@@ -592,7 +587,6 @@ mod tests {
             link: None,
             author: None,
             published_at: None,
-            category: None,
             description: Some("A description".into()),
             content: Some("<p>Some content</p>".into()),
         };

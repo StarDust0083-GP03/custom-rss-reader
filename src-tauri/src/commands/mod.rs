@@ -2,6 +2,7 @@ pub mod ai_commands;
 pub mod chroma_commands;
 pub mod feed_commands;
 pub mod item_commands;
+pub mod job_commands;
 pub mod streaming;
 pub mod subscription_commands;
 pub mod tag_commands;
@@ -14,6 +15,7 @@ pub use ai_commands::*;
 pub use chroma_commands::*;
 pub use feed_commands::*;
 pub use item_commands::*;
+pub use job_commands::*;
 pub use streaming::*;
 pub use subscription_commands::*;
 pub use tag_commands::*;
@@ -27,6 +29,7 @@ use std::sync::Arc;
 use crate::ai::activity::AiActivityStore;
 use crate::ai::service::SharedAiService;
 use crate::feed::FeedFetcher;
+use crate::repositories::job_repo::JobRepository;
 use crate::repositories::FeedItemRepository;
 use crate::services::TagMatcher;
 use crate::{FeedService, SubscriptionService};
@@ -40,6 +43,8 @@ pub struct AppState {
     pub subscription_service: SubscriptionService,
     pub feed_service: FeedService,
     pub feed_repo: Arc<dyn FeedItemRepository>,
+    /// Durable enrichment queue (classification, website cache, indexing).
+    pub jobs: Arc<dyn JobRepository>,
     pub fetcher: Arc<FeedFetcher>,
     pub ai_service: SharedAiService,
     pub ai_activity: AiActivityStore,

@@ -1,17 +1,15 @@
-/** Tag catalog management, local similarity clustering, and explicit mutations. */
+/** Tag vocabulary management, synonym cleanup, and explicit mutations. */
 
 import { tags as tagsApi } from "../api";
-import type { TagCatalogEntry, TagCluster, TagMatchConfig } from "../types";
-import { clearLoadingStatus, setLoadingWithStatus } from "../ui/status";
-import { error as toastError, info as toastInfo, success as toastSuccess } from "../toast";
+import type { TagCatalogEntry, TagMatchConfig } from "../types";
+import { error as toastError, success as toastSuccess } from "../toast";
 
 let catalog: TagCatalogEntry[] = [];
 let blocked: string[] = [];
-let clusters: TagCluster[] = [];
 let editingTag: string | null = null;
 let deletingTag: string | null = null;
-let clustering = false;
 let matchConfig: TagMatchConfig | null = null;
+let reopenTagGraph = false;
 
 type TagChangeDetail =
   | { kind: "rename"; oldName: string; newName: string | null }
@@ -23,16 +21,35 @@ function notifyTagChange(detail: TagChangeDetail) {
 }
 
 export async function openTagManager() {
+  const graph = document.getElementById("tag-graph-modal");
+  reopenTagGraph = graph?.classList.contains("visible") ?? false;
+  // The manager is a follow-on screen, not a second modal stacked under the
+  // graph. Hide the parent while it is open so Escape, focus, and backdrop
+  // clicks all belong to one dialog.
+  graph?.classList.remove("visible");
   document.getElementById("tag-manager-modal")?.classList.add("visible");
   await refreshTagManager();
 }
 
 export function closeTagManager() {
   document.getElementById("tag-manager-modal")?.classList.remove("visible");
+  if (reopenTagGraph) {
+    reopenTagGraph = false;
+    document.getElementById("tag-graph-modal")?.classList.add("visible");
+  }
+}
+
+/** Refresh the matching-settings form. Shared with the Tags workspace. */
+export async function refreshTagMatchConfig() {
+  try {
+    matchConfig = await tagsApi.matchConfig();
+    renderMatchConfig();
+  } catch (error) {
+    toastError(`Failed to load tag matching settings: ${error}`);
+  }
 }
 
 async function refreshTagManager() {
-  clusters = [];
   editingTag = null;
   deletingTag = null;
   try {
@@ -40,18 +57,12 @@ async function refreshTagManager() {
     renderCatalog();
     renderMappings();
     renderBlocked();
-    renderClusters();
   } catch (error) {
     toastError(`Failed to load tags: ${error}`);
   }
   // Settings are independent of the catalog; a failure here must not hide
-  // the tag list, so load them separately.
-  try {
-    matchConfig = await tagsApi.matchConfig();
-    renderMatchConfig();
-  } catch (error) {
-    toastError(`Failed to load tag matching settings: ${error}`);
-  }
+  // the tag list.
+  await refreshTagMatchConfig();
 }
 
 function matchFormElements() {
@@ -63,7 +74,14 @@ function matchFormElements() {
   };
 }
 
-/** Reflect the slider position and enabled state in the form. */
+/**
+ * Reflect the slider position and enabled state in the form.
+ *
+ * Matching is the only knob left here: grouping used to be configurable in two
+ * modes, and the community mode has since become the read-only Overview tab,
+ * where the structure is drawn rather than merged. A control that stages merges
+ * from a partition the user never asked to apply is worse than no control.
+ */
 export function syncMatchConfigForm() {
   const { form, enabled, threshold, value } = matchFormElements();
   if (!form || !enabled || !threshold || !value) return;
@@ -80,6 +98,17 @@ function renderMatchConfig() {
   syncMatchConfigForm();
 }
 
+/**
+ * Wire the matching-settings form once, at bootstrap.
+ *
+ * Lives next to the form it configures so the shared-article control's
+ * visibility rule is one testable unit instead of being split across main.ts.
+ */
+export function initMatchSettingsForm(): void {
+  document.getElementById("tag-match-threshold")?.addEventListener("input", syncMatchConfigForm);
+  document.getElementById("tag-match-enabled")?.addEventListener("change", syncMatchConfigForm);
+}
+
 export async function saveMatchConfigFromForm() {
   const { enabled, threshold } = matchFormElements();
   if (!enabled || !threshold) return;
@@ -88,14 +117,24 @@ export async function saveMatchConfigFromForm() {
     toastError("Similarity threshold must be a number.");
     return;
   }
+  // The two grouping fields are no longer exposed. They are sent back
+  // unchanged so an older library keeps whatever it had stored instead of
+  // being silently reset by a form that no longer shows them.
+  const groupingMethod = matchConfig?.grouping_method ?? "embedding";
+  const communityMinWeight = matchConfig?.community_min_weight ?? 1;
   try {
-    matchConfig = await tagsApi.setMatchConfig(enabled.checked, similarityThreshold);
-    renderMatchConfig();
-    toastSuccess(
-      matchConfig.enabled
-        ? `Generated tags will be matched at ≥ ${matchConfig.similarity_threshold.toFixed(2)} similarity.`
-        : "Automatic tag matching disabled.",
+    matchConfig = await tagsApi.setMatchConfig(
+      enabled.checked,
+      similarityThreshold,
+      groupingMethod,
+      communityMinWeight,
     );
+    renderMatchConfig();
+    const grouping =
+      matchConfig.grouping_method === "community"
+        ? `Auto-group will detect communities from articles sharing ≥ ${matchConfig.community_min_weight} tag(s).`
+        : "Auto-group will compare tag names with the local encoder.";
+    toastSuccess(matchConfig.enabled ? grouping : "Automatic tag matching disabled.");
   } catch (error) {
     toastError(`Could not save tag matching settings: ${error}`);
   }
@@ -197,7 +236,7 @@ function renderMappings() {
   if (mappings.length === 0) {
     const empty = document.createElement("p");
     empty.className = "tag-manager-empty";
-    empty.textContent = "No mappings yet. Apply a cluster to create one.";
+    empty.textContent = "No synonym mappings yet.";
     list.appendChild(empty);
     return;
   }
@@ -237,50 +276,6 @@ function renderBlocked() {
   }
 }
 
-function renderClusters() {
-  const section = document.getElementById("tag-clusters-section");
-  const list = document.getElementById("tag-clusters-list");
-  if (!section || !list) return;
-  list.replaceChildren();
-  section.hidden = clusters.length === 0;
-  for (const [index, cluster] of clusters.entries()) {
-    const card = document.createElement("div");
-    card.className = "tag-cluster-card";
-    const heading = document.createElement("h4");
-    heading.textContent = `Cluster ${index + 1}`;
-    card.appendChild(heading);
-    const hint = document.createElement("p");
-    hint.className = "tag-cluster-hint";
-    hint.textContent = "Choose the subject name to keep. Other members will map to it.";
-    card.appendChild(hint);
-
-    const choices = document.createElement("div");
-    choices.className = "tag-cluster-choices";
-    for (const [memberIndex, member] of cluster.members.entries()) {
-      const label = document.createElement("label");
-      label.className = "tag-cluster-choice";
-      const radio = document.createElement("input");
-      radio.type = "radio";
-      radio.name = `tag-cluster-${index}`;
-      radio.value = member.name;
-      radio.checked = memberIndex === 0;
-      label.append(radio, document.createTextNode(member.name));
-      const usage = document.createElement("small");
-      usage.textContent = `${member.usage_count} articles`;
-      label.appendChild(usage);
-      if (member.aliases.length > 0) {
-        const aliases = document.createElement("small");
-        aliases.textContent = `known: ${member.aliases.join(", ")}`;
-        label.appendChild(aliases);
-      }
-      choices.appendChild(label);
-    }
-    card.appendChild(choices);
-    card.appendChild(button("Apply selected head", "tag-action-button primary", () => void applyCluster(index)));
-    list.appendChild(card);
-  }
-}
-
 export async function createTagFromForm() {
   const input = document.getElementById("tag-create-name") as HTMLInputElement | null;
   if (!input || !input.value.trim()) return;
@@ -311,7 +306,7 @@ async function removeTag(name: string) {
   try {
     await tagsApi.remove(name);
     deletingTag = null;
-    toastSuccess("Tag removed from articles.");
+    toastSuccess("Tag hidden from articles and future classification.");
     await refreshTagManager();
     notifyTagChange({ kind: "delete", name });
   } catch (error) {
@@ -319,55 +314,10 @@ async function removeTag(name: string) {
   }
 }
 
-export async function clusterTags() {
-  if (clustering) return;
-  clustering = true;
-  const clusterButton = document.getElementById("cluster-tags-btn") as HTMLButtonElement | null;
-  if (clusterButton) {
-    clusterButton.disabled = true;
-    clusterButton.textContent = "Clustering...";
-  }
-  setLoadingWithStatus("", "Comparing tag names with local embeddings...");
-  try {
-    clusters = await tagsApi.cluster();
-    renderClusters();
-    clearLoadingStatus(true, `Found ${clusters.length} similar tag cluster${clusters.length === 1 ? "" : "s"}`);
-    if (clusters.length === 0) toastInfo("No similar tag groups found.");
-  } catch (error) {
-    clearLoadingStatus(false, "Tag clustering failed");
-    toastError(`Could not cluster tags: ${error}`);
-  } finally {
-    clustering = false;
-    if (clusterButton) {
-      clusterButton.disabled = false;
-      clusterButton.textContent = "Cluster similar tags";
-    }
-  }
-}
-
-async function applyCluster(index: number) {
-  const cluster = clusters[index];
-  if (!cluster) return;
-  const selected = document.querySelector<HTMLInputElement>(
-    `input[name="tag-cluster-${index}"]:checked`,
-  )?.value;
-  if (!selected) return;
-  try {
-    const members = cluster.members.map(member => member.name);
-    await tagsApi.merge(selected, members);
-    clusters = clusters.filter((_, clusterIndex) => clusterIndex !== index);
-    toastSuccess(`Mapped cluster to ${selected}.`);
-    await refreshTagManager();
-    notifyTagChange({ kind: "merge", canonicalName: selected, members });
-  } catch (error) {
-    toastError(`Could not apply cluster: ${error}`);
-  }
-}
-
 async function restoreTag(name: string) {
   try {
     await tagsApi.restore(name);
-    toastSuccess("Tag restored.");
+    toastSuccess("Tag restored to the vocabulary.");
     await refreshTagManager();
   } catch (error) {
     toastError(`Could not restore tag: ${error}`);

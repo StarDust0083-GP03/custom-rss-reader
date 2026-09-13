@@ -1,8 +1,10 @@
 pub mod feed_item;
+pub mod job;
 pub mod subscription;
 pub mod tag;
 
 pub use feed_item::*;
+pub use job::*;
 pub use subscription::*;
 
 use serde::Deserialize;

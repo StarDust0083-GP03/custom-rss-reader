@@ -25,10 +25,15 @@ pub struct FeedItem {
     pub is_read_later: bool,
     pub is_ignored: bool,
     pub tags: Option<String>,
-    pub category: Option<String>,
     pub translated_title: Option<String>,
     pub translated_content: Option<String>,
     pub translated_at: Option<DateTime<Utc>>,
+    /// SHA-256 of the source text this translation was produced from.
+    pub translated_source_hash: Option<String>,
+    /// Model that produced it.
+    pub translated_model: Option<String>,
+    /// Translation prompt revision that produced it.
+    pub translated_prompt_version: Option<i64>,
 }
 
 /// Lightweight projection of [`FeedItem`] for list views.
@@ -52,7 +57,6 @@ pub struct FeedItemSummary {
     pub is_read_later: bool,
     pub is_ignored: bool,
     pub tags: Option<String>,
-    pub category: Option<String>,
     pub translated_title: Option<String>,
     /// Whether a translated content exists (without transferring it).
     pub has_translation: bool,
@@ -80,7 +84,6 @@ pub struct NewFeedItem {
     pub is_read_later: bool,
     pub is_ignored: bool,
     pub tags: Option<String>,
-    pub category: Option<String>,
     pub translated_title: Option<String>,
     pub translated_content: Option<String>,
     pub translated_at: Option<DateTime<Utc>>,

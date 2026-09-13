@@ -65,6 +65,49 @@ function makeResizer(app: HTMLElement, el: HTMLElement | null, opts: ResizerOpts
   const width = () => parseFloat(app.style.getPropertyValue(opts.variable)) || 0;
   const setWidth = (w: number) => app.style.setProperty(opts.variable, `${w}px`);
 
+  // Separators are interactive controls, not decoration: they must be
+  // reachable and adjustable from the keyboard. Arrow keys move by 16px
+  // (with Shift for 64px), Home restores the default width, End collapses.
+  el.setAttribute("role", "separator");
+  el.setAttribute("aria-orientation", "vertical");
+  el.setAttribute("tabindex", "0");
+  const step = (ev: KeyboardEvent) => (ev.shiftKey ? 64 : 16);
+  el.addEventListener("keydown", (ev) => {
+    const available = app.clientWidth - DETAIL_MIN - opts.otherMin;
+    switch (ev.key) {
+      case "ArrowLeft":
+      case "ArrowRight": {
+        ev.preventDefault();
+        const delta = ev.key === "ArrowLeft" ? -step(ev) : step(ev);
+        const next = Math.min(Math.max(width() + delta, opts.min), available);
+        setWidth(next);
+        saveWidth(opts.key, next);
+        break;
+      }
+      case "Home": {
+        ev.preventDefault();
+        setWidth(opts.defaultWidth);
+        saveWidth(opts.key, opts.defaultWidth);
+        break;
+      }
+      case "End": {
+        ev.preventDefault();
+        saveWidth(opts.prevKey, width() || opts.defaultWidth);
+        setWidth(0);
+        saveWidth(opts.key, 0);
+        break;
+      }
+      case "Enter":
+      case " ": {
+        ev.preventDefault();
+        el.dispatchEvent(new MouseEvent("dblclick"));
+        break;
+      }
+      default:
+        break;
+    }
+  });
+
   el.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     el.classList.add("active");

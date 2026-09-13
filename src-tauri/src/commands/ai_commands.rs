@@ -15,11 +15,12 @@ use crate::ai::service::{AiService, LlmAiService};
 use crate::ai::{AiConfig, ClassificationRequest, ClassificationResponse};
 use crate::error::{AppError, Result};
 
+use super::streaming::TRANSLATION_PROMPT_VERSION;
 use super::AppState;
 
 /// Default AI configuration values.
-const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
-const DEFAULT_MODEL: &str = "deepseek-chat";
+pub const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
+pub const DEFAULT_MODEL: &str = "deepseek-chat";
 /// Translation cache expiry: 3 days.
 const TRANSLATION_CACHE_DAYS: i64 = 3;
 
@@ -78,10 +79,20 @@ pub async fn translate_item_bilingual(state: State<'_, AppState>, item_id: i64) 
         bilingual
     );
 
-    // Persist via the repository (no direct SQL in the command layer).
+    // Persist via the repository (no direct SQL in the command layer), with
+    // the identity of what produced this result so a later cache lookup can
+    // tell whether it still describes the article.
+    let source_hash = crate::ai::translation_source_hash(content);
     state
         .feed_repo
-        .update_translation(item_id, None, &result)
+        .update_translation(
+            item_id,
+            None,
+            &result,
+            &source_hash,
+            &ai_service.config_model(),
+            TRANSLATION_PROMPT_VERSION,
+        )
         .await?;
 
     Ok(result)
@@ -129,7 +140,7 @@ pub async fn classify_item(
         description,
         content_snippet,
         rss_title,
-        existing_tags: Some(state.feed_repo.find_active_tag_names().await?),
+        existing_tags: Some(state.feed_repo.find_vocabulary_names().await?),
     };
 
     let task = state
@@ -258,6 +269,7 @@ pub async fn set_ai_config(
     model: Option<String>,
     skip_test: Option<bool>,
     max_chars_per_segment: Option<usize>,
+    max_tokens: Option<u32>,
 ) -> Result<()> {
     // The UI deliberately displays a masked key. Treat an omitted, blank, or
     // masked value as "keep the existing secret" instead of persisting the
@@ -265,14 +277,20 @@ pub async fn set_ai_config(
     let existing =
         load_ai_config().unwrap_or_else(|_| AiConfig::default_for(DEFAULT_BASE_URL, DEFAULT_MODEL));
     let api_key = resolve_api_key(api_key, &existing.api_key)?;
-    let config = AiConfig {
+    let mut config = AiConfig {
         api_key,
         base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
         model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-        max_tokens: Some(4000),
+        // Reasoning models spend part of this on their chain of thought, and a
+        // bilingual answer repeats the source, so the old 4000 truncated real
+        // articles. `max_tokens` can be overridden from the settings dialog.
+        max_tokens: Some(max_tokens.unwrap_or(crate::ai::DEFAULT_MAX_TOKENS)),
         temperature: Some(0.3),
         max_chars_per_segment,
     };
+    // `https://host/v1/chat/completions` pasted as the base URL used to produce
+    // `.../chat/completions/chat/completions` — store the canonical form.
+    config.normalize_base_url();
 
     let service = Arc::new(LlmAiService::new(config.clone())?);
     let skip = skip_test.unwrap_or(false);
@@ -315,22 +333,12 @@ pub async fn get_ai_activity(state: State<'_, AppState>) -> Result<AiActivitySna
 /// intentionally non-fatal; manual AI commands still return the actionable
 /// configuration error when the user invokes them.
 pub fn load_configured_ai_service() -> Option<Arc<dyn AiService>> {
-    let config = match load_ai_config() {
-        Ok(config) => config,
-        Err(_) => return None,
-    };
-    match LlmAiService::new(config) {
-        Ok(service) => Some(Arc::new(service)),
-        Err(error) => {
-            eprintln!("[ai] configured service unavailable: {}", error);
-            None
-        }
-    }
+    crate::ai::load_configured_service()
 }
 
 /// Build or reuse the shared AI service. Saving settings replaces the slot,
 /// so all commands and the automatic feed classifier see the new config.
-async fn get_ai_service(state: &AppState) -> Result<Arc<dyn AiService>> {
+pub(crate) async fn get_ai_service(state: &AppState) -> Result<Arc<dyn AiService>> {
     if let Some(service) = state.ai_service.read().await.clone() {
         return Ok(service);
     }
@@ -341,19 +349,7 @@ async fn get_ai_service(state: &AppState) -> Result<Arc<dyn AiService>> {
 }
 
 fn load_ai_config() -> Result<AiConfig> {
-    let home_dir = dirs::home_dir()
-        .ok_or_else(|| AppError::Internal("Failed to get home directory".into()))?;
-    let config_file = home_dir.join(".rss-reader").join("ai_config.json");
-
-    if config_file.exists() {
-        let content = std::fs::read_to_string(&config_file)
-            .map_err(|e| AppError::Internal(format!("Failed to read config file: {}", e)))?;
-        let config: AiConfig = serde_json::from_str(&content)
-            .map_err(|e| AppError::Internal(format!("Failed to parse config file: {}", e)))?;
-        Ok(config)
-    } else {
-        Ok(AiConfig::default_for(DEFAULT_BASE_URL, DEFAULT_MODEL))
-    }
+    crate::ai::load_config()
 }
 
 fn save_ai_config(config: &AiConfig) -> Result<()> {

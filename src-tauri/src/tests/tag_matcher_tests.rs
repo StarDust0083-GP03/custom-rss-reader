@@ -12,24 +12,27 @@ use async_trait::async_trait;
 use chromadb::embeddings::EmbeddingFunction;
 
 use super::helpers::TestEnv;
+use crate::models::tag::embedding_text;
 use crate::services::tag_matcher::{TagMatchConfig, TagMatcher};
 
 /// Deterministic embedder: known names get fixed 2-D vectors, unknown names
 /// get an orthogonal "far away" vector. Counts how many names were embedded.
 struct FakeEmbedder {
-    vectors: HashMap<&'static str, Vec<f32>>,
+    vectors: HashMap<String, Vec<f32>>,
     calls: AtomicUsize,
 }
 
 impl FakeEmbedder {
     fn new() -> Arc<Self> {
         let mut vectors = HashMap::new();
-        vectors.insert("machine_learning", vec![1.0, 0.0]);
+        // Keys are encoder inputs, so the fixtures stay in stored `snake_case`
+        // while the matcher normalizes on the way in.
+        vectors.insert(embedding_text("machine_learning"), vec![1.0, 0.0]);
         // ~0.95 cosine with machine_learning
-        vectors.insert("deep_learning", vec![0.95, 0.312]);
+        vectors.insert(embedding_text("deep_learning"), vec![0.95, 0.312]);
         // ~0.80 cosine with machine_learning
-        vectors.insert("neural_networks", vec![0.8, 0.6]);
-        vectors.insert("cooking", vec![0.0, 1.0]);
+        vectors.insert(embedding_text("neural_networks"), vec![0.8, 0.6]);
+        vectors.insert(embedding_text("cooking"), vec![0.0, 1.0]);
         Arc::new(Self {
             vectors,
             calls: AtomicUsize::new(0),
@@ -49,7 +52,7 @@ impl EmbeddingFunction for FakeEmbedder {
             .iter()
             .map(|doc| {
                 self.vectors
-                    .get(*doc)
+                    .get(&embedding_text(doc))
                     .cloned()
                     .unwrap_or_else(|| vec![-1.0, 0.0])
             })
@@ -72,12 +75,157 @@ fn matcher(embedder: Arc<dyn EmbeddingFunction>, threshold: f32, enabled: bool) 
         TagMatchConfig {
             enabled,
             similarity_threshold: threshold,
+            ..TagMatchConfig::default()
         },
     )
 }
 
 fn strings(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| name.to_string()).collect()
+}
+
+fn tags_of(item: &crate::models::FeedItem) -> Vec<String> {
+    serde_json::from_str(item.tags.as_deref().unwrap_or("[]")).unwrap()
+}
+
+/// Seed one article so save/resolve behaviour can be asserted end to end.
+async fn seed_item(env: &TestEnv, guid: &str) -> crate::models::FeedItem {
+    let sub_id = env
+        .repo
+        .create(super::helpers::new_sub("https://example.com/feed.xml"))
+        .await
+        .unwrap()
+        .id;
+    env.feed_repo
+        .create(crate::models::NewFeedItem {
+            subscription_id: sub_id,
+            guid: Some(guid.into()),
+            title: "Adoption item".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_similar_name_folds_into_the_vocabulary_and_the_rest_stays_its_own() {
+    let env = TestEnv::new().await;
+    env.feed_repo.create_tag("machine_learning").await.unwrap();
+    let item = seed_item(&env, "vocab-1").await;
+    let matcher = matcher(FakeEmbedder::new(), 0.85, true);
+
+    // deep_learning is close to a known word, gardening is not.
+    let resolved = matcher
+        .resolve(
+            env.feed_repo.as_ref(),
+            &strings(&["deep_learning", "gardening"]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved, vec!["machine_learning", "gardening"]);
+
+    env.feed_repo
+        .save_tags(item.id, &serde_json::to_string(&resolved).unwrap())
+        .await
+        .unwrap();
+    let saved = env.feed_repo.find_by_id(item.id).await.unwrap();
+    assert_eq!(tags_of(&saved), vec!["machine_learning", "gardening"]);
+
+    // The synonym is recorded on the word it folded into, and the unrelated
+    // subject joins the vocabulary as its own entry rather than being swallowed
+    // by an approximate match.
+    let catalog = env.feed_repo.find_tag_catalog().await.unwrap();
+    let head = catalog
+        .iter()
+        .find(|entry| entry.name == "machine_learning")
+        .unwrap();
+    assert_eq!(head.aliases, vec!["deep_learning"]);
+    assert_eq!(
+        env.feed_repo.find_vocabulary_names().await.unwrap(),
+        vec!["gardening", "machine_learning"]
+    );
+}
+
+#[tokio::test]
+async fn a_synonym_rewrite_replays_from_raw_tags() {
+    let env = TestEnv::new().await;
+    env.feed_repo.create_tag("machine_learning").await.unwrap();
+    let item = seed_item(&env, "vocab-2").await;
+    env.feed_repo
+        .save_tags(item.id, r#"["deep_learning"]"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        tags_of(&env.feed_repo.find_by_id(item.id).await.unwrap()),
+        vec!["deep_learning"]
+    );
+
+    // Folding the two names together rewrites the article's display value...
+    env.feed_repo
+        .merge_tags("machine_learning", &["deep_learning".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(
+        tags_of(&env.feed_repo.find_by_id(item.id).await.unwrap()),
+        vec!["machine_learning"]
+    );
+
+    // The original answer remains in raw_tags even though the display value is
+    // now the canonical synonym.
+    let raw: Option<String> = sqlx::query_scalar("SELECT raw_tags FROM feed_items WHERE id = $1")
+        .bind(item.id)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+    assert!(raw.unwrap_or_default().contains("deep_learning"));
+}
+
+#[tokio::test]
+async fn blocking_hides_a_tag_from_every_surface_without_losing_the_record() {
+    let env = TestEnv::new().await;
+    env.feed_repo.create_tag("gardening").await.unwrap();
+    env.feed_repo.create_tag("machine_learning").await.unwrap();
+    let item = seed_item(&env, "vocab-3").await;
+    env.feed_repo
+        .save_tags(item.id, r#"["gardening", "machine_learning"]"#)
+        .await
+        .unwrap();
+
+    env.feed_repo.delete_tag("gardening").await.unwrap();
+    assert_eq!(
+        tags_of(&env.feed_repo.find_by_id(item.id).await.unwrap()),
+        vec!["machine_learning"]
+    );
+    // Gone from the vocabulary and from the filter list as well.
+    assert_eq!(
+        env.feed_repo.find_all_tags(None).await.unwrap(),
+        vec!["machine_learning"]
+    );
+    assert!(!env
+        .feed_repo
+        .find_vocabulary_names()
+        .await
+        .unwrap()
+        .contains(&"gardening".to_string()));
+    let raw: Option<String> = sqlx::query_scalar("SELECT raw_tags FROM feed_items WHERE id = $1")
+        .bind(item.id)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+    assert!(
+        raw.unwrap_or_default().contains("gardening"),
+        "the classifier's answer survives a delete"
+    );
+
+    env.feed_repo.restore_tag("gardening").await.unwrap();
+    env.feed_repo
+        .save_tags(item.id, r#"["gardening", "machine_learning"]"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        tags_of(&env.feed_repo.find_by_id(item.id).await.unwrap()),
+        vec!["gardening", "machine_learning"]
+    );
 }
 
 #[tokio::test]
@@ -154,7 +302,7 @@ async fn resolve_deduplicates_after_snapping_and_saves_canonically() {
 
     let saved = env
         .feed_repo
-        .save_tags(item.id, &serde_json::to_string(&resolved).unwrap(), "tech")
+        .save_tags(item.id, &serde_json::to_string(&resolved).unwrap())
         .await
         .unwrap();
     let tags: Vec<String> = serde_json::from_str(&saved.tags.unwrap()).unwrap();

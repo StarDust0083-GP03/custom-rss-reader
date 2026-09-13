@@ -4,10 +4,11 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import type { SyncProgress } from "../types";
+import type { IndexStatus, SyncProgress } from "../types";
 import { chroma as chromaApi } from "../api";
 import { state } from "../state";
 import { renderItems } from "../ui/render";
+import { beginLibraryQuery, isCurrentLibraryQuery } from "../ui/library-query";
 import { setLoadingWithStatus, clearLoadingStatus } from "../ui/status";
 import { success as toastSuccess, error as toastError, info as toastInfo } from "../toast";
 import { searchItems } from "./actions";
@@ -61,12 +62,16 @@ export async function findSimilarArticles() {
     return;
   }
   setLoadingWithStatus("", `Finding articles similar to "${S.selectedItem.title}"...`);
+  const seq = beginLibraryQuery();
   try {
     const items = await chromaApi.findSimilar(S.selectedItem.id, 20);
+    // Similar-articles results replace the same list search and filters use.
+    if (!isCurrentLibraryQuery(seq)) return;
     S.currentItems = items;
     renderItems();
     clearLoadingStatus(true, `Found ${items.length} similar articles`);
   } catch (error) {
+    if (!isCurrentLibraryQuery(seq)) return;
     console.error("Failed to find similar articles:", error);
     clearLoadingStatus(false, "Similar-articles search failed");
     toastError("Similar-articles search failed. Is ChromaDB running and indexed?");
@@ -152,18 +157,148 @@ export async function enableAndIndexChroma(data: {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Index status panel
+// ---------------------------------------------------------------------------
+
+/** Poll handle for the status panel; only runs while the modal is open. */
+let indexStatusTimer: number | null = null;
+
+
+/** State the card is rendering, mapped to the visual treatment in CSS. */
+type IndexState = "ready" | "running" | "behind" | "off";
+
+/** Sync phase, one word: the chip already says "Indexing…". */
+const PHASE_LABELS: Record<string, string> = {
+  deletes: "deleting",
+  upserts: "embedding",
+  walk: "scanning",
+  reconcile: "reconciling",
+};
+
+/**
+ * Render one status snapshot.
+ *
+ * Three rows, nothing more: a state chip, a meter, and one line of numbers.
+ * The dialog answers "is the index up to date?"; queue depth, sync phase and
+ * the collection id stay in the log, where they are actually useful.
+ */
+export function renderIndexStatus(status: IndexStatus): void {
+  const panel = document.getElementById("chroma-index-status");
+  const set = (id: string, value: string) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  };
+
+  const remaining = Math.max(0, status.total - status.indexed - status.queued_jobs);
+  const percent =
+    status.total > 0 ? Math.min(100, Math.round((status.indexed / status.total) * 100)) : 100;
+  const behind = status.enabled && remaining > 0 && status.queued_jobs === 0;
+  const state: IndexState = !status.enabled
+    ? "off"
+    : status.running
+      ? "running"
+      : behind
+        ? "behind"
+        : "ready";
+
+  if (panel) panel.dataset.state = state;
+
+  set("chroma-chip-text", {
+    ready: "Up to date",
+    running: "Indexing…",
+    behind: "Behind",
+    off: "Disabled",
+  }[state]);
+
+  const bar = document.getElementById("chroma-progress-bar");
+  if (bar) bar.style.width = `${percent}%`;
+  document.getElementById("chroma-progress")?.setAttribute("aria-valuenow", String(percent));
+
+  if (!status.enabled) {
+    set("chroma-summary", "Not indexing");
+    set("chroma-detail", "");
+    set("chroma-index-note", "Semantic search is off — search stays keyword-only.");
+    return;
+  }
+
+  const count = status.indexed.toLocaleString();
+  const total = status.total.toLocaleString();
+  // Use a strong element for the number without rebuilding the whole line.
+  const summary = document.getElementById("chroma-summary");
+  if (summary) {
+    summary.replaceChildren();
+    const strong = document.createElement("strong");
+    strong.textContent = count;
+    summary.append(strong, document.createTextNode(` of ${total} articles indexed`));
+  }
+
+  // Bottom-right, small: only what is moving or waiting.
+  const detail: string[] = [];
+  if (status.running) {
+    detail.push(PHASE_LABELS[status.phase] ?? (status.phase || "working"));
+    if (status.scan_total > 0) {
+      detail.push(`${status.done.toLocaleString()}/${status.scan_total.toLocaleString()}`);
+    }
+    if (status.elapsed_ms > 0) {
+      detail.push(`${Math.round(status.elapsed_ms / 1000)}s`);
+    }
+  }
+  if (status.queued_jobs > 0) {
+    detail.push(`${status.queued_jobs.toLocaleString()} queued`);
+  }
+  set("chroma-detail", detail.join(" · "));
+
+  set(
+    "chroma-index-note",
+    behind ? `Re-Index All catches up the remaining ${remaining.toLocaleString()}.` : "",
+  );
+}
+
+/** Fetch and render one snapshot. Never throws into the UI. */
+export async function refreshIndexStatus(): Promise<void> {
+  try {
+    renderIndexStatus(await chromaApi.indexStatus());
+  } catch (error) {
+    // The modal must stay usable when the backend is mid-restart.
+    const note = document.getElementById("chroma-index-note");
+    if (note) note.textContent = `Index status unavailable: ${error}`;
+    document.getElementById("chroma-index-status")?.setAttribute("data-state", "off");
+    const chip = document.getElementById("chroma-chip-text");
+    if (chip) chip.textContent = "Unavailable";
+  }
+}
+
+function startIndexStatusPolling(): void {
+  stopIndexStatusPolling();
+  void refreshIndexStatus();
+  indexStatusTimer = window.setInterval(() => void refreshIndexStatus(), 1500);
+}
+
+function stopIndexStatusPolling(): void {
+  if (indexStatusTimer !== null) {
+    window.clearInterval(indexStatusTimer);
+    indexStatusTimer = null;
+  }
+}
+
 export async function openChromaSettingsModal() {
   const modal = document.getElementById("chroma-settings-modal");
   if (modal) modal.classList.add("visible");
+  // Indexing is a long background job; show live progress instead of making the
+  // reader reopen the dialog to see whether anything happened.
+  startIndexStatusPolling();
   await loadChromaConfig();
 }
 
 export function closeChromaSettingsModal() {
+  stopIndexStatusPolling();
   const modal = document.getElementById("chroma-settings-modal");
   if (modal) modal.classList.remove("visible");
 }
 
 export async function reindexChroma() {
+  void refreshIndexStatus();
   setLoadingWithStatus("", "Re-indexing...");
   let poll: ReturnType<typeof setInterval> | undefined;
   try {
@@ -184,6 +319,7 @@ export async function reindexChroma() {
 }
 
 export async function chromaHealthCheck() {
+  void refreshIndexStatus();
   try {
     const ok = await invoke<boolean>("chroma_health_check");
     if (ok) {

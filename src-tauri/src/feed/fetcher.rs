@@ -5,12 +5,39 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 use tokio::time::sleep;
 
+/// Largest decompressed body accepted for a feed (bytes).
+const MAX_FEED_BYTES: usize = 16 * 1024 * 1024;
+
+/// Largest decompressed body accepted for an article page (bytes).
+const MAX_WEBSITE_BYTES: usize = 8 * 1024 * 1024;
+
+/// HTTP validators for a conditional feed request.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FeedValidators<'a> {
+    pub etag: Option<&'a str>,
+    pub last_modified: Option<&'a str>,
+}
+
+/// Result of a (possibly conditional) feed fetch.
+#[derive(Debug, Clone)]
+pub struct FetchedFeed {
+    /// `None` when the server answered 304 Not Modified.
+    pub body: Option<String>,
+    pub final_url: String,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
 /// HTTP-based feed and website content fetcher.
 ///
-/// Handles User-Agent rotation, RSSHub URL rewriting, retry with
-/// exponential backoff, and website content extraction. Compression is
-/// handled transparently by the underlying reqwest client (`gzip` and
-/// `brotli` features are enabled in `Cargo.toml`).
+/// Handles User-Agent rotation, retry with exponential backoff, bounded body
+/// reads, and website content extraction. Compression is handled transparently
+/// by the underlying reqwest client (`gzip` and `brotli` features are enabled
+/// in `Cargo.toml`).
+///
+/// The URL given by the caller is the URL fetched. A mirror is only used when
+/// `RSSHUB_MIRROR` is set explicitly — silently substituting a host meant the
+/// app talked to a server the subscription never named.
 pub struct FeedFetcher {
     client: Client,
     /// Separate client for article pages so redirects cannot turn a public
@@ -33,19 +60,27 @@ impl FeedFetcher {
         })
     }
 
-    /// Fetch and decompress a feed (RSS/Atom) from a URL.
+    /// Fetch a feed, sending `If-None-Match`/`If-Modified-Since` when the
+    /// caller has validators from the previous fetch.
     ///
-    /// Handles RSSHub domain rewriting, retry with exponential backoff (max 3),
-    /// User-Agent rotation (5 variants), and site-specific request headers.
-    pub async fn fetch_feed(&self, url: &str) -> Result<String> {
-        let final_url = rewrite_rsshub_url(url);
+    /// Retries with exponential backoff (max 3), rotating the User-Agent so a
+    /// 403 can pass on a later attempt.
+    pub async fn fetch_feed_conditional(
+        &self,
+        url: &str,
+        validators: FeedValidators<'_>,
+    ) -> Result<FetchedFeed> {
+        let target = apply_rsshub_mirror(url);
 
         let mut retry_count = 0;
         let max_retries = 3;
 
         loop {
-            match self.fetch_with_headers(&final_url, retry_count).await {
-                Ok(content) => return Ok(content),
+            match self
+                .fetch_with_headers(&target, retry_count, validators)
+                .await
+            {
+                Ok(feed) => return Ok(feed),
                 Err(e) if retry_count < max_retries && is_retryable_error(&e) => {
                     retry_count += 1;
                     let delay = Duration::from_millis(1000 * 2_u64.pow(retry_count));
@@ -62,7 +97,7 @@ impl FeedFetcher {
         let response = self
             .website_client
             .get(url)
-            .header("Accept", "text/html")
+            .header("Accept", "text/html,application/xhtml+xml")
             .send()
             .await
             .map_err(|e| AppError::Network(format!("HTTP request failed: {}", e)))?;
@@ -73,11 +108,10 @@ impl FeedFetcher {
                 response.status()
             )));
         }
+        ensure_text_response(&response, "article page")?;
+        let charset = declared_charset(&response);
 
-        let html = response
-            .text()
-            .await
-            .map_err(|e| AppError::Network(format!("Failed to read response body: {}", e)))?;
+        let html = read_bounded_text(response, MAX_WEBSITE_BYTES, charset.as_deref()).await?;
 
         // Extract main content; fallback to full HTML
         Ok(Self::extract_main_content(&html).unwrap_or(html))
@@ -85,7 +119,12 @@ impl FeedFetcher {
 
     /// Internal: fetch with headers, User-Agent rotation, and decompression
     /// (delegated to reqwest).
-    async fn fetch_with_headers(&self, url: &str, retry_count: u32) -> Result<String> {
+    async fn fetch_with_headers(
+        &self,
+        url: &str,
+        retry_count: u32,
+        validators: FeedValidators<'_>,
+    ) -> Result<FetchedFeed> {
         let user_agents = [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -136,28 +175,57 @@ impl FeedFetcher {
             }
         }
 
+        // Conditional GET: the server may answer 304 instead of resending an
+        // unchanged feed, which removes the parse work for quiet feeds.
+        if let Some(etag) = validators.etag {
+            request = request.header("If-None-Match", etag);
+        }
+        if let Some(last_modified) = validators.last_modified {
+            request = request.header("If-Modified-Since", last_modified);
+        }
+
         let response = request
             .send()
             .await
             .map_err(|e| AppError::Network(format!("HTTP request failed: {}", e)))?;
 
         let status = response.status();
-        let url_after = response.url().clone();
+        let url_after = response.url().to_string();
+        let etag = header_string(&response, reqwest::header::ETAG);
+        let last_modified = header_string(&response, reqwest::header::LAST_MODIFIED);
+
+        if status == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok(FetchedFeed {
+                body: None,
+                final_url: url_after,
+                etag,
+                last_modified,
+            });
+        }
         if !status.is_success() {
             // Distinct error kinds so the retry policy can decide.
-            return Err(map_status_error(status, &url_after));
+            let parsed = validate_website_url(&url_after).or_else(|_| {
+                reqwest::Url::parse(&url_after).map_err(|_| AppError::Internal("bad url".into()))
+            })?;
+            return Err(map_status_error(status, &parsed));
         }
+        ensure_text_response(&response, "feed")?;
+        let charset = declared_charset(&response);
 
         // reqwest's gzip/brotli features transparently decompress when
         // Accept-Encoding is set automatically. We deliberately do NOT set
         // Accept-Encoding ourselves so this works; if we did, reqwest
         // disables its own decompression and we'd need to reimplement it.
-        let text = response
-            .text()
-            .await
-            .map_err(|e| AppError::Network(format!("Failed to read response body: {}", e)))?;
+        // Reading chunk-wise bounds the DECOMPRESSED size, which is what
+        // actually occupies memory.
+        let text = read_bounded_text(response, MAX_FEED_BYTES, charset.as_deref()).await?;
 
-        Ok(text)
+        Ok(FetchedFeed {
+            body: Some(text),
+            final_url: url_after,
+            etag,
+            last_modified,
+        })
     }
 
     /// Extract main content from HTML using CSS selectors.
@@ -311,6 +379,17 @@ fn is_non_public_ip(ip: IpAddr) -> bool {
                 || ip == Ipv4Addr::BROADCAST
         }
         IpAddr::V6(ip) => {
+            // IPv4-mapped (`::ffff:a.b.c.d`) and the deprecated IPv4-compatible
+            // (`::a.b.c.d`) forms both carry an IPv4 destination. None of the v6
+            // predicates below match them, so without this normalization the
+            // article-fetch guard reports loopback, private, and link-local
+            // destinations as public. `::` and `::1` are checked after, by the
+            // v6 predicates that describe them exactly.
+            if !ip.is_unspecified() && !ip.is_loopback() {
+                if let Some(v4) = ip.to_ipv4() {
+                    return is_non_public_ip(IpAddr::V4(v4));
+                }
+            }
             ip.is_loopback()
                 || ip.is_unspecified()
                 || ip.is_multicast()
@@ -320,17 +399,150 @@ fn is_non_public_ip(ip: IpAddr) -> bool {
     }
 }
 
-/// Rewrite RSSHub URLs to use the preferred mirror.
-fn rewrite_rsshub_url(url: &str) -> String {
-    if url.contains("rsshub.app") {
-        url.replace("rsshub.app", "rsshub.umzzz.com")
-    } else if url.contains("rsshub.avosapps.us") {
-        url.replace("rsshub.avosapps.us", "rsshub.umzzz.com")
-    } else if url.contains("rsshub.rssforever.com") {
-        url.replace("rsshub.rssforever.com", "rsshub.umzzz.com")
-    } else {
-        url.to_string()
+/// Hosts treated as RSSHub entry points for mirror substitution.
+const RSSHUB_HOSTS: [&str; 3] = ["rsshub.app", "rsshub.avosapps.us", "rsshub.rssforever.com"];
+
+/// Substitute a configured RSSHub mirror for a known RSSHub host.
+///
+/// Opt-in via the `RSSHUB_MIRROR` environment variable (e.g.
+/// `RSSHUB_MIRROR=https://rsshub.example.com`). Without it the URL is fetched
+/// exactly as stored: the previous unconditional rewrite quietly sent every
+/// rsshub.app subscription to a third-party host.
+fn apply_rsshub_mirror(url: &str) -> String {
+    let Ok(mirror) = std::env::var("RSSHUB_MIRROR") else {
+        return url.to_string();
+    };
+    let mirror = mirror.trim().trim_end_matches('/');
+    if mirror.is_empty() {
+        return url.to_string();
     }
+    for host in RSSHUB_HOSTS {
+        if url.contains(host) {
+            let base = mirror
+                .strip_prefix("https://")
+                .or_else(|| mirror.strip_prefix("http://"))
+                .unwrap_or(mirror);
+            return url.replace(host, base);
+        }
+    }
+    url.to_string()
+}
+
+/// The charset declared by `Content-Type`, e.g. `gb18030`.
+fn declared_charset(response: &reqwest::Response) -> Option<String> {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value.split(';').find_map(|part| {
+                let part = part.trim();
+                part.strip_prefix("charset=")
+                    .or_else(|| part.strip_prefix("charset ="))
+                    .map(|charset| charset.trim().trim_matches('"').to_ascii_lowercase())
+            })
+        })
+        .filter(|charset| !charset.is_empty())
+}
+
+/// Decode a body using the charset the server declared.
+///
+/// Decoding strictly as UTF-8 was a regression: pages served as GB18030/Big5
+/// (common for the Chinese sites this reader follows) or latin-1 failed the
+/// whole fetch, so the article silently kept its RSS teaser instead of the
+/// full text. Undecodable bytes are replaced, exactly like the browser (and
+/// the previous `reqwest::Response::text`) would do — losing a character beats
+/// losing the article.
+fn decode_body(bytes: Vec<u8>, charset: Option<&str>) -> String {
+    let encoding = charset
+        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        .unwrap_or(encoding_rs::UTF_8);
+    let (text, _, had_errors) = encoding.decode(&bytes);
+    if had_errors {
+        eprintln!(
+            "[fetch] replaced undecodable bytes while decoding a {} response",
+            encoding.name()
+        );
+    }
+    text.into_owned()
+}
+
+/// Read a response body, refusing bodies past `limit`.
+async fn read_bounded_text(
+    mut response: reqwest::Response,
+    limit: usize,
+    charset: Option<&str>,
+) -> Result<String> {
+    if let Some(length) = response.content_length() {
+        if length as usize > limit {
+            return Err(AppError::Network(format!(
+                "response of {} bytes exceeds the {} byte limit",
+                length, limit
+            )));
+        }
+    }
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| AppError::Network(format!("Failed to read response body: {}", e)))?
+    {
+        if body.len() + chunk.len() > limit {
+            return Err(AppError::Network(format!(
+                "response exceeds the {} byte limit",
+                limit
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(decode_body(body, charset))
+}
+
+/// Reject clearly non-text responses (a URL that points at a PDF or an image
+/// is a user error worth naming, not an empty feed).
+fn ensure_text_response(response: &reqwest::Response, what: &str) -> Result<()> {
+    let Some(content_type) = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Ok(());
+    };
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let is_binary = mime.starts_with("image/")
+        || mime.starts_with("video/")
+        || mime.starts_with("audio/")
+        || matches!(
+            mime.as_str(),
+            "application/pdf"
+                | "application/zip"
+                | "application/gzip"
+                | "application/octet-stream"
+                | "application/x-font-ttf"
+        );
+    if is_binary {
+        return Err(AppError::Parse(format!(
+            "URL returned {mime}, not {what} text"
+        )));
+    }
+    Ok(())
+}
+
+/// Read a response header as a string, if present and valid ASCII.
+fn header_string(
+    response: &reqwest::Response,
+    header: reqwest::header::HeaderName,
+) -> Option<String> {
+    response
+        .headers()
+        .get(header)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string())
 }
 
 /// Map an HTTP status to a retryable / non-retryable error category.
@@ -385,13 +597,30 @@ fn is_retryable_error(e: &AppError) -> bool {
 mod tests {
     use super::*;
 
+    /// Without an explicit mirror the URL is fetched exactly as stored.
     #[test]
-    fn test_rewrite_rsshub_url() {
-        let rewritten = rewrite_rsshub_url("https://rsshub.app/test/123");
-        assert_eq!(rewritten, "https://rsshub.umzzz.com/test/123");
+    fn test_rsshub_mirror_is_opt_in() {
+        unsafe { std::env::remove_var("RSSHUB_MIRROR") };
+        assert_eq!(
+            apply_rsshub_mirror("https://rsshub.app/test/123"),
+            "https://rsshub.app/test/123"
+        );
+        assert_eq!(
+            apply_rsshub_mirror("https://example.com/feed"),
+            "https://example.com/feed"
+        );
 
-        let unchanged = rewrite_rsshub_url("https://example.com/feed");
-        assert_eq!(unchanged, "https://example.com/feed");
+        unsafe { std::env::set_var("RSSHUB_MIRROR", "https://mirror.example.com/") };
+        assert_eq!(
+            apply_rsshub_mirror("https://rsshub.app/test/123"),
+            "https://mirror.example.com/test/123"
+        );
+        // A non-RSSHub feed is never rewritten, even with a mirror set.
+        assert_eq!(
+            apply_rsshub_mirror("https://example.com/feed"),
+            "https://example.com/feed"
+        );
+        unsafe { std::env::remove_var("RSSHUB_MIRROR") };
     }
 
     #[test]
@@ -458,6 +687,74 @@ mod tests {
         ] {
             let url = reqwest::Url::parse(raw).unwrap();
             assert!(is_safe_website_url(&url), "should allow {raw}");
+        }
+    }
+
+    /// IPv4-mapped IPv6 literals (`::ffff:127.0.0.1`) are IPv4 addresses, but
+    /// none of the IPv6 predicates match them — they must be unwrapped first
+    /// or loopback/link-local/private destinations look public.
+    #[test]
+    fn test_website_url_blocks_ipv4_mapped_ipv6() {
+        for raw in [
+            "http://[::ffff:127.0.0.1]/article",
+            "http://[::ffff:10.0.0.5]/article",
+            "http://[::ffff:192.168.1.1]/article",
+            "http://[::ffff:169.254.169.254]/latest/meta-data",
+            "http://[::127.0.0.1]/article",
+            "http://[::ffff:7f00:1]/article",
+        ] {
+            let url = reqwest::Url::parse(raw).unwrap();
+            assert!(!is_safe_website_url(&url), "should block {raw}");
+        }
+    }
+
+    #[test]
+    fn body_decoding_honours_the_declared_charset() {
+        // "中文" in GB18030 and in UTF-8 must decode to the same text.
+        let gb18030 = vec![0xD6u8, 0xD0, 0xCE, 0xC4];
+        assert_eq!(decode_body(gb18030.clone(), Some("gb18030")), "中文");
+        assert_eq!(decode_body(gb18030, Some("GBK")), "中文");
+        assert_eq!(
+            decode_body("中文".as_bytes().to_vec(), Some("utf-8")),
+            "中文"
+        );
+        // No charset declared: assume UTF-8.
+        assert_eq!(decode_body("中文".as_bytes().to_vec(), None), "中文");
+        // Undecodable bytes are replaced rather than failing the fetch.
+        let broken = vec![0x41u8, 0xFF, 0xFE, 0x42];
+        let decoded = decode_body(broken, Some("utf-8"));
+        assert!(decoded.starts_with('A') && decoded.ends_with('B'));
+    }
+
+    #[test]
+    fn test_is_non_public_ip_table() {
+        for raw in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.0.1",
+            "169.254.169.254",
+            "0.0.0.0",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fc00::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:169.254.169.254",
+        ] {
+            let ip: IpAddr = raw.parse().unwrap();
+            assert!(is_non_public_ip(ip), "should be non-public: {raw}");
+        }
+        for raw in [
+            "8.8.8.8",
+            "198.51.100.10",
+            "2606:4700::1111",
+            "::ffff:8.8.8.8",
+        ] {
+            let ip: IpAddr = raw.parse().unwrap();
+            assert!(!is_non_public_ip(ip), "should be public: {raw}");
         }
     }
 }

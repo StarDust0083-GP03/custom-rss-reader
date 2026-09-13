@@ -6,7 +6,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { open, save, ask } from "@tauri-apps/plugin-dialog";
-import { items as itemsApi, feeds as feedsApi, chroma as chromaApi, opml as opmlApi } from "../api";
+import { items as itemsApi, feeds as feedsApi, chroma as chromaApi, opml as opmlApi, subscriptions as subscriptionsApi, jobs as jobsApi } from "../api";
 import type { FeedItem, FeedItemSummary, Subscription } from "../types";
 import { state } from "../state";
 import {
@@ -19,6 +19,7 @@ import {
   iframeManager,
 } from "../ui/render";
 import { setLoadingWithStatus, clearLoadingStatus, resetCounts, incrementError } from "../ui/status";
+import { beginLibraryQuery, isCurrentLibraryQuery } from "../ui/library-query";
 import { success as toastSuccess, error as toastError, info as toastInfo } from "../toast";
 import { ensureMarkdownBackfill } from "./chroma";
 
@@ -33,14 +34,27 @@ let refreshInProgress = false;
 // selection doesn't paint over a fresh one.
 let selectItemSeq = 0;
 
-// Search has the same stale-response hazard as item loading, but it uses a
-// separate counter because a query can race with a mode switch or clearing the
-// input. Only the latest search generation may mutate the list or status bar.
-let searchItemsSeq = 0;
-
 // ---------------------------------------------------------------------------
 // Item selection + ignore timer
 // ---------------------------------------------------------------------------
+
+/**
+ * Reveal the reader pane. At ≤1024px CSS hides `.detail-panel` and only
+ * `.visible` reopens it — selecting an article previously loaded it into a
+ * pane that stayed at width 0.
+ */
+function showDetailPane() {
+  document.querySelector(".detail-panel")?.classList.add("visible");
+}
+
+/** Return to the list at narrow widths (the detail pane is an overlay there). */
+export function closeDetailPane() {
+  document.querySelector(".detail-panel")?.classList.remove("visible");
+  const card = S.selectedItem
+    ? document.querySelector<HTMLElement>(`.item-card[data-id="${S.selectedItem.id}"]`)
+    : null;
+  card?.focus({ preventScroll: false });
+}
 
 export async function selectItem(item: FeedItemSummary) {
   const seq = ++selectItemSeq;
@@ -73,61 +87,18 @@ export async function selectItem(item: FeedItemSummary) {
 
   renderItems(true);
   renderItemDetail(fullItem);
+  showDetailPane();
 
   if (!fullItem.is_read) {
     await markAsRead(fullItem.id, true);
   }
-
-  setupIgnoreTimer(fullItem);
 }
 
-/// How long a selected article must go without any engagement (scroll,
-/// click, translate) before it is treated as a quick skip.
-const QUICK_ABANDON_MS = 1000;
-
-// Set up timer to detect if user quickly abandons the article.
-function setupIgnoreTimer(item: FeedItem) {
-  // Clear any existing timer
-  if (ignoreTimer !== null) {
-    clearTimeout(ignoreTimer);
-    ignoreTimer = null;
-  }
-
-  // Don't set up timer for already ignored items
-  if (item.is_ignored) {
-    return;
-  }
-
-  ignoreTimer = setTimeout(async () => {
-    // Only mark as ignored if the same item is still selected and nothing
-    // cancelled the timer (scroll/click/translate call cancelIgnoreTimer,
-    // i.e. the user engaged). The timeout itself is the elapsed guard, so
-    // no redundant clock re-check is needed here — the previous
-    // `elapsed < 1000` check ran after a 1000 ms timeout and was never true.
-    if (S.selectedItem?.id === item.id && !item.is_ignored) {
-      try {
-        await invoke<boolean>("toggle_ignored", { itemId: item.id });
-        item.is_ignored = true;
-        renderItems(true);
-        console.log(`[Ignore] Article "${item.title}" marked as ignored (no engagement within ${QUICK_ABANDON_MS}ms)`);
-      } catch (error) {
-        console.error('[Ignore] Failed to toggle ignored:', error);
-      }
-    }
-    ignoreTimer = null;
-  }, QUICK_ABANDON_MS);
-}
-
-let ignoreTimer: ReturnType<typeof setTimeout> | null = null;
-
-// Cancel ignore timer when user takes an action (scroll, translate, etc.)
-export function cancelIgnoreTimer() {
-  if (ignoreTimer !== null) {
-    clearTimeout(ignoreTimer);
-    ignoreTimer = null;
-    console.log('[Ignore] Timer cancelled due to user action');
-  }
-}
+// "Ignored" is no longer derived from a timer. A one-second quiet period used
+// to mark the article the user had just opened as ignored, which mutated
+// library state the user never asked to change. Read/favorite/later remain
+// explicit actions; engagement-derived ranking needs its own product rule and
+// tests before it comes back.
 
 // ---------------------------------------------------------------------------
 // Item flags
@@ -170,20 +141,8 @@ export async function markAsRead(itemId: number, isRead: boolean) {
 export async function toggleFavorite(itemId: number) {
   try {
     const isFavorite = await invoke<boolean>("toggle_favorite", { itemId });
-    // 更新本地状态
-    const item = S.currentItems.find(i => i.id === itemId);
-    if (item) {
-      item.is_favorite = isFavorite;
-      renderItems();
-      if (S.selectedItem?.id === itemId) {
-        S.selectedItem.is_favorite = isFavorite;
-        const favoriteBtn = document.getElementById("favorite-btn");
-        if (favoriteBtn) {
-          favoriteBtn.classList.toggle("active", isFavorite);
-        }
-      }
-      toastSuccess(isFavorite ? "Added to favorites" : "Removed from favorites");
-    }
+    applyItemFlag(itemId, "is_favorite", isFavorite);
+    toastSuccess(isFavorite ? "Added to favorites" : "Removed from favorites");
   } catch (error) {
     console.error("Failed to toggle favorite:", error);
     toastError("Failed to toggle favorite");
@@ -194,24 +153,55 @@ export async function toggleFavorite(itemId: number) {
 export async function toggleReadLater(itemId: number) {
   try {
     const isReadLater = await invoke<boolean>("toggle_read_later", { itemId });
-    // 更新本地状态
-    const item = S.currentItems.find(i => i.id === itemId);
-    if (item) {
-      item.is_read_later = isReadLater;
-      renderItems();
-      if (S.selectedItem?.id === itemId) {
-        S.selectedItem.is_read_later = isReadLater;
-        const readLaterBtn = document.getElementById("read-later-btn");
-        if (readLaterBtn) {
-          readLaterBtn.classList.toggle("active", isReadLater);
-        }
-      }
-      toastSuccess(isReadLater ? "Added to Read Later" : "Removed from Read Later");
-    }
+    applyItemFlag(itemId, "is_read_later", isReadLater);
+    toastSuccess(isReadLater ? "Added to Read Later" : "Removed from Read Later");
   } catch (error) {
     console.error("Failed to toggle read later:", error);
     toastError("Failed to toggle read later");
   }
+}
+
+/**
+ * Write a boolean flag to every copy of the item and re-evaluate whether it
+ * still belongs to the active list.
+ *
+ * Flipping the flag only painted the card and the detail button, so an item
+ * un-favorited while the Favorites filter was active stayed in the list (and
+ * vice versa) until the next reload.
+ */
+function applyItemFlag(
+  itemId: number,
+  field: "is_favorite" | "is_read_later",
+  value: boolean,
+) {
+  const item = S.currentItems.find(i => i.id === itemId);
+  if (item) item[field] = value;
+  if (S.selectedItem?.id === itemId) S.selectedItem[field] = value;
+
+  if (!matchesActiveFilter(item ?? S.selectedItem, field, value)) {
+    S.currentItems = S.currentItems.filter(i => i.id !== itemId);
+  }
+
+  renderItems(true);
+  if (S.selectedItem?.id === itemId) {
+    const button = document.getElementById(field === "is_favorite" ? "favorite-btn" : "read-later-btn");
+    button?.classList.toggle("active", value);
+  }
+}
+
+/** Does an item still belong in the list the user is currently looking at? */
+function matchesActiveFilter(
+  item: FeedItemSummary | FeedItem | null,
+  field: "is_favorite" | "is_read_later",
+  value: boolean,
+): boolean {
+  if (!item) return true;
+  const flagFilters: Partial<Record<typeof S.currentFilter, typeof field>> = {
+    favorites: "is_favorite",
+    "read-later": "is_read_later",
+  };
+  if (flagFilters[S.currentFilter] !== field) return true;
+  return value;
 }
 
 // 批量标记已读
@@ -250,7 +240,11 @@ export async function addSubscription(data: {
 }) {
   setLoadingWithStatus(data.url, "Adding subscription...");
   try {
-    await invoke("add_subscription", data);
+    // Go through the typed adapter: it maps the form's snake_case fields to
+    // the camelCase keys the Tauri command expects (websiteUrl, rsshubUrl,
+    // useWebsite). Passing `data` straight to `invoke` silently dropped the
+    // website URL and the RSSHub mirror.
+    await subscriptionsApi.add(data);
     await loadSubscriptions();
     closeAddFeedModal();
     clearLoadingStatus(true, "Subscription added");
@@ -359,8 +353,28 @@ export async function refreshAllFeeds() {
 
   try {
     const result = await feedsApi.fetchAll();
-    clearLoadingStatus(true, `Refresh complete: ${result.new_items} new items`);
     await loadItems();
+    // Enrichment (classification, website caching, indexing) is queued, not
+    // awaited. Say so, and surface failures instead of letting them look like
+    // a fully successful refresh.
+    const stats = await jobsApi.stats().catch(() => null);
+    const queued = stats ? stats.queued + stats.running : 0;
+    const failed = stats?.failed ?? 0;
+    const blocked = blockedReasonLabel(stats?.blocked_reasons ?? []);
+    clearLoadingStatus(
+      true,
+      `Refresh complete: ${result.new_items} new item${result.new_items === 1 ? "" : "s"}` +
+        (queued > 0 ? ` · ${queued} background task${queued === 1 ? "" : "s"} queued` : "") +
+        (blocked ? ` · ${blocked}` : "") +
+        (failed > 0 ? ` · ${failed} failed` : ""),
+    );
+    if (failed > 0) {
+      toastInfo(`${failed} background task${failed === 1 ? "" : "s"} failed. Use ⋯ → Retry background work.`);
+    } else if (blocked) {
+      // Queued work waiting on configuration is not a failure, but it needs an
+      // action from the reader — say which one.
+      toastInfo(`Background work is waiting: ${blocked}.`);
+    }
   } catch (error) {
     console.error("Failed to refresh feeds:", error);
     incrementError(`Failed to refresh`);
@@ -377,7 +391,7 @@ export async function refreshAllFeeds() {
 
 // 搜索
 export async function searchItems(query: string) {
-  const seq = ++searchItemsSeq;
+  const seq = beginLibraryQuery();
   const trimmedQuery = query.trim();
   if (!trimmedQuery) {
     await loadItems();
@@ -394,38 +408,17 @@ export async function searchItems(query: string) {
     setLoadingWithStatus("", `Semantic search: "${query}"`);
     try {
       const results = await chromaApi.search(trimmedQuery, 50);
-      if (seq !== searchItemsSeq) return;
-      // Synthesize a FeedItemSummary from each semantic hit. Fields the hit
-      // doesn't carry (subscription_id, flags) are zeroed; navigation still
-      // works because `selectItem` re-fetches the full item by its real id.
-      S.currentItems = results.map(r => ({
-        id: r.item_id,
-        subscription_id: 0,
-        title: r.title,
-        link: r.url,
-        description: null,
-        author: r.author,
-        published_at: null,
-        fetched_at: "",
-        is_website_content: false,
-        is_read: false,
-        is_favorite: false,
-        is_read_later: false,
-        is_ignored: false,
-        tags: null,
-        category: null,
-        translated_title: null,
-        has_translation: false,
-        source_title: null,
-        source_url: null,
-      } as unknown as FeedItemSummary));
+      if (!isCurrentLibraryQuery(seq)) return;
+      // Real summaries from SQLite, in vector-ranking order: no synthesized
+      // subscription id, read state, or source name.
+      S.currentItems = results;
       renderItems();
       clearLoadingStatus(true, `Found ${results.length} semantic results`);
       console.log(
         `[search] done semantic in ${Math.round(performance.now() - searchT0)}ms hits=${results.length} query="${trimmedQuery}"`,
       );
     } catch (error) {
-      if (seq !== searchItemsSeq) return;
+      if (!isCurrentLibraryQuery(seq)) return;
       console.error(
         `[search] FAILED semantic after ${Math.round(performance.now() - searchT0)}ms:`,
         error,
@@ -439,7 +432,7 @@ export async function searchItems(query: string) {
   setLoadingWithStatus("", `Searching: "${query}"`);
   try {
     const items = await itemsApi.search(trimmedQuery, 100);
-    if (seq !== searchItemsSeq) return;
+    if (!isCurrentLibraryQuery(seq)) return;
     S.currentItems = items;
     renderItems();
     clearLoadingStatus(true, `Found ${items.length} items`);
@@ -447,7 +440,7 @@ export async function searchItems(query: string) {
       `[search] done text in ${Math.round(performance.now() - searchT0)}ms hits=${items.length} query="${trimmedQuery}"`,
     );
   } catch (error) {
-    if (seq !== searchItemsSeq) return;
+    if (!isCurrentLibraryQuery(seq)) return;
     console.error(`[search] FAILED text after ${Math.round(performance.now() - searchT0)}ms:`, error);
     clearLoadingStatus(false, "Search failed");
     toastError("Failed to search items");
@@ -503,6 +496,31 @@ export async function exportOpml() {
     console.error("Failed to export OPML:", error);
     clearLoadingStatus(false, "Export failed");
     toastError(`Failed to export OPML: ${error}`);
+  }
+}
+
+/** Turn the backend's machine-readable blockers into something readable. */
+function blockedReasonLabel(reasons: string[]): string {
+  const labels: Record<string, string> = {
+    ai_not_configured: "AI is not configured",
+    semantic_search_disabled: "semantic search is off",
+  };
+  return reasons.map((reason) => labels[reason] ?? reason).join(", ");
+}
+
+/** Put failed enrichment jobs back in the queue. */
+export async function retryFailedJobs() {
+  try {
+    const retried = await jobsApi.retryFailed();
+    const expired = await jobsApi.requeueExpired();
+    if (retried + expired === 0) {
+      toastInfo("No failed background work to retry");
+      return;
+    }
+    toastSuccess(`Retrying ${retried + expired} background task${retried + expired === 1 ? "" : "s"}`);
+  } catch (error) {
+    console.error("Failed to retry background jobs:", error);
+    toastError("Failed to retry background work");
   }
 }
 

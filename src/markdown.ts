@@ -28,6 +28,100 @@ export function configureMarked(): typeof marked {
   return marked;
 }
 
+// ---------------------------------------------------------------------------
+// Prose-only rewriting
+// ---------------------------------------------------------------------------
+
+/** A fence opening line: up to three spaces, then ``` or ~~~. */
+const FENCE_RE = /^ {0,3}(`{3,}|~{3,})/;
+
+/**
+ * Apply `transform` to prose only.
+ *
+ * The cleanup below repairs malformed article markdown, but fenced blocks and
+ * inline code spans are literal content: a sample showing `](literal)` or
+ * `![a b](c.png "t")` must render exactly as written. Code is detected here
+ * once, before any rewriting, and copied verbatim.
+ */
+function transformProse(md: string, transform: (prose: string) => string): string {
+  let out = "";
+  let prose = "";
+  let fence: string | null = null;
+
+  for (const line of splitLines(md)) {
+    const match = FENCE_RE.exec(line);
+    if (fence) {
+      out += line;
+      if (match && match[1][0] === fence[0] && match[1].length >= fence.length) {
+        fence = null;
+      }
+      continue;
+    }
+    if (match) {
+      out += transformInlineProse(prose, transform);
+      prose = "";
+      out += line;
+      fence = match[1];
+      continue;
+    }
+    prose += line;
+  }
+
+  return out + transformInlineProse(prose, transform);
+}
+
+/** Split into lines that keep their trailing newline (so output is byte-exact). */
+function splitLines(md: string): string[] {
+  const lines: string[] = [];
+  let start = 0;
+  while (start < md.length) {
+    const end = md.indexOf("\n", start);
+    if (end === -1) {
+      lines.push(md.slice(start));
+      break;
+    }
+    lines.push(md.slice(start, end + 1));
+    start = end + 1;
+  }
+  return lines;
+}
+
+/**
+ * Apply `transform` to the parts of `text` outside inline code spans.
+ * An unmatched backtick run is left in the prose — only a run with a closing
+ * run of the same length starts a code span.
+ */
+function transformInlineProse(text: string, transform: (prose: string) => string): string {
+  let out = "";
+  let start = 0;
+  let i = 0;
+
+  while (i < text.length) {
+    if (text[i] !== "`") {
+      i++;
+      continue;
+    }
+    let end = i;
+    while (text[end] === "`") end++;
+    const ticks = text.slice(i, end);
+    const close = text.indexOf(ticks, end);
+    if (close === -1) {
+      i = end;
+      continue;
+    }
+    out += transform(text.slice(start, i));
+    out += text.slice(i, close + ticks.length);
+    i = close + ticks.length;
+    start = i;
+  }
+
+  return out + transform(text.slice(start));
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup passes
+// ---------------------------------------------------------------------------
+
 /**
  * Remove orphan link fragments — a `](url)` span that has no matching
  * opening `[` (broken links in the source HTML, or the LLM's echo of a
@@ -40,6 +134,10 @@ export function configureMarked(): typeof marked {
  * URLs. Only `](` at depth 0 is an orphan.
  */
 export function stripOrphanLinkFragments(md: string): string {
+  return transformProse(md, stripOrphanLinkFragmentsInProse);
+}
+
+function stripOrphanLinkFragmentsInProse(md: string): string {
   let out = "";
   let bracketDepth = 0;
   let i = 0;
@@ -100,12 +198,16 @@ function cleanMarkdownSource(md: string): string {
 }
 
 /**
- * Percent-encode spaces inside image URLs. A space in `![](a b.png)` is
- * invalid markdown — marked refuses the link and renders the literal
+ * Percent-encode spaces inside image destinations. A space in `![](a b.png)`
+ * is invalid markdown — marked refuses the link and renders the literal
  * `![](<a>url</a> b.png)` garbage, displaying the image URL as text.
  * Spaces can only be fixed by encoding them (`%20`).
  */
-function encodeSpaceyImageUrls(md: string): string {
+export function encodeSpaceyImageUrls(md: string): string {
+  return transformProse(md, encodeSpaceyImageUrlsInProse);
+}
+
+function encodeSpaceyImageUrlsInProse(md: string): string {
   let out = "";
   let i = 0;
   const n = md.length;
@@ -123,7 +225,7 @@ function encodeSpaceyImageUrls(md: string): string {
         }
         if (depth === 0) {
           out += md.slice(i, urlStart);
-          out += md.slice(urlStart, j - 1).replace(/ /g, "%20") + ")";
+          out += encodeImageDestination(md.slice(urlStart, j - 1)) + ")";
           i = j;
           continue;
         }
@@ -133,4 +235,27 @@ function encodeSpaceyImageUrls(md: string): string {
     i++;
   }
   return out;
+}
+
+/** A markdown title tail: whitespace, then a quoted or parenthesized title. */
+const TITLE_TAIL_RE = /^[ \t\r\n]+(?:"[^"]*"|'[^']*'|\([^()]*\))[ \t\r\n]*$/;
+
+/**
+ * Encode spaces in an image destination, leaving a valid title alone.
+ *
+ * markdown splits `url "title"` itself; a `replace` over the whole span
+ * destroyed both the separator and the title, so
+ * `![alt](a.png "A title")` resolved to `a.png%20%22A%20title%22`. The title
+ * is the longest tail that parses as a title, so the split is searched from
+ * the end.
+ */
+function encodeImageDestination(inner: string): string {
+  for (let i = inner.length - 1; i >= 0; i--) {
+    if (!/\s/.test(inner[i])) continue;
+    const tail = inner.slice(i);
+    if (TITLE_TAIL_RE.test(tail)) {
+      return inner.slice(0, i).replace(/ /g, "%20") + tail;
+    }
+  }
+  return inner.replace(/ /g, "%20");
 }

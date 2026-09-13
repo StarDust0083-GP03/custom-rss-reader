@@ -22,7 +22,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::chroma::embeddings::OnnxEmbeddingFunction;
 use crate::error::{AppError, Result};
-use crate::models::tag::normalize_tag;
+use crate::models::tag::{embedding_text, normalize_tag};
 use crate::repositories::FeedItemRepository;
 
 /// Default threshold for silently snapping a generated name onto an existing
@@ -42,19 +42,50 @@ pub struct TagMatchConfig {
     /// Cosine similarity at or above which a generated name is rewritten to
     /// the closest catalog tag. Range `[0.5, 1.0]`.
     pub similarity_threshold: f32,
+    /// How the workspace's Auto-group proposes groups:
+    /// [`GROUPING_EMBEDDING`] compares tag text, [`GROUPING_COMMUNITY`] finds
+    /// communities in the article co-occurrence graph.
+    pub grouping_method: String,
+    /// Minimum shared articles for a co-occurrence edge. Only meaningful for
+    /// community grouping; it is the knob that decides how coarse the
+    /// communities come out. Range `[1, 20]`.
+    pub community_min_weight: i64,
 }
+
+/// Compare tag text with the local encoder.
+pub const GROUPING_EMBEDDING: &str = "embedding";
+/// Detect communities in the article co-occurrence graph.
+pub const GROUPING_COMMUNITY: &str = "community";
+/// Smallest co-occurrence edge kept: one shared article.
+pub const MIN_COMMUNITY_WEIGHT: i64 = 1;
+/// Largest co-occurrence floor worth offering: above this almost nothing links.
+pub const MAX_COMMUNITY_WEIGHT: i64 = 20;
 
 impl Default for TagMatchConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             similarity_threshold: DEFAULT_MATCH_THRESHOLD,
+            grouping_method: GROUPING_EMBEDDING.to_string(),
+            community_min_weight: MIN_COMMUNITY_WEIGHT,
         }
     }
 }
 
 impl TagMatchConfig {
     pub fn validate(&self) -> Result<()> {
+        if self.grouping_method != GROUPING_EMBEDDING && self.grouping_method != GROUPING_COMMUNITY {
+            return Err(AppError::Validation(format!(
+                "Unknown grouping method '{}'",
+                self.grouping_method
+            )));
+        }
+        if !(MIN_COMMUNITY_WEIGHT..=MAX_COMMUNITY_WEIGHT).contains(&self.community_min_weight) {
+            return Err(AppError::Validation(format!(
+                "Minimum shared articles must be between {} and {}",
+                MIN_COMMUNITY_WEIGHT, MAX_COMMUNITY_WEIGHT
+            )));
+        }
         if !self.similarity_threshold.is_finite()
             || !(MIN_MATCH_THRESHOLD..=MAX_MATCH_THRESHOLD).contains(&self.similarity_threshold)
         {
@@ -116,8 +147,9 @@ pub fn shared_tag_embedder() -> OnnxEmbeddingFunction {
 pub struct TagMatcher {
     embedder: Arc<dyn EmbeddingFunction>,
     config: RwLock<TagMatchConfig>,
-    /// Name → embedding. Tag names are short and embeddings depend only on
-    /// the string itself, so the cache never needs invalidation.
+    /// Name → embedding. Keyed by the encoder input, not by the stored name,
+    /// so names that differ only in punctuation share one vector. Embeddings
+    /// depend only on that text, so the cache never needs invalidation.
     cache: Mutex<HashMap<String, Vec<f32>>>,
 }
 
@@ -147,17 +179,23 @@ impl TagMatcher {
     }
 
     /// Embed names with the local model, reusing cached vectors.
+    ///
+    /// Names are normalized for the encoder on the way in
+    /// ([`embedding_text`]), which is the single place every path — matching,
+    /// grouping, and layout — goes through.
     pub async fn embed(&self, names: &[String]) -> Result<Vec<Vec<f32>>> {
         let mut cache = self.cache.lock().await;
-        let missing: Vec<&str> = names
+        let keys: Vec<String> = names.iter().map(|name| embedding_text(name)).collect();
+        let missing: Vec<String> = keys
             .iter()
-            .filter(|name| !cache.contains_key(name.as_str()))
-            .map(String::as_str)
+            .filter(|key| !cache.contains_key(key.as_str()))
+            .cloned()
             .collect();
         if !missing.is_empty() {
+            let refs: Vec<&str> = missing.iter().map(String::as_str).collect();
             let vectors = self
                 .embedder
-                .embed(&missing)
+                .embed(&refs)
                 .await
                 .map_err(|error| AppError::OperationFailed(format!("Embed tags: {}", error)))?;
             if vectors.len() != missing.len() {
@@ -165,13 +203,13 @@ impl TagMatcher {
                     "Embed tags: embedder returned a different number of vectors".into(),
                 ));
             }
-            for (name, vector) in missing.into_iter().zip(vectors) {
-                cache.insert(name.to_string(), vector);
+            for (key, vector) in missing.into_iter().zip(vectors) {
+                cache.insert(key, vector);
             }
         }
-        Ok(names
+        Ok(keys
             .iter()
-            .map(|name| cache.get(name.as_str()).cloned().unwrap_or_default())
+            .map(|key| cache.get(key).cloned().unwrap_or_default())
             .collect())
     }
 
@@ -194,6 +232,10 @@ impl TagMatcher {
         let blocked: std::collections::HashSet<String> =
             repo.find_blocked_tags().await?.into_iter().collect();
         let mut aliases: HashMap<String, String> = HashMap::new();
+        // Every known name is a candidate: the vocabulary is the whole library,
+        // not a curated subset, so a word that is merely rare still attracts the
+        // spelling variants of itself.
+        let vocabulary: Vec<String> = catalog.iter().map(|entry| entry.name.clone()).collect();
         for entry in &catalog {
             for alias in &entry.aliases {
                 aliases.insert(alias.clone(), entry.name.clone());
@@ -220,13 +262,12 @@ impl TagMatcher {
         }
 
         let config = self.config().await;
-        let catalog_names: Vec<String> = catalog.into_iter().map(|entry| entry.name).collect();
-        if !config.enabled || catalog_names.is_empty() {
+        if !config.enabled || vocabulary.is_empty() {
             return Ok(resolved);
         }
         let unknown: Vec<String> = resolved
             .iter()
-            .filter(|tag| !catalog_names.contains(tag))
+            .filter(|tag| !vocabulary.contains(tag))
             .cloned()
             .collect();
         if unknown.is_empty() {
@@ -234,7 +275,7 @@ impl TagMatcher {
         }
 
         let (catalog_vectors, unknown_vectors) =
-            match (self.embed(&catalog_names).await, self.embed(&unknown).await) {
+            match (self.embed(&vocabulary).await, self.embed(&unknown).await) {
                 (Ok(catalog_vectors), Ok(unknown_vectors)) => (catalog_vectors, unknown_vectors),
                 (Err(error), _) | (_, Err(error)) => {
                     eprintln!("Tag matching skipped: {}", error);
@@ -245,7 +286,7 @@ impl TagMatcher {
         let mut replacements: HashMap<String, String> = HashMap::new();
         for (name, vector) in unknown.iter().zip(&unknown_vectors) {
             if let Some(index) = best_match(vector, &catalog_vectors, config.similarity_threshold) {
-                let head = catalog_names[index].clone();
+                let head = vocabulary[index].clone();
                 if let Err(error) = repo.add_tag_alias(name, &head).await {
                     eprintln!(
                         "Tag matching: could not store alias {} -> {}: {}",
@@ -254,6 +295,9 @@ impl TagMatcher {
                 }
                 replacements.insert(name.clone(), head);
             }
+            // Nothing similar enough: the name is kept as its own entry. Tying
+            // unrelated subjects together to keep a list short is exactly how
+            // `docker` stops meaning docker.
         }
         if replacements.is_empty() {
             return Ok(resolved);
@@ -333,18 +377,50 @@ mod tests {
         let low = TagMatchConfig {
             enabled: true,
             similarity_threshold: 0.2,
+            ..TagMatchConfig::default()
         };
         assert!(low.validate().is_err());
         let high = TagMatchConfig {
             enabled: true,
             similarity_threshold: 1.01,
+            ..TagMatchConfig::default()
         };
         assert!(high.validate().is_err());
         let nan = TagMatchConfig {
             enabled: true,
             similarity_threshold: f32::NAN,
+            ..TagMatchConfig::default()
         };
         assert!(nan.validate().is_err());
+    }
+
+    #[test]
+    fn config_validates_grouping_method_and_community_weight() {
+        assert!(TagMatchConfig::default().validate().is_ok());
+
+        let unknown_method = TagMatchConfig {
+            grouping_method: "louvain".into(),
+            ..TagMatchConfig::default()
+        };
+        assert!(unknown_method.validate().is_err());
+
+        let zero_weight = TagMatchConfig {
+            community_min_weight: 0,
+            ..TagMatchConfig::default()
+        };
+        assert!(zero_weight.validate().is_err());
+
+        let huge_weight = TagMatchConfig {
+            community_min_weight: 99,
+            ..TagMatchConfig::default()
+        };
+        assert!(huge_weight.validate().is_err());
+
+        // A settings file written before this option existed still loads, and
+        // the defaults keep the previous behaviour.
+        let legacy: TagMatchConfig = serde_json::from_str("{\"enabled\": false}").unwrap();
+        assert_eq!(legacy.grouping_method, GROUPING_EMBEDDING);
+        assert_eq!(legacy.community_min_weight, MIN_COMMUNITY_WEIGHT);
     }
 
     #[test]

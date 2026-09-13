@@ -14,6 +14,12 @@ pub struct Subscription {
     pub use_website: bool,
     pub auto_classify: bool,
     pub opml_attributes: Option<String>,
+    /// HTTP validators from the last successful fetch, used for conditional
+    /// GETs (an unchanged feed answers 304 instead of resending itself).
+    #[serde(default)]
+    pub http_etag: Option<String>,
+    #[serde(default)]
+    pub http_last_modified: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }

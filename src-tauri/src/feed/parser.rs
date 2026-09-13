@@ -43,28 +43,38 @@ pub fn parse_feed(feed_content: &str, subscription_id: i64) -> Result<Vec<NewFee
         ));
     }
 
-    // Check if content is HTML (error page)
-    if is_html_document(feed_content) {
-        let error_msg = if feed_content.contains("Obsidian") {
-            "This appears to be an Obsidian Publish page, not a valid RSS feed. Please check the feed URL."
-        } else if feed_content.contains("Cloudflare") {
-            "Feed is protected by Cloudflare. Please try a different URL or contact the site owner."
-        } else {
-            "Feed returned HTML instead of RSS/Atom. The URL may not be a valid feed."
-        };
-        return Err(AppError::Parse(error_msg.into()));
-    }
-
-    let feed = parser::parse(feed_content.as_bytes()).map_err(|e| {
-        AppError::Parse(format!(
-            "{} (content type: {})",
-            e,
-            detect_content_type(feed_content)
-        ))
-    })?;
+    // Parse FIRST, diagnose second. Scanning the raw text for `<html` used to
+    // reject valid feeds whose entries embed an HTML document (a full-page
+    // article body is HTML inside XML), because the marker can legitimately
+    // appear anywhere in the payload. A document that only fails to parse is
+    // where an HTML error page is worth naming.
+    let feed = match parser::parse(feed_content.as_bytes()) {
+        Ok(feed) => feed,
+        Err(e) => {
+            if is_html_document(feed_content) {
+                let error_msg = if feed_content.contains("Obsidian") {
+                    "This appears to be an Obsidian Publish page, not a valid RSS feed. Please check the feed URL."
+                } else if feed_content.contains("Cloudflare") {
+                    "Feed is protected by Cloudflare. Please try a different URL or contact the site owner."
+                } else {
+                    "Feed returned HTML instead of RSS/Atom. The URL may not be a valid feed."
+                };
+                return Err(AppError::Parse(error_msg.into()));
+            }
+            return Err(AppError::Parse(format!(
+                "{} (content type: {})",
+                e,
+                detect_content_type(feed_content)
+            )));
+        }
+    };
 
     if feed.entries.is_empty() {
-        return Err(AppError::Parse("No items found in feed".into()));
+        // A well-formed feed with no entries is not a parse failure: some
+        // publishers ship an empty channel between publication runs. The
+        // caller sees zero new items instead of a scary error.
+        println!("[feed] parsed a valid feed with no entries; nothing to import");
+        return Ok(Vec::new());
     }
 
     let items: Vec<NewFeedItem> = feed
@@ -182,6 +192,33 @@ mod tests {
         // Regression: <html lang=...> previously slipped past the "<html>" check.
         let result = parse_feed(r#"<html lang="en"><body>not a feed</body></html>"#, 1);
         assert!(matches!(result.unwrap_err(), AppError::Parse(_)));
+    }
+
+    /// Regression: a valid RSS document whose entry content embeds HTML (a
+    /// full-page article body) must not be mistaken for an HTML error page.
+    #[test]
+    fn test_parse_feed_with_embedded_html_content() {
+        let feed = r#"<?xml version="1.0"?>
+        <rss version="2.0"><channel><title>Blog</title>
+          <item>
+            <title>Article</title>
+            <guid>https://example.com/1</guid>
+            <link>https://example.com/1</link>
+            <description><![CDATA[<html><body><p>Full-page body</p></body></html>]]></description>
+          </item>
+        </channel></rss>"#;
+        let items = parse_feed(feed, 1).expect("valid feed with HTML content must parse");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Article");
+    }
+
+    /// A well-formed but empty feed is an empty result, not an error.
+    #[test]
+    fn test_parse_empty_but_valid_feed() {
+        let feed = r#"<?xml version="1.0"?>
+        <rss version="2.0"><channel><title>Empty</title></channel></rss>"#;
+        let items = parse_feed(feed, 1).expect("valid empty feed must not fail");
+        assert!(items.is_empty());
     }
 
     #[test]

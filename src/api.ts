@@ -14,16 +14,25 @@ import type {
   Subscription,
   AiClassificationResponse,
   Recommendation,
-  SemanticSearchResult,
   ChromaConfigResponse,
   ChromaInitializationResponse,
+  IndexStatus,
   AiConfigResponse,
   AiActivitySnapshot,
+  JobStats,
   OpmlImportResult,
   MarkdownBackfillReport,
   TagCatalogEntry,
-  TagCluster,
+  GroupingMethod,
+  TagDictionaryStatus,
+  TagExplanationProgress,
+  TagIndexResult,
   TagMatchConfig,
+  TagOverview,
+  TopicAssignment,
+  TopicCategory,
+  TopicSuggestionProgress,
+  TopicWorkspace,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -93,6 +102,9 @@ export const subscriptions = {
 // Feed items
 // ---------------------------------------------------------------------------
 
+/** Rows per list request. The list has an explicit "Load more" path. */
+export const ITEM_PAGE_SIZE = 50;
+
 export const items = {
   list: (opts: {
     subscriptionId?: number | null;
@@ -103,7 +115,7 @@ export const items = {
       "get_items",
       {
         subscriptionId: opts.subscriptionId ?? null,
-        limit: opts.limit ?? 50,
+        limit: opts.limit ?? ITEM_PAGE_SIZE,
         offset: opts.offset ?? 0,
       },
       "items.list",
@@ -112,40 +124,45 @@ export const items = {
   resetContentMd: (id: number) => call<FeedItem>("reset_item_content_md", { id }, "items.resetContentMd"),
   search: (query: string, limit = 50) =>
     call<FeedItemSummary[]>("search_items", { query, limit }, "items.search"),
-  byTag: (tag: string, subscriptionId?: number | null) =>
+  byTag: (tag: string, subscriptionId?: number | null, offset = 0, limit = ITEM_PAGE_SIZE) =>
     call<FeedItemSummary[]>(
       "get_items_by_tag",
-      { tag, subscriptionId: subscriptionId ?? null, limit: 50, offset: 0 },
+      { tag, subscriptionId: subscriptionId ?? null, limit, offset },
       "items.byTag",
     ),
-  bySubscription: (subscriptionId: number) =>
+  bySubscription: (subscriptionId: number, offset = 0, limit = ITEM_PAGE_SIZE) =>
     call<FeedItemSummary[]>(
       "get_items_by_subscription",
-      { subscriptionId, limit: 50, offset: 0 },
+      { subscriptionId, limit, offset },
       "items.bySubscription",
     ),
-  unread: (subscriptionId?: number | null) =>
+  unread: (subscriptionId?: number | null, offset = 0, limit = ITEM_PAGE_SIZE) =>
     call<FeedItemSummary[]>(
       "get_unread",
-      { subscriptionId: subscriptionId ?? null, limit: 50, offset: 0 },
+      { subscriptionId: subscriptionId ?? null, limit, offset },
       "items.unread",
     ),
-  today: (subscriptionId?: number | null, unreadOnly = false) =>
+  today: (
+    subscriptionId?: number | null,
+    unreadOnly = false,
+    offset = 0,
+    limit = ITEM_PAGE_SIZE,
+  ) =>
     call<FeedItemSummary[]>(
       "get_today_items",
-      { subscriptionId: subscriptionId ?? null, unreadOnly, limit: 50, offset: 0 },
+      { subscriptionId: subscriptionId ?? null, unreadOnly, limit, offset },
       "items.today",
     ),
-  favorites: (subscriptionId?: number | null) =>
+  favorites: (subscriptionId?: number | null, offset = 0, limit = ITEM_PAGE_SIZE) =>
     call<FeedItemSummary[]>(
       "get_favorites",
-      { subscriptionId: subscriptionId ?? null, limit: 50, offset: 0 },
+      { subscriptionId: subscriptionId ?? null, limit, offset },
       "items.favorites",
     ),
-  readLater: (subscriptionId?: number | null) =>
+  readLater: (subscriptionId?: number | null, offset = 0, limit = ITEM_PAGE_SIZE) =>
     call<FeedItemSummary[]>(
       "get_read_later",
-      { subscriptionId: subscriptionId ?? null, limit: 50, offset: 0 },
+      { subscriptionId: subscriptionId ?? null, limit, offset },
       "items.readLater",
     ),
   tags: (subscriptionId?: number | null) =>
@@ -157,10 +174,10 @@ export const items = {
   toggleFavorite: (id: number) => call<boolean>("toggle_favorite", { itemId: id }, "items.toggleFavorite"),
   toggleReadLater: (id: number) =>
     call<boolean>("toggle_read_later", { itemId: id }, "items.toggleReadLater"),
-  saveTags: (id: number, tags: string[], category: string | null) =>
+  saveTags: (id: number, tags: string[]) =>
     call<FeedItem>(
       "save_item_tags",
-      { itemId: id, tags, category },
+      { itemId: id, tags },
       "items.saveTags",
     ),
 };
@@ -179,12 +196,49 @@ export const tags = {
     call<void>("merge_tags", { canonicalName, members }, "tags.merge"),
   remove: (name: string) => call<void>("delete_tag", { name }, "tags.remove"),
   restore: (name: string) => call<void>("restore_tag", { name }, "tags.restore"),
-  cluster: () => call<TagCluster[]>("cluster_tags", undefined, "tags.cluster"),
+  dictionaryStatus: () =>
+    call<TagDictionaryStatus>("tag_dictionary_status", undefined, "tags.dictionaryStatus"),
+  generateExplanations: (limit: number) =>
+    call<TagExplanationProgress>(
+      "generate_tag_explanations",
+      { limit },
+      "tags.generateExplanations",
+    ),
+  indexDictionary: () =>
+    call<TagIndexResult>("index_tag_dictionary", undefined, "tags.indexDictionary"),
   matchConfig: () => call<TagMatchConfig>("get_tag_match_config", undefined, "tags.matchConfig"),
-  setMatchConfig: (enabled: boolean, similarityThreshold: number) =>
+  overview: (subscriptionId?: number | null) =>
+    call<TagOverview>(
+      "get_tag_overview",
+      { subscriptionId: subscriptionId ?? null },
+      "tags.overview",
+    ),
+  topicWorkspace: () => call<TopicWorkspace>("get_topic_workspace", undefined, "tags.topicWorkspace"),
+  suggestTopics: (limit: number) =>
+    call<TopicSuggestionProgress>(
+      "suggest_topic_assignments",
+      { limit },
+      "tags.suggestTopics",
+    ),
+  applyTopics: (
+    categories: TopicCategory[],
+    assignments: TopicAssignment[],
+    expectedHash: string,
+  ) =>
+    call<TopicWorkspace>(
+      "apply_topic_changes",
+      { categories, assignments, expectedHash },
+      "tags.applyTopics",
+    ),
+  setMatchConfig: (
+    enabled: boolean,
+    similarityThreshold: number,
+    groupingMethod: GroupingMethod,
+    communityMinWeight: number,
+  ) =>
     call<TagMatchConfig>(
       "set_tag_match_config",
-      { enabled, similarityThreshold },
+      { enabled, similarityThreshold, groupingMethod, communityMinWeight },
       "tags.setMatchConfig",
     ),
 };
@@ -221,6 +275,20 @@ export const feeds = {
       { url, itemId: itemId ?? null },
       "feeds.fetchWebsiteContent",
     ),
+};
+
+// ---------------------------------------------------------------------------
+// Background jobs
+// ---------------------------------------------------------------------------
+
+export const jobs = {
+  /** Queue depth and recent enrichment failures. */
+  stats: () => call<JobStats>("get_job_stats", undefined, "jobs.stats"),
+  /** Put failed enrichment jobs back in the queue. */
+  retryFailed: () => call<number>("retry_failed_jobs", undefined, "jobs.retryFailed"),
+  /** Recover jobs whose worker died holding their lease. */
+  requeueExpired: () =>
+    call<number>("requeue_expired_jobs", undefined, "jobs.requeueExpired"),
 };
 
 // ---------------------------------------------------------------------------
@@ -332,10 +400,13 @@ export const chroma = {
       "chroma.enableAndIndex",
     ),
   search: (query: string, limit = 10) =>
-    call<SemanticSearchResult[]>("semantic_search", { query, limit }, "chroma.search"),
+    // The backend hydrates hits with their real SQLite rows, so semantic
+    // results carry the same flags/source identity as any other list.
+    call<FeedItemSummary[]>("semantic_search", { query, limit }, "chroma.search"),
   findSimilar: (itemId: number, limit = 10) =>
     call<FeedItemSummary[]>("find_similar_items", { itemId, limit }, "chroma.findSimilar"),
   reindex: () => call<string>("reindex_chromadb", undefined, "chroma.reindex"),
+  indexStatus: () => call<IndexStatus>("chroma_index_status", undefined, "chroma.indexStatus"),
   healthCheck: () => call<boolean>("chroma_health_check", undefined, "chroma.healthCheck"),
   backfillMarkdown: () =>
     call<MarkdownBackfillReport>("chroma_backfill_markdown", undefined, "chroma.backfillMarkdown"),

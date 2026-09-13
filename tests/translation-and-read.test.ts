@@ -131,15 +131,18 @@ describe("translation and read-state regressions", () => {
     });
     expect(calls).toContainEqual({
       cmd: "translate_item_bilingual_streaming",
-      args: { itemId: selected.id, force: true },
+      args: { itemId: selected.id, force: true, runId: expect.any(Number) },
     });
-    expect(selected.translated_content).toBeNull();
+    // The command result is the terminal snapshot. It used to be thrown away
+    // and the UI waited for a final event that a dropped event never delivers.
+    expect(selected.translated_content).toBe("ok");
   });
 
   it("removes the translating state immediately on cancellation", () => {
     const selected = item({ is_read: false });
     const controller = new AbortController();
     state.translationStateByItemId.set(selected.id, {
+      runId: 1,
       useTranslation: true,
       inProgressContent: "partial",
       abortController: controller,

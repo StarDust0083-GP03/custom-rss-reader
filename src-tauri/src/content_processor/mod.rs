@@ -168,19 +168,15 @@ pub fn clean_markdown(md: &str) -> String {
 
     while i < len {
         // Empty markdown link: [](
+        // Only a TERMINATED span is dropped. An unterminated `[` is malformed
+        // article text, not chrome — it must round-trip verbatim rather than
+        // swallowing the rest of the document (or panicking on a bad slice).
         if i + 2 < len && &bytes[i..i + 3] == b"[](" {
-            let mut depth = 1;
-            let mut j = i + 3;
-            while j < len && depth > 0 {
-                if bytes[j] == b'(' {
-                    depth += 1;
-                } else if bytes[j] == b')' {
-                    depth -= 1;
-                }
-                j += 1;
+            let (j, terminated) = scan_balanced_parens(bytes, i + 3);
+            if terminated {
+                i = j;
+                continue;
             }
-            i = j;
-            continue;
         }
 
         // Empty image: ![](
@@ -193,23 +189,19 @@ pub fn clean_markdown(md: &str) -> String {
         // just the `!` would let the empty-link `[](` branch below strip
         // the rest.
         if i + 3 < len && &bytes[i..i + 4] == b"![](" {
-            let mut depth = 1;
-            let mut j = i + 4;
-            while j < len && depth > 0 {
-                if bytes[j] == b'(' {
-                    depth += 1;
-                } else if bytes[j] == b')' {
-                    depth -= 1;
+            let (j, terminated) = scan_balanced_parens(bytes, i + 4);
+            if terminated {
+                // `j - 1` is the ASCII `)`, so every slice boundary is a
+                // UTF-8 char boundary. Only use `j` to advance i when the
+                // span was actually consumed.
+                let url = &md[i + 4..j - 1];
+                if !is_non_content_url(url, &path_patterns) {
+                    // Content image — copy the whole `![](...)` through.
+                    result.push_str(&md[i..j]);
                 }
-                j += 1;
+                i = j;
+                continue;
             }
-            let url = &md[i + 4..j.saturating_sub(1).max(i + 4)];
-            if !is_non_content_url(url, &path_patterns) {
-                // Content image — copy the whole `![](...)` through.
-                result.push_str(&md[i..j]);
-            }
-            i = j;
-            continue;
         }
 
         // Non-content link: [text](url with signin/vote/etc)
@@ -221,18 +213,8 @@ pub fn clean_markdown(md: &str) -> String {
                 // Check if followed by '('
                 if close_bracket_abs + 1 < len && bytes[close_bracket_abs + 1] == b'(' {
                     let url_start = close_bracket_abs + 2;
-                    let mut depth = 1;
-                    let mut j = url_start;
-                    while j < len && depth > 0 {
-                        if bytes[j] == b'(' {
-                            depth += 1;
-                        } else if bytes[j] == b')' {
-                            depth -= 1;
-                        }
-                        j += 1;
-                    }
-                    let url = &md[url_start..j - 1];
-                    if is_non_content_url(url, &path_patterns) {
+                    let (j, terminated) = scan_balanced_parens(bytes, url_start);
+                    if terminated && is_non_content_url(&md[url_start..j - 1], &path_patterns) {
                         i = j; // skip the entire [text](url)
                         continue;
                     }
@@ -247,6 +229,29 @@ pub fn clean_markdown(md: &str) -> String {
     }
 
     result
+}
+
+/// Scan a parenthesis-delimited span.
+///
+/// Returns the index just past the matching `)` and whether the span was
+/// terminated. When `from` is not a valid char boundary, or the span runs to
+/// the end of the document, the caller's byte range would be invalid — so
+/// callers must only slice `md[from..j - 1]` when `terminated` is true.
+///
+/// Article text is attacker-controlled: an unclosed `[x](` or a multi-byte
+/// character inside the span used to produce a reversed or mid-char slice.
+fn scan_balanced_parens(bytes: &[u8], from: usize) -> (usize, bool) {
+    let mut depth = 1usize;
+    let mut j = from;
+    while j < bytes.len() && depth > 0 {
+        if bytes[j] == b'(' {
+            depth += 1;
+        } else if bytes[j] == b')' {
+            depth -= 1;
+        }
+        j += 1;
+    }
+    (j, depth == 0)
 }
 
 /// Decide whether a markdown link URL is a non-content UI fragment.
@@ -686,5 +691,32 @@ mod tests {
         let md = "Some text\n\n```rust\nlet x = 1;\n```\n\nMore text.";
         let cleaned = clean_markdown(md);
         assert_eq!(cleaned, md);
+    }
+
+    /// Malformed article text used to panic: an unterminated `](` produced a
+    /// reversed slice, and a multi-byte character inside the span produced a
+    /// slice that was not on a char boundary. Article text is attacker
+    /// controlled, so these must round-trip instead.
+    #[test]
+    fn test_clean_markdown_unterminated_links_do_not_panic() {
+        for md in [
+            "[x](",
+            "[x](中",
+            "![](中",
+            "[](中",
+            "![alt](",
+            "before [x](中 after",
+        ] {
+            let cleaned = clean_markdown(md);
+            assert_eq!(cleaned, md, "malformed markdown must round-trip: {md}");
+        }
+    }
+
+    /// Terminated spans are still cleaned, including with multi-byte text
+    /// around and inside them.
+    #[test]
+    fn test_clean_markdown_still_strips_terminated_spans_with_unicode() {
+        assert_eq!(clean_markdown("中文 [](/m/vote/p/1) 中文"), "中文  中文",);
+        assert_eq!(clean_markdown("中文 ![x](中) 文"), "中文 ![x](中) 文",);
     }
 }

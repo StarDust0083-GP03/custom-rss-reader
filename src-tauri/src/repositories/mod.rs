@@ -1,14 +1,16 @@
 pub mod feed_item_repo;
+pub mod job_repo;
 pub mod subscription_repo;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::models::{
-    FeedItem, FeedItemSummary, NewFeedItem, NewSubscription, Subscription, UpdateSubscription,
+    FeedItem, FeedItemSummary, NewFeedItem, NewJob, NewSubscription, Subscription,
+    UpdateSubscription,
 };
 
 /// Lightweight row for embedding-index pipelines (ChromaDB).
@@ -31,17 +33,49 @@ pub struct IndexRow {
     pub link: Option<String>,
     pub author: Option<String>,
     pub published_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub category: Option<String>,
     pub description: Option<String>,
     pub content: Option<String>,
 }
 
-/// One active canonical tag and its existing usage/mappings.
+/// One catalog tag and its existing usage/synonyms.
 #[derive(Debug, Clone, Serialize)]
 pub struct TagCatalogEntry {
     pub name: String,
     pub usage_count: i64,
+    /// Names folded into this one, so the vocabulary reads as one entry per
+    /// subject instead of one per spelling.
     pub aliases: Vec<String>,
+}
+
+/// One entry of the topic navigation catalog. `id` is the stable identity:
+/// renaming a topic keeps its slot and its colour.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TopicCategory {
+    pub id: i64,
+    pub label: String,
+    pub definition: String,
+    pub sort_order: i64,
+}
+
+/// Where one tag belongs, or why it navigates nowhere.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TopicAssignment {
+    pub tag_name: String,
+    /// Set only when `state == "assigned"`.
+    pub category_id: Option<i64>,
+    pub state: String,
+    pub source: String,
+}
+
+/// Source data behind the community map, so the view can say how much of the
+/// library it is actually describing.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct TagOverviewCoverage {
+    pub total_items: i64,
+    pub tagged_items: i64,
+    /// Articles whose stored tag column is not readable JSON. They are left
+    /// out of the map and reported instead of silently counting as empty.
+    pub unreadable_items: i64,
 }
 
 /// Repository trait for feed item data access.
@@ -60,7 +94,17 @@ pub trait FeedItemRepository: Send + Sync {
     /// Insertion uses `ON CONFLICT (subscription_id, guid) DO NOTHING`; a
     /// conflicting row yields `AppError::Duplicate` (treat as "already
     /// exists", not as a hard failure).
+    #[allow(dead_code)] // exercised by tests and kept for direct inserts
     async fn create(&self, input: NewFeedItem) -> Result<FeedItem>;
+
+    /// Insert an item and its follow-up enrichment jobs in ONE transaction.
+    ///
+    /// Ingest must commit the article before any classification, website
+    /// fetch, or embedding runs: those are slow, failure-prone, and
+    /// replaceable, while the article is not. Enqueueing in the same
+    /// transaction also means a crash can never leave an article with no
+    /// record that enrichment is still owed.
+    async fn create_with_jobs(&self, input: NewFeedItem, jobs: Vec<NewJob>) -> Result<FeedItem>;
 
     /// Find a feed item by its ID.
     /// Returns `AppError::NotFound` if it doesn't exist.
@@ -124,12 +168,31 @@ pub trait FeedItemRepository: Send + Sync {
     async fn reset_content_md(&self, id: i64, content_md: &str) -> Result<FeedItem>;
 
     /// Persist (or overwrite) the translation of a feed item.
+    /// Store a translation together with the identity of what produced it.
+    ///
+    /// `source_hash`/`model`/`prompt_version` are what make a cached
+    /// translation trustworthy: a result is only reused when all three match
+    /// the article and configuration asking for it. Without them, editing an
+    /// article (or switching models) silently served the old text as if it
+    /// described the new source.
     async fn update_translation(
         &self,
         item_id: i64,
         translated_title: Option<&str>,
         translated_content: &str,
+        source_hash: &str,
+        model: &str,
+        prompt_version: i64,
     ) -> Result<FeedItem>;
+
+    /// Record which source text a stored translation came from, without
+    /// rewriting the translation or its timestamp.
+    ///
+    /// Used for rows that carry a translation but no provenance: written by a
+    /// build that predates validity tracking, or by a downgraded build after
+    /// the upgrade. Adopting the *current* stored source is the same one-time
+    /// decision migration v10 makes; after it, edits are detected normally.
+    async fn adopt_translation_provenance(&self, item_id: i64, source_hash: &str) -> Result<()>;
 
     /// List feed item summaries with optional subscription filter and pagination.
     async fn find_all(
@@ -165,14 +228,62 @@ pub trait FeedItemRepository: Send + Sync {
     /// List every active canonical tag, including unused manually-created tags.
     async fn find_tag_catalog(&self) -> Result<Vec<TagCatalogEntry>>;
 
-    /// List active canonical names for the classifier and clustering logic.
-    async fn find_active_tag_names(&self) -> Result<Vec<String>>;
+    /// Every name the vocabulary knows. This is what the classifier is offered
+    /// to reuse, so a word the library already has does not come back spelled
+    /// six ways.
+    async fn find_vocabulary_names(&self) -> Result<Vec<String>>;
 
-    /// List names that a user has removed and blocked from future writes.
-    async fn find_blocked_tags(&self) -> Result<Vec<String>>;
+    /// The topic navigation catalog.
+    async fn find_topic_categories(&self) -> Result<Vec<TopicCategory>>;
+
+    /// Store model proposals for later review, keyed for cheap reuse.
+    async fn save_topic_suggestions(&self, entries: &[(String, String, String)]) -> Result<()>;
+
+    /// Proposals already cached for these names, with the key they were made
+    /// under, so a caller can tell a reusable proposal from a stale one.
+    async fn find_topic_suggestions(
+        &self,
+        names: &[String],
+    ) -> Result<HashMap<String, (String, String)>>;
+
+    /// Every decided word and where it goes.
+    async fn find_topic_assignments(&self) -> Result<Vec<TopicAssignment>>;
+
+    /// Write the submitted catalog and assignments in ONE transaction. The
+    /// assignment table is replaced wholesale, which is what the workspace
+    /// edits; a caller that has not seen the current state is rejected before
+    /// reaching here by the expected-hash check.
+    async fn replace_topic_state(
+        &self,
+        categories: &[TopicCategory],
+        assignments: &[TopicAssignment],
+    ) -> Result<()>;
+
+    /// Article counts per raw tag (pre-alias names), scoped by subscription.
+    async fn find_raw_tag_usage(&self, subscription_id: Option<i64>) -> Result<HashMap<String, i64>>;
+
+    /// Co-occurrence over raw tags: `(a, b, shared articles)` with `a < b`.
+    async fn find_raw_tag_cooccurrence(
+        &self,
+        subscription_id: Option<i64>,
+    ) -> Result<Vec<(String, String, i64)>>;
+
+    /// Raw `(article_id, tag)` rows for one scope. The caller can build one
+    /// article-set index and answer several community count queries without
+    /// rescanning `feed_items` for every community.
+    async fn find_raw_tag_items(&self, subscription_id: Option<i64>) -> Result<Vec<(i64, String)>>;
+
+    /// How much of the scope carries readable tags at all.
+    async fn tag_overview_coverage(
+        &self,
+        subscription_id: Option<i64>,
+    ) -> Result<TagOverviewCoverage>;
 
     /// Create an unused canonical tag.
     async fn create_tag(&self, name: &str) -> Result<()>;
+
+    /// List names that a user has removed and blocked from future writes.
+    async fn find_blocked_tags(&self) -> Result<Vec<String>>;
 
     /// Rename a canonical tag and preserve the old name as an alias.
     async fn rename_tag(&self, old_name: &str, new_name: &str) -> Result<()>;
@@ -191,6 +302,43 @@ pub trait FeedItemRepository: Send + Sync {
     /// matched onto the catalog. No-op if the alias is already recorded.
     async fn add_tag_alias(&self, alias: &str, canonical_name: &str) -> Result<()>;
 
+    /// Drop a recorded mapping so `alias` becomes an independent name again.
+    /// Catalog tags still missing an LLM definition, alphabetical.
+    async fn find_tags_missing_explanation(&self, limit: i64) -> Result<Vec<String>>;
+
+    /// `(catalog tags, explained tags, indexed tags)` for the dictionary UI.
+    async fn tag_dictionary_status(&self) -> Result<(i64, i64, i64)>;
+
+    /// Persist definitions written by the LLM.
+    ///
+    /// Rewriting a definition also clears its stored vector, because a vector
+    /// computed from the previous text no longer describes the tag.
+    async fn save_tag_explanations(
+        &self,
+        entries: &[(String, String)],
+        prompt_version: i64,
+    ) -> Result<()>;
+
+    /// Every defined tag as `(name, explanation)`, alphabetical.
+    async fn find_tag_explanations(&self) -> Result<Vec<(String, String)>>;
+
+    /// Store dictionary vectors for one encoder identity.
+    async fn save_tag_embeddings(
+        &self,
+        key: &str,
+        entries: &[(String, Vec<f32>)],
+    ) -> Result<()>;
+
+    /// Dictionary vectors produced by `key`, keyed by tag name.
+    ///
+    /// A different key yields an empty map: vectors from another model or
+    /// another input format must never be mixed into one comparison.
+    async fn find_tag_embeddings(&self, key: &str) -> Result<HashMap<String, Vec<f32>>>;
+
+    /// Tag pairs seen on the same article, with the number of shared articles.
+    ///
+    /// The raw material for community detection: unlike name similarity, this
+    /// says which tags the reader's own library actually treats as related.
     /// Mark a feed item as read or unread.
     async fn mark_read(&self, id: i64, is_read: bool) -> Result<FeedItem>;
 
@@ -241,8 +389,7 @@ pub trait FeedItemRepository: Send + Sync {
     ) -> Result<Vec<FeedItemSummary>>;
 
     /// Save tags and category for a feed item.
-    async fn save_tags(&self, item_id: i64, tags: &str, category: &str) -> Result<FeedItem>;
-}
+    async fn save_tags(&self, item_id: i64, tags: &str) -> Result<FeedItem>;}
 
 /// Repository trait for subscription data access.
 #[async_trait]
@@ -278,4 +425,15 @@ pub trait SubscriptionRepository: Send + Sync {
     /// Toggle auto_classify on a subscription.
     /// Returns the updated subscription.
     async fn toggle_auto_classify(&self, id: i64) -> Result<Subscription>;
+
+    /// Persist the HTTP validators seen on the last successful fetch.
+    ///
+    /// Passing `None` clears them (the server stopped sending them, and a
+    /// stale `If-None-Match` would make every fetch answer 304).
+    async fn update_http_validators(
+        &self,
+        id: i64,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+    ) -> Result<()>;
 }

@@ -42,7 +42,6 @@ export interface FeedItem {
   is_ignored: boolean;
   /** JSON array string, e.g. `["rust","programming"]`. */
   tags: string | null;
-  category: string | null;
   translated_title: string | null;
   translated_content: string | null;
   translated_at: string | null;
@@ -64,7 +63,6 @@ export interface FeedItemSummary {
   is_read_later: boolean;
   is_ignored: boolean;
   tags: string | null;
-  category: string | null;
   translated_title: string | null;
   has_translation: boolean;
   /** Subscription (source) title, joined in by list queries. */
@@ -75,7 +73,6 @@ export interface FeedItemSummary {
 
 export interface AiClassificationResponse {
   tags: string[];
-  category: string | null;
 }
 
 export interface TagCatalogEntry {
@@ -84,14 +81,123 @@ export interface TagCatalogEntry {
   aliases: string[];
 }
 
-export interface TagCluster {
-  members: TagCatalogEntry[];
+// ---------------------------------------------------------------------------
+// Topic navigation and the community map
+// ---------------------------------------------------------------------------
+
+export interface TopicCategory {
+  id: number;
+  label: string;
+  definition: string;
+  sort_order: number;
 }
+
+export interface TopicAssignment {
+  tag_name: string;
+  category_id: number | null;
+  state: "assigned" | "context_only" | "review";
+  source: "manual" | "ai";
+}
+
+export interface TopicWord {
+  name: string;
+  usage_count: number;
+  category_id: number | null;
+  state: "assigned" | "context_only" | "review" | "undecided";
+  source: "manual" | "ai" | "none";
+}
+
+export interface TopicSuggestion {
+  name: string;
+  category_id: number | null;
+  state: "assigned" | "context_only" | "review";
+  reason: string;
+}
+
+export interface TopicSuggestionProgress {
+  suggestions: TopicSuggestion[];
+  remaining: number;
+  considered: number;
+  skipped: number;
+}
+
+export interface TopicWorkspace {
+  categories: TopicCategory[];
+  words: TopicWord[];
+  expected_hash: string;
+  undecided: number;
+}
+
+export interface TagOverviewNode {
+  name: string;
+  usage_count: number;
+  category_id: number | null;
+}
+
+export interface TagOverviewEdge {
+  source: string;
+  target: string;
+  shared_articles: number;
+}
+
+export interface TagOverviewCommunity {
+  id: string;
+  members: string[];
+  summary_tags: string[];
+  article_count: number;
+  children: TagOverviewCommunity[];
+}
+
+export interface TagOverviewCoverage {
+  total_items: number;
+  tagged_items: number;
+  unreadable_items: number;
+}
+
+export interface TagOverview {
+  snapshot_id: string;
+  scope_label: string;
+  coverage: TagOverviewCoverage;
+  nodes: TagOverviewNode[];
+  edges: TagOverviewEdge[];
+  communities: TagOverviewCommunity[];
+  singletons: string[];
+  blocked_excluded: number;
+  structuring: "cooccurrence" | "semantic";
+  warnings: string[];
+}
+
+/** Coverage of the LLM-written tag dictionary. */
+export interface TagDictionaryStatus {
+  tags: number;
+  explained: number;
+  indexed: number;
+}
+
+/** Progress of one explanation batch. */
+export interface TagExplanationProgress {
+  generated: number;
+  remaining: number;
+  tags: number;
+}
+
+/** Result of embedding the dictionary. */
+export interface TagIndexResult {
+  indexed: number;
+  total: number;
+}
+
+/** How Auto-group proposes groups. */
+export type GroupingMethod = "embedding" | "community";
 
 /** Settings for snapping AI-generated tag names onto the catalog. */
 export interface TagMatchConfig {
   enabled: boolean;
   similarity_threshold: number;
+  /** `embedding` compares tag text; `community` uses article co-occurrence. */
+  grouping_method: GroupingMethod;
+  /** Minimum shared articles for a co-occurrence edge. */
+  community_min_weight: number;
 }
 
 /** One AI-recommended article (manual "Picks" feature). */
@@ -180,3 +286,39 @@ export interface OpmlImportResult {
 
 export type FeedFilter = "all" | "unread" | "favorites" | "read-later" | "today" | "tag";
 export type SearchMode = "text" | "semantic";
+
+/** Queue depth for background enrichment work. */
+export interface JobStats {
+  queued: number;
+  running: number;
+  failed: number;
+  succeeded: number;
+  recent_errors: string[];
+  /** Queued jobs per kind (classify, website_markdown, chroma_upsert). */
+  queued_by_kind?: Record<string, number>;
+  /**
+   * Machine-readable reasons why queued work cannot progress, e.g.
+   * `ai_not_configured` or `semantic_search_disabled`.
+   */
+  blocked_reasons?: string[];
+}
+
+/** Index health shown in the Semantic DB settings panel. */
+export interface IndexStatus {
+  enabled: boolean;
+  running: boolean;
+  /** Stage of a running walk: "" | "deletes" | "upserts" | "walk" | "reconcile". */
+  phase: string;
+  /** Items with id <= indexed are known to be in the index. */
+  indexed: number;
+  /** Highest item id in the library. */
+  total: number;
+  queued_jobs: number;
+  pending_upserts: number;
+  pending_deletes: number;
+  collection_name: string;
+  collection_id: string | null;
+  done: number;
+  scan_total: number;
+  elapsed_ms: number;
+}

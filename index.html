@@ -23,6 +23,7 @@
                 <div id="sidebar-menu" class="dropdown-menu">
                     <button type="button" class="dropdown-item" data-action="import-opml">Import OPML</button>
                     <button type="button" class="dropdown-item" data-action="export-opml">Export OPML</button>
+                    <button type="button" class="dropdown-item" data-action="retry-jobs">Retry background work</button>
                 </div>
                 </div>
 
@@ -48,10 +49,13 @@
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
                             <span class="filter-label">Today</span>
                         </button>
-                        <button class="filter-tab" data-filter="tag">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/></svg>
-                            <span class="filter-label">Tags</span>
-                        </button>
+                        <div class="filter-tab filter-tab-group" data-filter="tag" role="button" tabindex="0" aria-haspopup="true" aria-label="Filter by tag">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/></svg>
+                                <span class="filter-label">Tags</span>
+                            <button type="button" id="tag-settings-btn" class="filter-tab-gear" title="Manage tags and matching settings" aria-label="Manage tags and matching settings">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 3.09 1.65 1.65 0 0 0 10 1.58V1.5a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 7c.14.36.44.65.8.8H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                            </button>
+                        </div>
                     </div>
                     <div class="subscription-list" id="subscription-list">
                         <!-- Subscriptions will be rendered here -->
@@ -60,11 +64,12 @@
             </aside>
 
             <!-- 列宽调节柄：拖动调宽，双击折叠/展开 -->
-            <div class="col-resizer" id="resizer-sidebar" title="拖动调宽，双击折叠/展开"></div>
+            <div class="col-resizer" id="resizer-sidebar" title="Drag, or use arrow keys, to resize; double-click (or Enter) collapses" aria-label="Resize sources column"></div>
 
             <!-- 中栏：内容列表 -->
             <section class="items-panel">
                 <div class="items-header">
+                    <button id="open-sidebar-btn" class="mobile-nav-btn" title="Sources" aria-label="Show sources" aria-expanded="false">☰ Sources</button>
                     <h2 id="current-feed-title">All Items</h2>
                     <div class="header-actions">
                         <button id="recommend-btn" title="AI Recommended Reads">★ Picks</button>
@@ -85,12 +90,13 @@
             </section>
 
             <!-- 列宽调节柄：拖动调宽，双击折叠/展开 -->
-            <div class="col-resizer" id="resizer-items" title="拖动调宽，双击折叠/展开"></div>
+            <div class="col-resizer" id="resizer-items" title="Drag, or use arrow keys, to resize; double-click (or Enter) collapses" aria-label="Resize article list column"></div>
 
             <!-- 右栏：内容详情 -->
             <section class="detail-panel">
                 <div class="detail-header">
                     <div class="detail-actions">
+                        <button id="detail-back-btn" class="mobile-nav-btn" title="Back to article list" aria-label="Back to article list">← Articles</button>
                         <button id="markdown-btn" title="View as rendered Markdown" class="active">Markdown</button>
                         <button id="webview-btn" title="View as live webpage">Web View</button>
                         <button id="translate-btn" title="Translate">Translate</button>
@@ -246,11 +252,11 @@
         <div id="tag-manager-modal" class="modal">
             <div class="modal-content tag-manager-content">
                 <button type="button" class="close-modal" aria-label="Close tag manager">×</button>
-                <h2>Manage tags</h2>
-                <p class="tag-manager-intro">Tags are global durable subjects. Article classification uses AI; this manager stays local and explicit.</p>
+                <h2>Manage vocabulary</h2>
+                <p class="tag-manager-intro">Maintain tag names and synonyms: create, rename, merge, hide, and restore. Topics handle navigation; this page handles the vocabulary underneath it.</p>
 
                 <form id="tag-create-form" class="tag-create-form">
-                    <label for="tag-create-name">Create tag</label>
+                    <label for="tag-create-name">Create vocabulary entry</label>
                     <div class="tag-create-row">
                         <input type="text" id="tag-create-name" placeholder="machine_learning" autocomplete="off" />
                         <button type="submit" class="tag-action-button primary">Create tag</button>
@@ -258,46 +264,144 @@
                     <small>Names are stored as lowercase English snake_case.</small>
                 </form>
 
-                <form id="tag-match-form" class="tag-create-form tag-match-form">
-                    <label for="tag-match-threshold">AI tag matching</label>
-                    <p class="tag-match-help">When AI classification returns a name that is not in the catalog, compare it with existing tags using local embeddings and silently reuse the closest tag if the similarity is at or above the threshold. The match is saved as a mapping.</p>
-                    <div class="tag-match-row">
-                        <label class="tag-match-toggle">
-                            <input type="checkbox" id="tag-match-enabled" checked />
-                            <span>Match generated tags to existing tags</span>
-                        </label>
-                    </div>
-                    <div class="tag-match-row">
-                        <input type="range" id="tag-match-threshold" min="0.5" max="1" step="0.01" value="0.85" aria-describedby="tag-match-threshold-value" />
-                        <output id="tag-match-threshold-value" for="tag-match-threshold">0.85</output>
-                        <button type="submit" class="tag-action-button primary">Save</button>
-                    </div>
-                    <small>Higher values merge only near-identical names (0.9+). Lower values also merge related subjects (0.7). Existing article tags are not changed.</small>
-                </form>
-
-                <div class="tag-manager-cluster-toolbar">
-                    <div>
-                        <h3>Similar names</h3>
-                        <p>Local embeddings suggest groups. Nothing changes until you choose a head.</p>
-                    </div>
-                    <button type="button" id="cluster-tags-btn" class="tag-action-button primary">Cluster similar tags</button>
-                </div>
-                <section id="tag-clusters-section" class="tag-manager-section" hidden>
-                    <div id="tag-clusters-list"></div>
-                </section>
-
                 <section class="tag-manager-section">
-                    <h3>Active tags</h3>
+                    <h3>Vocabulary</h3>
                     <div id="tag-catalog-list"></div>
                 </section>
                 <section class="tag-manager-section">
-                    <h3>Known mappings</h3>
+                    <h3>Synonym mappings</h3>
                     <div id="tag-mappings-list"></div>
                 </section>
                 <section class="tag-manager-section">
-                    <h3>Blocked names</h3>
+                    <h3>Hidden names</h3>
                     <div id="tag-blocked-list"></div>
                 </section>
+            </div>
+        </div>
+
+        <!-- Tag graph: the primary tag workspace. Vocabulary maintenance is
+             opened from the footer action inside this workspace. -->
+        <div id="tag-graph-modal" class="modal">
+            <div class="modal-content tag-graph-content">
+                <button type="button" class="close-modal" aria-label="Close tag manager">×</button>
+                <header class="tag-graph-head">
+                    <div class="tag-graph-title">
+                        <h2>Tags</h2>
+                        <p id="tag-graph-subtitle" class="tag-graph-sub">Loading…</p>
+                    </div>
+                    <div class="tag-graph-tools">
+                        <input type="search" id="tag-graph-search" data-tags-only hidden placeholder="Search tags" aria-label="Search tags" autocomplete="off" />
+                    </div>
+                </header>
+                <div class="tag-view-switch" role="tablist" aria-label="Tag workspace views">
+                    <button type="button" class="tag-view-tab is-active" role="tab" aria-selected="true" data-tag-view="overview">Overview</button>
+                    <button type="button" class="tag-view-tab" role="tab" aria-selected="false" data-tag-view="topics">Topics</button>
+                    <button type="button" class="tag-view-tab" role="tab" aria-selected="false" data-tag-view="tags">Tags</button>
+                </div>
+                <section class="tag-view-panel" id="tag-view-overview" role="tabpanel" aria-label="Community map">
+                    <div class="tag-map-stage">
+                        <canvas id="tag-map-canvas" tabindex="0" role="img" aria-label="Community map: each area is a community found in the articles, each dot is a tag coloured by its topic"></canvas>
+                        <div id="tag-map-tip" class="tag-map-tip" role="tooltip" hidden></div>
+                        <div class="tag-map-legend">
+                            <span><i class="tag-map-legend-dot"></i>dot colour = topic</span>
+                            <span><i class="tag-map-legend-area"></i>area = community</span>
+                            <span><i class="tag-map-legend-edge"></i>edge weight = shared articles</span>
+                        </div>
+                        <div class="tag-map-zoom">
+                            <button type="button" id="tag-map-out" aria-label="Zoom out">−</button>
+                            <button type="button" id="tag-map-in" aria-label="Zoom in">+</button>
+                            <button type="button" id="tag-map-fit">Fit</button>
+                        </div>
+                    </div>
+                    <div class="tag-map-side">
+                        <label class="tag-map-search">
+                            <span class="sr-only">Search tags or topics</span>
+                            <input type="search" id="tag-map-search" placeholder="Search tags or topics" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="tag-map-results" aria-expanded="false" />
+                        </label>
+                        <div id="tag-map-results" class="tag-map-results" role="listbox" aria-label="Tag search results"></div>
+                        <p id="tag-map-status" class="tag-map-status" role="status" aria-live="polite">Loading map…</p>
+                        <details class="tag-graph-panel" open>
+                            <summary>Library totals</summary>
+                            <dl class="tag-graph-stats" id="tag-graph-stats"></dl>
+                        </details>
+                        <p id="tag-map-legend" class="tag-map-warnings"></p>
+                        <p class="tag-map-hint">Drag to pan, scroll to zoom, or use the arrow keys on the map. Territory size follows the community's article count; a dot that has no topic yet is drawn hollow.</p>
+                    </div>
+                </section>
+                <section class="tag-view-panel" id="tag-view-topics" role="tabpanel" aria-label="Topic assignments" hidden>
+                    <div class="topic-layout">
+                        <div class="topic-column">
+                            <div class="topic-column-head">
+                                <h3>Topics</h3>
+                                <span class="topic-hint">≤ 50 entries</span>
+                            </div>
+                            <ul id="topic-category-list" class="topic-category-list"></ul>
+                        </div>
+                        <div class="topic-column topic-column-wide">
+                            <div class="topic-column-head">
+                                <h3 id="topic-detail-title">No topic</h3>
+                                <span id="topic-detail-count" class="topic-hint"></span>
+                            </div>
+                            <input type="search" id="topic-search" class="topic-search" placeholder="Search words" aria-label="Search words" autocomplete="off" />
+                            <div id="topic-word-list" class="topic-word-list"></div>
+                            <nav id="topic-word-pagination" class="topic-pagination" aria-label="Topic word pages" hidden></nav>
+                        </div>
+                    </div>
+                    <footer class="topic-foot">
+                        <span id="topic-status" class="topic-status" role="status" aria-live="polite"></span>
+                        <div id="topic-suggest-progress" class="topic-suggest-progress" hidden>
+                            <progress id="topic-suggest-progress-bar" max="1" value="0"></progress>
+                            <span id="topic-suggest-progress-label" aria-live="polite"></span>
+                        </div>
+                        <div class="topic-actions">
+                            <button type="button" id="topic-suggest" class="tag-action-button">Suggest topics with AI</button>
+                            <button type="button" id="topic-suggest-stop" class="tag-action-button muted" hidden>Stop</button>
+                        </div>
+                    </footer>
+                </section>
+                <div class="tag-view-body" id="tag-view-tags" hidden>
+<div class="tag-view-main">
+                            <div class="tag-graph-detail" id="tag-graph-detail"></div>
+                            <div class="tag-graph-list" id="tag-graph-list"></div>
+                        </div>
+                <aside class="tag-graph-side">
+                            <details class="tag-graph-panel tag-graph-dictionary">
+                                <summary>Tag definitions</summary>
+                                <div class="tag-graph-dict">
+                                    <dl class="tag-graph-stats" id="tag-graph-dict-stats"></dl>
+                                    <p class="tag-graph-dict-hint">One definition per tag, written by the LLM. Matching, grouping and the Overview map's fallback all compare meaning through these definitions instead of spelling, so building them improves all three.</p>
+                                    <button type="button" id="tag-dictionary-build" class="tag-action-button primary">Build dictionary</button>
+                                    <p class="tag-graph-dict-progress" id="tag-dictionary-progress" role="status" aria-live="polite"></p>
+                                </div>
+                            </details>
+                            <details class="tag-graph-panel tag-graph-settings">
+                                <summary>New tag matching</summary>
+                                <form id="tag-match-form" class="tag-match-form">
+                                    <p class="tag-match-help">Applies to AI classification only: a newly proposed name that resembles an existing vocabulary entry is folded into it, and a name that resembles nothing becomes a new tag. Nothing already stored changes.</p>
+                                    <div class="tag-match-row">
+                                        <label class="tag-match-toggle">
+                                            <input type="checkbox" id="tag-match-enabled" checked />
+                                            <span>Match new tags to existing categories</span>
+                                        </label>
+                                    </div>
+                                    <div class="tag-match-row">
+                                        <label class="tag-match-label" for="tag-match-threshold">Similarity</label>
+                                        <input type="range" id="tag-match-threshold" min="0.5" max="1" step="0.01" value="0.85" aria-describedby="tag-match-threshold-value" />
+                                        <output id="tag-match-threshold-value" for="tag-match-threshold">0.85</output>
+                                        <button type="submit" class="tag-action-button">Save</button>
+                                    </div>
+                                    <small>Higher values only map near-identical names (0.9+). Lower values also map related subjects (0.7).</small>
+                                    <p class="tag-match-help">The Overview map reads shared articles first and falls back to tag meaning when the library's co-occurrence graph is one giant component. Manage vocabulary is where you explicitly rename, merge, hide, or restore names.</p>
+                                </form>
+                            </details>
+                        </aside>
+                        </div>
+                <footer class="tag-graph-foot">
+                    <span class="tag-graph-status" id="tag-graph-status" role="status" aria-live="polite"></span>
+                    <div class="tag-graph-actions">
+                        <button type="button" id="tag-graph-manage" class="tag-action-button muted">Manage vocabulary…</button>
+                    </div>
+                </footer>
             </div>
         </div>
 
@@ -335,6 +439,24 @@
                     <button id="reindex-chroma-btn" class="test-btn" style="flex: 1;">Re-Index All Items</button>
                     <button id="chroma-health-btn" class="test-btn" style="flex: 1;">Health Check</button>
                 </div>
+                <section class="index-status" id="chroma-index-status" data-state="idle" aria-live="polite">
+                    <header class="index-head">
+                        <h3>Semantic index</h3>
+                        <span class="index-chip" id="chroma-chip">
+                            <span class="index-dot" aria-hidden="true"></span>
+                            <span id="chroma-chip-text">Checking…</span>
+                        </span>
+                    </header>
+                    <div class="index-meter" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                         aria-valuenow="0" id="chroma-progress">
+                        <span class="index-meter-fill" id="chroma-progress-bar"></span>
+                    </div>
+                    <div class="index-foot">
+                        <p class="index-summary" id="chroma-summary">—</p>
+                        <p class="index-detail" id="chroma-detail"></p>
+                    </div>
+                    <p class="index-note" id="chroma-index-note"></p>
+                </section>
             </div>
         </div>
     </body>

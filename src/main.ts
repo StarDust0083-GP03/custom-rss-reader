@@ -11,8 +11,9 @@ import {
   loadItems,
   updateToggleButtonStates,
 } from "./ui/render";
-import { setFilter, showTagSelector, updateFilterTabs } from "./ui/filters";
+import { initFilterTabs, updateFilterTabs } from "./ui/filters";
 import { attachMenu, closeMenu } from "./ui/menu";
+import { registerDialog } from "./ui/dialog";
 import { initColumnLayout } from "./ui/layout";
 import {
   loadSubscriptions,
@@ -28,7 +29,8 @@ import {
   toggleFavorite,
   toggleReadLater,
   toggleUseWebsite,
-  cancelIgnoreTimer,
+  closeDetailPane,
+  retryFailedJobs,
 } from "./features/actions";
 import {
   handleTranslateAction,
@@ -41,9 +43,8 @@ import {
 import {
   closeTagManager,
   createTagFromForm,
-  clusterTags,
+  initMatchSettingsForm,
   saveMatchConfigFromForm,
-  syncMatchConfigForm,
 } from "./features/tags";
 import {
   loadChromaConfig,
@@ -59,6 +60,7 @@ import {
 } from "./features/chroma";
 import { success as toastSuccess, error as toastError } from "./toast";
 import { initAiActivity } from "./ui/ai-activity";
+import { closeTagGraph, initTagGraph, openTagGraph } from "./ui/tag-graph";
 
 const S = state;
 
@@ -146,6 +148,7 @@ async function init() {
   const menuActionHandlers: Record<string, () => void> = {
     "import-opml": () => importOpml(),
     "export-opml": () => exportOpml(),
+    "retry-jobs": () => retryFailedJobs(),
     "mark-all-read": () => markAllAsRead(),
     "chroma-settings": () => openChromaSettingsModal(),
     "classify": () => { if (S.selectedItem) classifyItem(S.selectedItem); },
@@ -166,23 +169,8 @@ async function init() {
     refreshAllFeeds();
   });
 
-  // 筛选标签
-  document.querySelectorAll(".filter-tab").forEach(tab => {
-    tab.addEventListener("click", () => {
-      const filter = tab.getAttribute("data-filter") as typeof S.currentFilter;
-      if (filter === "tag") {
-        // For tag filter, show the in-DOM tag picker anchored to the tab
-        showTagSelector(tab as HTMLElement);
-      } else if (filter === "unread" && S.currentFilter === "today") {
-        // Special case: clicking Unread while in Today mode toggles "Today + Unread"
-        S.unreadFilterEnabled = !S.unreadFilterEnabled;
-        updateFilterTabs();
-        loadItems();
-      } else {
-        setFilter(filter);
-      }
-    });
-  });
+  // 筛选标签 —— 触发器集中在 filters.ts，和标签选择器一起测试
+  initFilterTabs();
 
   // AI 推荐阅读(手动触发)
   document.getElementById("recommend-btn")?.addEventListener("click", openRecommendations);
@@ -194,6 +182,10 @@ async function init() {
     }
   });
 
+  // Tag workspace entry: the gear inside the Tags pill. Tags are managed from
+  // where tags already live, with no second entry to keep in sync. The filter
+  // trigger ignores clicks on the gear, so this handler owns it.
+  document.getElementById("tag-settings-btn")?.addEventListener("click", () => void openTagGraph());
   // Tag manager
   const tagModal = document.getElementById("tag-manager-modal");
   tagModal?.querySelector(".close-modal")?.addEventListener("click", closeTagManager);
@@ -204,15 +196,11 @@ async function init() {
     e.preventDefault();
     void createTagFromForm();
   });
-  document.getElementById("cluster-tags-btn")?.addEventListener("click", () => {
-    void clusterTags();
-  });
   document.getElementById("tag-match-form")?.addEventListener("submit", (e) => {
     e.preventDefault();
     void saveMatchConfigFromForm();
   });
-  document.getElementById("tag-match-threshold")?.addEventListener("input", syncMatchConfigForm);
-  document.getElementById("tag-match-enabled")?.addEventListener("change", syncMatchConfigForm);
+  initMatchSettingsForm();
   window.addEventListener("rss-tags-changed", (event) => {
     void refreshAfterTagChange((event as CustomEvent<TagChangeDetail>).detail);
   });
@@ -462,19 +450,39 @@ async function init() {
     }
   });
 
-  // Cancel ignore timer for any user interaction (indicates engagement)
-  cancelIgnoreTimer();
+  // Narrow-window navigation. At ≤1024px the reader is a full-screen overlay
+  // and at ≤768px the sidebar is offscreen, so both need an explicit way in
+  // and out — the panes used to be hidden with no reachable replacement.
+  document.getElementById("detail-back-btn")?.addEventListener("click", () => closeDetailPane());
+  const sidebar = document.querySelector<HTMLElement>(".sidebar");
+  const openSidebarBtn = document.getElementById("open-sidebar-btn");
+  const setSidebarOpen = (open: boolean) => {
+    sidebar?.classList.toggle("open", open);
+    openSidebarBtn?.setAttribute("aria-expanded", String(open));
+  };
+  openSidebarBtn?.addEventListener("click", () => setSidebarOpen(!sidebar?.classList.contains("open")));
+  // Picking a source or a filter ends that navigation step.
+  sidebar?.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    if (target.closest(".subscription-item") || target.closest(".filter-tab")) {
+      setSidebarOpen(false);
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") setSidebarOpen(false);
+  });
 
-  // Scrolling the article body is engagement — cancel the quick-abandon
-  // timer so a user actually reading a long article is never marked ignored.
-  document.getElementById("detail-content")?.addEventListener(
-    "scroll",
-    () => cancelIgnoreTimer(),
-    { passive: true },
-  );
+  // Dialog semantics, Escape-to-close, and focus management for every modal.
+  registerDialog("add-feed-modal", closeAddFeedModal);
+  registerDialog("ai-settings-modal", closeAiSettingsModal);
+  registerDialog("chroma-settings-modal", closeChromaSettingsModal);
+  registerDialog("tag-manager-modal", closeTagManager);
+  registerDialog("tag-graph-modal", closeTagGraph);
+  registerDialog("recommend-modal", closeRecommendModal);
 
   // 初始化图片缩放功能
   initImageZoom();
+  initTagGraph();
   addZoomHintToImages();
 }
 
@@ -486,8 +494,6 @@ async function init() {
 function initImageZoom(): void {
   // 使用事件委托处理图片点击
   document.getElementById('detail-content')?.addEventListener('click', (e) => {
-    // Cancel ignore timer on user interaction
-    cancelIgnoreTimer();
     const target = e.target as HTMLElement;
 
     // 检查是否点击了图片

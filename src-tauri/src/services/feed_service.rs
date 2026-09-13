@@ -4,14 +4,17 @@ use tokio::sync::Semaphore;
 
 use serde::Serialize;
 
-use crate::ai::activity::{with_ai_task, AiActivityStore, AiTaskSpec};
+use crate::ai::activity::AiActivityStore;
 use crate::chroma::ChromaHolder;
 use crate::error::{AppError, Result};
+use crate::feed::fetcher::FeedValidators;
 use crate::feed::parser::parse_feed;
 use crate::feed::FeedFetcher;
+use crate::models::job::NewJob;
 use crate::models::{FeedItem, Subscription};
 
-use crate::ai::service::{AiService, SharedAiService};
+use crate::ai::service::SharedAiService;
+#[cfg(test)]
 use crate::content_processor::html_to_markdown_pipeline;
 #[cfg(test)]
 use crate::models::NewFeedItem;
@@ -127,14 +130,14 @@ impl FeedService {
     /// Fetch a single feed, parse it, deduplicate, and save new items.
     pub async fn fetch_and_save_feed(&self, subscription: &Subscription) -> Result<Vec<FeedItem>> {
         let fetcher = self.require_fetcher()?;
+        let sub_repo = self.sub_repo.clone();
+        let chroma_configured = self.chroma_service.is_configured();
         fetch_parse_and_save(
             &self.repo,
             fetcher,
-            self.ai_service.clone(),
-            self.ai_activity.clone(),
-            &self.chroma_service,
-            &self.tag_matcher,
+            sub_repo.as_ref(),
             subscription,
+            chroma_configured,
         )
         .await
     }
@@ -233,10 +236,8 @@ impl FeedService {
             let sem = Arc::clone(&semaphore);
             let repo = self.repo.clone();
             let fetcher = self.fetcher.clone();
-            let ai_service = self.ai_service.clone();
-            let ai_activity = self.ai_activity.clone();
-            let chroma_service = self.chroma_service.clone();
-            let tag_matcher = self.tag_matcher.clone();
+            let sub_repo = self.sub_repo.clone();
+            let chroma_configured = self.chroma_service.is_configured();
 
             handles.push(tokio::spawn(async move {
                 let result = async {
@@ -244,17 +245,9 @@ impl FeedService {
                     let fetcher = fetcher
                         .as_ref()
                         .ok_or_else(|| "FeedFetcher not configured".to_string())?;
-                    fetch_parse_and_save(
-                        &repo,
-                        fetcher,
-                        ai_service.clone(),
-                        ai_activity.clone(),
-                        &chroma_service,
-                        &tag_matcher,
-                        &sub,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())
+                    fetch_parse_and_save(&repo, fetcher, sub_repo.as_ref(), &sub, chroma_configured)
+                        .await
+                        .map_err(|e| e.to_string())
                 }
                 .await;
                 result
@@ -339,24 +332,100 @@ pub async fn revert_to_rss_markdown(
     repo.reset_content_md(item_id, &md).await
 }
 
-/// Fetch one feed, parse, dedup against existing rows, insert new items and
-/// run per-item side effects (classification, Chroma indexing, website
-/// content pre-caching).
+/// Enrichment jobs that must follow a newly committed article.
+///
+/// The jobs deliberately carry no item id: they are written in the same
+/// transaction as the article, so the repository fills in the id of the row it
+/// just inserted. Passing a placeholder id here (0) made every job point at a
+/// nonexistent article, which the worker then completed as "not found" —
+/// classification, website caching, and indexing silently never ran.
+pub(crate) fn jobs_for_new_article(
+    subscription: &Subscription,
+    link: Option<String>,
+    chroma_configured: bool,
+) -> Vec<NewJob> {
+    // Indexing is skipped entirely when semantic search is switched off. The
+    // watermark sync indexes the backlog if it is enabled later, so nothing is
+    // lost by not queueing one job per article for a feature nobody uses.
+    let mut jobs = Vec::new();
+    if chroma_configured {
+        jobs.push(NewJob::chroma_upsert(None));
+    }
+    if subscription.auto_classify {
+        jobs.push(NewJob::classify(None));
+    }
+    if subscription.use_website {
+        if let Some(url) = link {
+            jobs.push(NewJob::website_markdown(None, url));
+        }
+    }
+    jobs
+}
+
+/// Fetch one feed, parse, dedup against existing rows, and commit new items
+/// together with the enrichment jobs that follow them.
+///
+/// This function deliberately stops after the commit. Classification, website
+/// caching, and semantic indexing are slow and can fail independently of the
+/// article; running them here made a refresh wait on all of them (and lose
+/// the work on failure). The durable queue now owns them and the reader sees
+/// new articles immediately.
 async fn fetch_parse_and_save(
     repo: &Arc<dyn FeedItemRepository>,
     fetcher: &Arc<FeedFetcher>,
-    ai_service: SharedAiService,
-    ai_activity: AiActivityStore,
-    chroma_service: &ChromaHolder,
-    tag_matcher: &TagMatcher,
+    sub_repo: Option<&Arc<dyn SubscriptionRepository>>,
     subscription: &Subscription,
+    chroma_configured: bool,
 ) -> Result<Vec<FeedItem>> {
     let feed_url = subscription
         .rsshub_url
         .as_deref()
         .unwrap_or(&subscription.url);
 
-    let content = fetcher.fetch_feed(feed_url).await?;
+    // Conditional GET: an unchanged feed answers 304, so quiet subscriptions
+    // cost one small request instead of a full download and parse.
+    let fetched = fetcher
+        .fetch_feed_conditional(
+            feed_url,
+            FeedValidators {
+                etag: subscription.http_etag.as_deref(),
+                last_modified: subscription.http_last_modified.as_deref(),
+            },
+        )
+        .await?;
+
+    if fetched.final_url != feed_url {
+        // Redirects are otherwise invisible; knowing the feed moved is the
+        // difference between "the site changed" and "we kept asking the old
+        // address".
+        println!(
+            "[feed] subscription {} redirected: {} -> {}",
+            subscription.id, feed_url, fetched.final_url
+        );
+    }
+
+    if let Some(repo) = sub_repo {
+        if let Err(e) = repo
+            .update_http_validators(
+                subscription.id,
+                fetched.etag.as_deref(),
+                fetched.last_modified.as_deref(),
+            )
+            .await
+        {
+            // Validators are an optimization; failing to store them must not
+            // fail the refresh.
+            eprintln!(
+                "Failed to store HTTP validators for subscription {}: {}",
+                subscription.id, e
+            );
+        }
+    }
+
+    let Some(content) = fetched.body else {
+        // 304 Not Modified — nothing to parse and nothing changed.
+        return Ok(Vec::new());
+    };
     let parsed = parse_feed(&content, subscription.id)?;
 
     // One lightweight query for in-memory O(1) dedup
@@ -364,12 +433,6 @@ async fn fetch_parse_and_save(
     let (existing_guids, existing_links) = repo.find_dedup_keys(subscription.id).await?;
 
     let mut saved = Vec::new();
-    // Items pending auto-classification. Classification now runs in BATCHES
-    // after the insert loop: one LLM call per ~20 articles instead of one
-    // call per article — a 20x reduction in request count (and thus in
-    // rate-limit pressure) during a bulk refresh.
-    let mut pending_classify: Vec<FeedItem> = Vec::new();
-
     for item in parsed {
         let is_dup = item
             .guid
@@ -383,149 +446,19 @@ async fn fetch_parse_and_save(
             continue;
         }
 
-        let feed_item = match repo.create(item).await {
-            Ok(it) => it,
+        // Only jobs for work that is actually wanted: no AI config means no
+        // classification job, no link means no website job. Chroma is
+        // optional too, but the worker treats "disabled" as a no-op, so the
+        // job is queued and drained when the index is enabled.
+        let jobs = jobs_for_new_article(subscription, item.link.clone(), chroma_configured);
+
+        match repo.create_with_jobs(item, jobs).await {
+            Ok(created) => saved.push(created),
             // A concurrent refresh beat us to this row; benign, skip it.
             Err(AppError::Duplicate(_)) => continue,
             Err(e) => return Err(e),
-        };
-
-        // Index into ChromaDB if available (lazy-connects). A failure here
-        // must NOT lose the item from the semantic index forever — queue it
-        // for the next incremental sync (watermark + pending-upsert retry).
-        if let Some(chroma) = chroma_service.get().await {
-            if let Err(e) = chroma.index_item(&feed_item).await {
-                eprintln!("ChromaDB indexing failed for item {}: {}", feed_item.id, e);
-                crate::chroma::sync::SyncState::queue_upsert(feed_item.id).await;
-            }
-        }
-
-        // Pre-cache website content for use_website subscriptions
-        if subscription.use_website {
-            precache_website_content(repo, fetcher, &feed_item).await;
-        }
-
-        if subscription.auto_classify {
-            pending_classify.push(feed_item.clone());
-        }
-        saved.push(feed_item);
-    }
-
-    // Batch classification: titles only, one LLM call per
-    // CLASSIFY_BATCH_SIZE articles.
-    // Clone the service handle before awaiting the batch calls so the read
-    // lock is never held across network I/O. Saving AI settings replaces the
-    // slot for subsequent fetches without invalidating this in-flight batch.
-    if let Some(ai) = ai_service.read().await.clone() {
-        for chunk in pending_classify.chunks(crate::ai::CLASSIFY_BATCH_SIZE) {
-            let task = ai_activity
-                .begin(AiTaskSpec::background_classification(chunk.len()))
-                .await;
-            let result = with_ai_task(
-                task.clone(),
-                classify_batch_and_save(repo, ai.as_ref(), tag_matcher, chunk),
-            )
-            .await;
-            task.finish().await;
-            if let Err(e) = result {
-                eprintln!("Batch classification failed ({} items): {}", chunk.len(), e);
-            }
         }
     }
 
     Ok(saved)
-}
-
-/// Classify a batch of items in a single LLM call and persist the results.
-///
-/// Payload per article is the title only — neither description nor
-/// `content` is ever sent.
-async fn classify_batch_and_save(
-    repo: &Arc<dyn FeedItemRepository>,
-    ai: &dyn AiService,
-    tag_matcher: &TagMatcher,
-    items: &[FeedItem],
-) -> Result<()> {
-    let entries: Vec<crate::ai::BatchClassifyEntry> = items
-        .iter()
-        .enumerate()
-        .map(|(i, item)| crate::ai::BatchClassifyEntry {
-            index: i,
-            title: item.title.clone(),
-        })
-        .collect();
-
-    // Refresh the catalog for every batch so tags created by an earlier
-    // batch are available to the next classification request.
-    let existing_tags = repo.find_active_tag_names().await?;
-    let responses = ai.classify_batch(&entries, &existing_tags).await?;
-
-    for (item, response) in items.iter().zip(responses) {
-        // Skip items the model left unclassified (empty tags AND no category)
-        // so we don't wipe anything with a no-op write.
-        if response.tags.is_empty() && response.category.is_none() {
-            continue;
-        }
-        // Snap generated names onto existing catalog tags before the exact
-        // canonicalization in `save_tags`. Matching degrades to exact
-        // resolution on embedding errors, so it never blocks the save.
-        let tags = match tag_matcher.resolve(repo.as_ref(), &response.tags).await {
-            Ok(tags) => tags,
-            Err(e) => {
-                eprintln!("Tag matching failed for item {}: {}", item.id, e);
-                response.tags
-            }
-        };
-        let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string());
-        let category = response.category.unwrap_or_default();
-        if let Err(e) = repo.save_tags(item.id, &tags_json, &category).await {
-            eprintln!("Failed to save tags for item {}: {}", item.id, e);
-        }
-    }
-    Ok(())
-}
-
-/// Fetch the article's website page and cache its Markdown conversion.
-/// Errors are logged, never propagated (this is a best-effort side effect).
-async fn precache_website_content(
-    repo: &Arc<dyn FeedItemRepository>,
-    fetcher: &Arc<FeedFetcher>,
-    item: &FeedItem,
-) {
-    let Some(ref link) = item.link else { return };
-
-    let html = match fetcher.fetch_website_content(link).await {
-        Ok(html) => html,
-        Err(e) => {
-            eprintln!("Failed to fetch website for item {}: {}", item.id, e);
-            return;
-        }
-    };
-
-    // HTML -> Markdown is CPU-bound; keep it off the async worker threads.
-    let converted = tokio::task::spawn_blocking(move || html_to_markdown_pipeline(&html)).await;
-    match converted {
-        Ok(Ok(md)) => {
-            if let Err(e) = repo.update_content_md(item.id, &md, true).await {
-                eprintln!(
-                    "Failed to cache website content for item {}: {}",
-                    item.id, e
-                );
-            } else {
-                // The website Markdown is richer than the RSS snippet the
-                // item was indexed from at insert time — queue a re-embed
-                // so semantic search matches the full article text.
-                crate::chroma::sync::SyncState::queue_upsert(item.id).await;
-            }
-        }
-        Ok(Err(e)) => {
-            eprintln!(
-                "Failed to convert website content for item {}: {}",
-                item.id, e
-            );
-        }
-        Err(e) => {
-            eprintln!("Website conversion task failed for item {}: {}", item.id, e);
-        }
-    }
 }

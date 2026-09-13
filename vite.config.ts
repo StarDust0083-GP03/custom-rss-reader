@@ -12,14 +12,21 @@ export default defineConfig(async () => ({
   clearScreen: false,
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
-    port: 1420,
+    // A dedicated port, not the Tauri default 1420.
+    //
+    // 1420 is the first port any Tauri project reaches for, and another local
+    // dev server already holds it, so this app's vite exited on startup
+    // (strictPort) while the desktop window kept loading `devUrl` — which then
+    // showed whatever else had taken the port. A port nobody shares is worth
+    // more than the conventional number.
+    port: 1437,
     strictPort: true,
     host: host || false,
     hmr: host
       ? {
           protocol: "ws",
           host,
-          port: 1421,
+          port: 1438,
         }
       : undefined,
     watch: {

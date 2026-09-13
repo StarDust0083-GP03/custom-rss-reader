@@ -149,6 +149,13 @@ pub async fn export_opml(state: State<'_, AppState>, file_path: String) -> Resul
 /// Parse a 2.0 OPML document and extract subscriptions. Returns an error
 /// for malformed XML (so the frontend can show a helpful message); skips
 /// `<outline>` elements that don't carry a `xmlUrl`.
+///
+/// Round-trip fidelity (issue #25): a feed URL without its folder path is a
+/// lossy import, and `htmlUrl` (the *website* URL, distinct from `xmlUrl`) is
+/// part of the standard format — dropping it made every imported feed fall
+/// back to RSS-only with no website to fetch. Attributes this app doesn't
+/// model are preserved verbatim so exporting after importing does not silently
+/// strip another reader's settings.
 fn parse_opml(content: &str) -> Result<Vec<NewSubscription>> {
     use quick_xml::events::Event;
     use quick_xml::Reader;
@@ -157,11 +164,31 @@ fn parse_opml(content: &str) -> Result<Vec<NewSubscription>> {
     let mut buf = Vec::new();
     let mut subscriptions = Vec::new();
     let mut saw_opml = false;
+    // Folder path from the nesting of outlines without an xmlUrl.
+    let mut folders: Vec<String> = Vec::new();
+
+    /// Attributes this app models itself; everything else is preserved.
+    const KNOWN_ATTRS: [&str; 9] = [
+        "xmlUrl",
+        "xmlurl",
+        "title",
+        "text",
+        "htmlUrl",
+        "websiteUrl",
+        "website_url",
+        "rsshubUrl",
+        "rsshub_url",
+    ];
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) if e.name().as_ref() == b"opml" => {
                 saw_opml = true;
+            }
+            Ok(Event::End(ref e)) => {
+                if e.name().as_ref() == b"outline" {
+                    folders.pop();
+                }
             }
             Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
                 if e.name().as_ref() != b"outline" {
@@ -173,6 +200,8 @@ fn parse_opml(content: &str) -> Result<Vec<NewSubscription>> {
                 let mut rsshub_url: Option<String> = None;
                 let mut use_website: Option<bool> = None;
                 let mut auto_classify: Option<bool> = None;
+                let mut extra: std::collections::BTreeMap<String, String> =
+                    std::collections::BTreeMap::new();
 
                 for attr in e.attributes().flatten() {
                     let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
@@ -180,25 +209,53 @@ fn parse_opml(content: &str) -> Result<Vec<NewSubscription>> {
                     match key {
                         "xmlUrl" | "xmlurl" => url = Some(value),
                         "title" | "text" => title = Some(value),
+                        "htmlUrl" => website_url = Some(value),
                         "websiteUrl" | "website_url" => website_url = Some(value),
                         "rsshubUrl" | "rsshub_url" => rsshub_url = Some(value),
                         "useWebsite" | "use_website" => use_website = parse_bool_attr(&value),
                         "autoClassify" | "auto_classify" => auto_classify = parse_bool_attr(&value),
-                        _ => {}
+                        _ => {
+                            if !KNOWN_ATTRS.contains(&key) {
+                                extra.insert(key.to_string(), value);
+                            }
+                        }
                     }
                 }
 
-                if let Some(url) = url.filter(|u| !u.is_empty()) {
-                    subscriptions.push(NewSubscription {
-                        url,
-                        title: title.filter(|t| !t.is_empty()),
-                        website_url: website_url.filter(|s| !s.is_empty()),
-                        rsshub_url: rsshub_url.filter(|s| !s.is_empty()),
-                        use_website: use_website.unwrap_or(false),
-                        auto_classify: auto_classify.unwrap_or(true),
-                        opml_attributes: None,
-                    });
+                let folder = folders.join("/");
+                let is_feed = url.as_deref().is_some_and(|u| !u.is_empty());
+                if !is_feed {
+                    // A container outline names a folder for its children.
+                    if let Some(name) = title.clone().filter(|t| !t.is_empty()) {
+                        folders.push(name);
+                    }
+                    continue;
                 }
+
+                let attributes = OpmlAttributes {
+                    folder: if folder.is_empty() {
+                        None
+                    } else {
+                        Some(folder)
+                    },
+                    attrs: extra,
+                };
+                let opml_attributes = if attributes.folder.is_none() && attributes.attrs.is_empty()
+                {
+                    None
+                } else {
+                    serde_json::to_string(&attributes).ok()
+                };
+
+                subscriptions.push(NewSubscription {
+                    url: url.unwrap(),
+                    title: title.filter(|t| !t.is_empty()),
+                    website_url: website_url.filter(|s| !s.is_empty()),
+                    rsshub_url: rsshub_url.filter(|s| !s.is_empty()),
+                    use_website: use_website.unwrap_or(false),
+                    auto_classify: auto_classify.unwrap_or(true),
+                    opml_attributes,
+                });
             }
             Ok(Event::Eof) => break,
             Err(e) => {
@@ -222,6 +279,17 @@ fn parse_opml(content: &str) -> Result<Vec<NewSubscription>> {
     Ok(subscriptions)
 }
 
+/// The parts of an OPML outline that this app does not model directly.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct OpmlAttributes {
+    /// Slash-separated folder path from the outline nesting.
+    #[serde(default)]
+    folder: Option<String>,
+    /// Unrecognized attributes, preserved verbatim for export.
+    #[serde(default)]
+    attrs: std::collections::BTreeMap<String, String>,
+}
+
 fn parse_bool_attr(value: &str) -> Option<bool> {
     match value.to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "y" => Some(true),
@@ -230,10 +298,15 @@ fn parse_bool_attr(value: &str) -> Option<bool> {
     }
 }
 
-/// Generate an OPML 2.0 document from subscriptions, including the
-/// round-trippable extension fields (websiteUrl, rsshubUrl, useWebsite,
-/// autoClassify).
+/// Generate an OPML 2.0 document from subscriptions.
+///
+/// Emits the standard `htmlUrl` (website) alongside the app's `websiteUrl`
+/// extension, restores preserved attributes, and nests subscriptions under
+/// their original folder outlines so an export/re-import round-trips instead
+/// of flattening the library and dropping fields.
 fn generate_opml(subscriptions: &[Subscription]) -> Result<String> {
+    use std::collections::BTreeMap;
+
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <opml version="2.0">
@@ -244,31 +317,81 @@ fn generate_opml(subscriptions: &[Subscription]) -> Result<String> {
 "#,
     );
 
+    // Group by folder, keeping the first-seen order of both folders and their
+    // entries (a reader's manual ordering should survive an export).
+    let mut root: Vec<&Subscription> = Vec::new();
+    let mut folders: Vec<(String, Vec<&Subscription>)> = Vec::new();
     for sub in subscriptions {
+        let parsed = sub
+            .opml_attributes
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<OpmlAttributes>(raw).ok())
+            .unwrap_or_default();
+        match parsed.folder.as_deref().filter(|f| !f.is_empty()) {
+            None => root.push(sub),
+            Some(path) => match folders.iter_mut().find(|(name, _)| name == path) {
+                Some((_, items)) => items.push(sub),
+                None => folders.push((path.to_string(), vec![sub])),
+            },
+        }
+    }
+
+    let write_entry = |sub: &Subscription, indent: usize| {
+        let parsed = sub
+            .opml_attributes
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<OpmlAttributes>(raw).ok())
+            .unwrap_or_default();
+        let mut attrs: BTreeMap<String, String> = parsed.attrs;
         let title = sub.title.as_deref().unwrap_or("");
-        let escaped_title = escape_xml(title);
-        let escaped_url = escape_xml(&sub.url);
-        let mut line = format!(
-            r#"    <outline text="{}" title="{}" type="rss" xmlUrl="{}""#,
-            escaped_title, escaped_title, escaped_url
+        attrs.insert("text".into(), title.to_string());
+        attrs.insert("title".into(), title.to_string());
+        attrs.insert("type".into(), "rss".into());
+        attrs.insert("xmlUrl".into(), sub.url.clone());
+        if let Some(w) = sub.website_url.as_deref().filter(|w| !w.is_empty()) {
+            // Standard field, plus this app's extension for older builds.
+            attrs.insert("htmlUrl".into(), w.to_string());
+            attrs.insert("websiteUrl".into(), w.to_string());
+        }
+        if let Some(r) = sub.rsshub_url.as_deref().filter(|r| !r.is_empty()) {
+            attrs.insert("rsshubUrl".into(), r.to_string());
+        }
+        attrs.insert(
+            "useWebsite".into(),
+            if sub.use_website { "true" } else { "false" }.into(),
         );
-        if let Some(ref w) = sub.website_url {
-            if !w.is_empty() {
-                line.push_str(&format!(r#" websiteUrl="{}""#, escape_xml(w)));
-            }
+        attrs.insert(
+            "autoClassify".into(),
+            if sub.auto_classify { "true" } else { "false" }.into(),
+        );
+        let rendered: Vec<String> = attrs
+            .iter()
+            .map(|(k, v)| format!(r#"{k}="{}""#, escape_xml(v)))
+            .collect();
+        format!("{}<outline {}/>\n", "  ".repeat(indent), rendered.join(" "))
+    };
+
+    for sub in &root {
+        xml.push_str(&write_entry(sub, 2));
+    }
+    for (folder, items) in &folders {
+        // Nested folder paths become nested container outlines.
+        let segments: Vec<&str> = folder.split('/').filter(|s| !s.is_empty()).collect();
+        for (depth, segment) in segments.iter().enumerate() {
+            let escaped = escape_xml(segment);
+            xml.push_str(&format!(
+                "{}<outline text=\"{}\" title=\"{}\">\n",
+                "  ".repeat(2 + depth),
+                escaped,
+                escaped
+            ));
         }
-        if let Some(ref r) = sub.rsshub_url {
-            if !r.is_empty() {
-                line.push_str(&format!(r#" rsshubUrl="{}""#, escape_xml(r)));
-            }
+        for sub in items {
+            xml.push_str(&write_entry(sub, 2 + segments.len()));
         }
-        line.push_str(&format!(
-            r#" useWebsite="{}" autoClassify="{}"/>"#,
-            if sub.use_website { "true" } else { "false" },
-            if sub.auto_classify { "true" } else { "false" },
-        ));
-        line.push('\n');
-        xml.push_str(&line);
+        for depth in (0..segments.len()).rev() {
+            xml.push_str(&format!("{}</outline>\n", "  ".repeat(2 + depth)));
+        }
     }
 
     xml.push_str("  </body>\n</opml>\n");
@@ -327,6 +450,68 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_opml_preserves_folder_and_unknown_attributes() {
+        let xml = r#"<opml version="2.0"><body>
+            <outline text="Tech">
+              <outline text="News">
+                <outline text="X" xmlUrl="https://x.com/feed" htmlUrl="https://x.com" customFlag="keep-me"/>
+              </outline>
+            </outline>
+        </body></opml>"#;
+        let subs = parse_opml(xml).unwrap();
+        assert_eq!(subs.len(), 1);
+        // htmlUrl is the standard website field.
+        assert_eq!(subs[0].website_url.as_deref(), Some("https://x.com"));
+        let attrs: OpmlAttributes =
+            serde_json::from_str(subs[0].opml_attributes.as_deref().unwrap()).unwrap();
+        assert_eq!(attrs.folder.as_deref(), Some("Tech/News"));
+        assert_eq!(
+            attrs.attrs.get("customFlag").map(String::as_str),
+            Some("keep-me")
+        );
+    }
+
+    /// Export → import must keep folders, htmlUrl, and unknown attributes.
+    #[test]
+    fn test_opml_roundtrip_preserves_folders_and_extras() {
+        let subs = vec![Subscription {
+            id: 1,
+            url: "https://x.com/feed".into(),
+            title: Some("X".into()),
+            website_url: Some("https://x.com".into()),
+            rsshub_url: None,
+            use_website: true,
+            auto_classify: true,
+            opml_attributes: Some(
+                r#"{"folder":"Tech/News","attrs":{"customFlag":"keep-me"}}"#.into(),
+            ),
+            http_etag: None,
+            http_last_modified: None,
+            created_at: "2024-01-01T00:00:00Z".parse().unwrap(),
+            updated_at: "2024-01-01T00:00:00Z".parse().unwrap(),
+        }];
+
+        let xml = generate_opml(&subs).unwrap();
+        assert!(xml.contains(r#"htmlUrl="https://x.com""#), "xml was: {xml}");
+        assert!(xml.contains(r#"customFlag="keep-me""#), "xml was: {xml}");
+        assert!(
+            xml.contains(r#"<outline text="Tech" title="Tech">"#),
+            "xml was: {xml}"
+        );
+
+        let parsed = parse_opml(&xml).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].website_url.as_deref(), Some("https://x.com"));
+        let attrs: OpmlAttributes =
+            serde_json::from_str(parsed[0].opml_attributes.as_deref().unwrap()).unwrap();
+        assert_eq!(attrs.folder.as_deref(), Some("Tech/News"));
+        assert_eq!(
+            attrs.attrs.get("customFlag").map(String::as_str),
+            Some("keep-me")
+        );
+    }
+
+    #[test]
     fn test_generate_opml_includes_extensions() {
         let subs = vec![Subscription {
             id: 1,
@@ -337,6 +522,8 @@ mod tests {
             use_website: true,
             auto_classify: false,
             opml_attributes: None,
+            http_etag: None,
+            http_last_modified: None,
             created_at: "2024-01-01T00:00:00Z".parse().unwrap(),
             updated_at: "2024-01-01T00:00:00Z".parse().unwrap(),
         }];
@@ -357,6 +544,8 @@ mod tests {
             use_website: true,
             auto_classify: true,
             opml_attributes: None,
+            http_etag: None,
+            http_last_modified: None,
             created_at: "2024-01-01T00:00:00Z".parse().unwrap(),
             updated_at: "2024-01-01T00:00:00Z".parse().unwrap(),
         }];
