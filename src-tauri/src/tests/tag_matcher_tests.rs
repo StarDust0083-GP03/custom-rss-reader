@@ -141,7 +141,7 @@ async fn a_similar_name_folds_into_the_vocabulary_and_the_rest_stays_its_own() {
         .unwrap();
     assert_eq!(head.aliases, vec!["deep_learning"]);
     assert_eq!(
-        env.feed_repo.find_vocabulary_names().await.unwrap(),
+        env.feed_repo.find_tag_catalog().await.unwrap().into_iter().map(|tag| tag.name).collect::<Vec<_>>(),
         vec!["gardening", "machine_learning"]
     );
 }
@@ -201,12 +201,7 @@ async fn blocking_hides_a_tag_from_every_surface_without_losing_the_record() {
         env.feed_repo.find_all_tags(None).await.unwrap(),
         vec!["machine_learning"]
     );
-    assert!(!env
-        .feed_repo
-        .find_vocabulary_names()
-        .await
-        .unwrap()
-        .contains(&"gardening".to_string()));
+    assert!(!env.feed_repo.find_tag_catalog().await.unwrap().iter().any(|tag| tag.name == "gardening"));
     let raw: Option<String> = sqlx::query_scalar("SELECT raw_tags FROM feed_items WHERE id = $1")
         .bind(item.id)
         .fetch_one(&env.pool)

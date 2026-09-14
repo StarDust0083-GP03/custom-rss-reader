@@ -763,13 +763,6 @@ impl FeedItemRepository for SqliteFeedItemRepository {
             .collect())
     }
 
-    async fn find_vocabulary_names(&self) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as("SELECT name FROM tag_catalog ORDER BY name")
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.into_iter().map(|(name,)| name).collect())
-    }
-
     async fn find_tags_missing_explanation(&self, limit: i64) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
             r#"SELECT t.name
@@ -927,16 +920,12 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         Ok(())
     }
 
-    async fn find_raw_tag_usage(&self, subscription_id: Option<i64>) -> Result<HashMap<String, i64>> {
+    async fn find_tag_usage(&self, subscription_id: Option<i64>) -> Result<HashMap<String, i64>> {
         let rows: Vec<(String, i64)> = sqlx::query_as(
-            r#"WITH src AS (
-                   SELECT id, CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END AS names
-                     FROM feed_items
-                    WHERE ($1 IS NULL OR subscription_id = $1)
-               )
-               SELECT j.value, COUNT(DISTINCT src.id)
-                 FROM src, json_each(src.names) j
-                WHERE json_valid(src.names)
+            r#"SELECT j.value, COUNT(DISTINCT f.id)
+                 FROM feed_items f, json_each(f.tags) j
+                WHERE ($1 IS NULL OR f.subscription_id = $1)
+                  AND json_valid(f.tags)
                 GROUP BY j.value"#,
         )
         .bind(subscription_id)
@@ -945,19 +934,15 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         Ok(rows.into_iter().collect())
     }
 
-    async fn find_raw_tag_cooccurrence(
+    async fn find_tag_cooccurrence(
         &self,
         subscription_id: Option<i64>,
     ) -> Result<Vec<(String, String, i64)>> {
         let rows: Vec<(String, String, i64)> = sqlx::query_as(
-            r#"WITH src AS (
-                   SELECT id, CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END AS names
-                     FROM feed_items
-                    WHERE ($1 IS NULL OR subscription_id = $1)
-               )
-               SELECT a.value, b.value, COUNT(DISTINCT src.id)
-                 FROM src, json_each(src.names) a, json_each(src.names) b
-                WHERE json_valid(src.names) AND a.value < b.value
+            r#"SELECT a.value, b.value, COUNT(DISTINCT f.id)
+                 FROM feed_items f, json_each(f.tags) a, json_each(f.tags) b
+                WHERE ($1 IS NULL OR f.subscription_id = $1)
+                  AND json_valid(f.tags) AND a.value < b.value
                 GROUP BY a.value, b.value"#,
         )
         .bind(subscription_id)
@@ -966,16 +951,12 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         Ok(rows)
     }
 
-    async fn find_raw_tag_items(&self, subscription_id: Option<i64>) -> Result<Vec<(i64, String)>> {
+    async fn find_tag_items(&self, subscription_id: Option<i64>) -> Result<Vec<(i64, String)>> {
         let rows: Vec<(i64, String)> = sqlx::query_as(
-            r#"WITH src AS (
-                   SELECT id, CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END AS names
-                     FROM feed_items
-                    WHERE ($1 IS NULL OR subscription_id = $1)
-                      AND json_valid(CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END)
-               )
-               SELECT src.id, j.value
-                 FROM src, json_each(src.names) j"#,
+            r#"SELECT f.id, j.value
+                 FROM feed_items f, json_each(f.tags) j
+                WHERE ($1 IS NULL OR f.subscription_id = $1)
+                  AND json_valid(f.tags)"#,
         )
         .bind(subscription_id)
         .fetch_all(&self.pool)
@@ -988,14 +969,12 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         subscription_id: Option<i64>,
     ) -> Result<TagOverviewCoverage> {
         // `json_valid` is NULL for a NULL column, so the two sums below count
-        // only rows that really hold a JSON array.
+        // only rows that really hold a canonical display array.
         let row: (i64, i64, i64) = sqlx::query_as(
             r#"SELECT COUNT(*),
-                      SUM(CASE WHEN json_valid(CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END)
-                                AND json_array_length(CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END) > 0
+                      SUM(CASE WHEN json_valid(tags) AND json_array_length(tags) > 0
                                THEN 1 ELSE 0 END),
-                      SUM(CASE WHEN CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END IS NOT NULL
-                                AND NOT json_valid(CASE WHEN raw_tags IS NULL THEN tags ELSE raw_tags END)
+                      SUM(CASE WHEN tags IS NOT NULL AND NOT json_valid(tags)
                                THEN 1 ELSE 0 END)
                  FROM feed_items
                 WHERE ($1 IS NULL OR subscription_id = $1)"#,
@@ -1161,6 +1140,47 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    async fn merge_tag_pairs(&self, pairs: &[(String, String)]) -> Result<usize> {
+        if pairs.is_empty() { return Ok(0); }
+        let mut tx = self.pool.begin().await?;
+        let (aliases, blocked) = load_tag_maps(&mut tx).await?;
+        let catalog: HashSet<String> = sqlx::query_as::<_, (String,)>("SELECT name FROM tag_catalog")
+            .fetch_all(&mut *tx).await?.into_iter().map(|(name,)| name).collect();
+        let mut replacements = HashMap::new();
+        for (member, canonical) in pairs {
+            let member = resolve_tag(required_tag(member)?, &aliases);
+            let canonical = resolve_tag(required_tag(canonical)?, &aliases);
+            if member == canonical || replacements.contains_key(&member) { continue; }
+            if !catalog.contains(&member) || !catalog.contains(&canonical) {
+                return Err(AppError::NotFound(format!("Cannot merge '{}' into '{}': tag not found", member, canonical)));
+            }
+            if blocked.contains(&canonical) {
+                return Err(AppError::Validation(format!("Tag '{}' is blocked", canonical)));
+            }
+            replacements.insert(member, canonical);
+        }
+        if replacements.is_empty() { return Ok(0); }
+        if replacements.values().any(|canonical| replacements.contains_key(canonical)) {
+            return Err(AppError::Validation("Bulk tag merges must target tags that are not being merged".into()));
+        }
+
+        // One pass over feed_items for the whole cleanup, rather than one full
+        // rewrite per singleton.
+        rewrite_feed_item_tags(&mut tx, &replacements, &HashSet::new()).await?;
+        for (member, canonical) in &replacements {
+            sqlx::query("UPDATE tag_aliases SET canonical_name = $1 WHERE canonical_name = $2")
+                .bind(canonical).bind(member).execute(&mut *tx).await?;
+            sqlx::query("INSERT OR REPLACE INTO tag_aliases (alias, canonical_name) VALUES ($1, $2)")
+                .bind(member).bind(canonical).execute(&mut *tx).await?;
+            sqlx::query("DELETE FROM tag_catalog WHERE name = $1")
+                .bind(member).execute(&mut *tx).await?;
+            sqlx::query("DELETE FROM tag_topic_assignments WHERE tag_name = $1")
+                .bind(member).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(replacements.len())
     }
 
     async fn delete_tag(&self, name: &str) -> Result<()> {

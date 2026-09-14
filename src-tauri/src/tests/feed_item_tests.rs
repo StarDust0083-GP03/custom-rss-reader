@@ -914,6 +914,27 @@ async fn test_tag_catalog_canonicalizes_and_manages_mappings() {
 }
 
 #[tokio::test]
+async fn test_bulk_tag_merge_rewrites_articles_once_and_keeps_aliases() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+    let item = create_item(&env, sub_id, "Bulk tag cleanup").await;
+    env.feed_repo.create_tag("machine_learning").await.unwrap();
+    env.feed_repo.create_tag("postgresql").await.unwrap();
+    env.feed_repo.save_tags(item, r#"["ml", "postgres"]"#).await.unwrap();
+
+    let merged = env.feed_repo.merge_tag_pairs(&[
+        ("ml".into(), "machine_learning".into()),
+        ("postgres".into(), "postgresql".into()),
+    ]).await.unwrap();
+    assert_eq!(merged, 2);
+    let tags: Vec<String> = serde_json::from_str(&env.feed_repo.find_by_id(item).await.unwrap().tags.unwrap()).unwrap();
+    assert_eq!(tags, vec!["machine_learning", "postgresql"]);
+    let catalog = env.feed_repo.find_tag_catalog().await.unwrap();
+    assert!(catalog.iter().find(|tag| tag.name == "machine_learning").is_some_and(|tag| tag.aliases.contains(&"ml".to_string())));
+    assert!(catalog.iter().find(|tag| tag.name == "postgresql").is_some_and(|tag| tag.aliases.contains(&"postgres".to_string())));
+}
+
+#[tokio::test]
 async fn test_restore_tag_requires_a_blocked_non_alias_name() {
     let env = TestEnv::new().await;
     env.feed_repo.create_tag("machine_learning").await.unwrap();

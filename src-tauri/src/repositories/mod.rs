@@ -228,11 +228,6 @@ pub trait FeedItemRepository: Send + Sync {
     /// List every active canonical tag, including unused manually-created tags.
     async fn find_tag_catalog(&self) -> Result<Vec<TagCatalogEntry>>;
 
-    /// Every name the vocabulary knows. This is what the classifier is offered
-    /// to reuse, so a word the library already has does not come back spelled
-    /// six ways.
-    async fn find_vocabulary_names(&self) -> Result<Vec<String>>;
-
     /// The topic navigation catalog.
     async fn find_topic_categories(&self) -> Result<Vec<TopicCategory>>;
 
@@ -259,19 +254,18 @@ pub trait FeedItemRepository: Send + Sync {
         assignments: &[TopicAssignment],
     ) -> Result<()>;
 
-    /// Article counts per raw tag (pre-alias names), scoped by subscription.
-    async fn find_raw_tag_usage(&self, subscription_id: Option<i64>) -> Result<HashMap<String, i64>>;
+    /// Article counts per canonical display tag, scoped by subscription.
+    async fn find_tag_usage(&self, subscription_id: Option<i64>) -> Result<HashMap<String, i64>>;
 
-    /// Co-occurrence over raw tags: `(a, b, shared articles)` with `a < b`.
-    async fn find_raw_tag_cooccurrence(
+    /// Co-occurrence over canonical tags: `(a, b, shared articles)`, `a < b`.
+    async fn find_tag_cooccurrence(
         &self,
         subscription_id: Option<i64>,
     ) -> Result<Vec<(String, String, i64)>>;
 
-    /// Raw `(article_id, tag)` rows for one scope. The caller can build one
-    /// article-set index and answer several community count queries without
-    /// rescanning `feed_items` for every community.
-    async fn find_raw_tag_items(&self, subscription_id: Option<i64>) -> Result<Vec<(i64, String)>>;
+    /// Canonical `(article_id, tag)` rows for one scope. Internal raw
+    /// classifier output never crosses this repository boundary into the UI.
+    async fn find_tag_items(&self, subscription_id: Option<i64>) -> Result<Vec<(i64, String)>>;
 
     /// How much of the scope carries readable tags at all.
     async fn tag_overview_coverage(
@@ -290,6 +284,9 @@ pub trait FeedItemRepository: Send + Sync {
 
     /// Map several canonical tags to the selected canonical head.
     async fn merge_tags(&self, canonical_name: &str, members: &[String]) -> Result<()>;
+
+    /// Apply many independent member → canonical merges in one article rewrite.
+    async fn merge_tag_pairs(&self, pairs: &[(String, String)]) -> Result<usize>;
 
     /// Remove a tag from all articles and block its name and aliases.
     async fn delete_tag(&self, name: &str) -> Result<()>;

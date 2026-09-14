@@ -161,6 +161,7 @@ pub fn run() {
             create_tag,
             rename_tag,
             merge_tags,
+            consolidate_single_use_tags,
             delete_tag,
             restore_tag,
             tag_dictionary_status,

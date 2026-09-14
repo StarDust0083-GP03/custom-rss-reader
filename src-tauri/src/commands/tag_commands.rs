@@ -175,180 +175,70 @@ pub async fn index_tag_dictionary(state: State<'_, AppState>) -> Result<TagIndex
     })
 }
 
-/// Two-level Infomap: minimise the map equation by local moving.
+/// Deterministic modularity local-moving over the co-occurrence graph.
 ///
-/// The map equation is the description length of a random walker on the tag
-/// co-occurrence graph, so the objective is "which tags does a reader actually
-/// move between", not how similar two names look. Modularity was tried first
-/// and is a different objective: on a real 384-node library it left a 126-node
-/// community of unrelated tags, because a cut is charged only by degree, while
-/// the map equation also charges the extra module name a walker must encode.
-///
-/// Greedy and flat: a node moves to the neighbouring module that shortens the
-/// code most, with no hierarchical recursion or annealing. Deterministic by
-/// construction: nodes are visited in a fixed order (weighted degree, then
-/// name) and only strictly improving moves are accepted.
-fn map_equation_modules(nodes: &[String], edges: &[(String, String, i64)]) -> Vec<Vec<String>> {
-    const EPSILON: f64 = 1e-9;
-
-    let index: HashMap<&str, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(position, name)| (name.as_str(), position))
-        .collect();
-
-    let mut adjacency: Vec<HashMap<usize, f64>> = vec![HashMap::new(); nodes.len()];
-    let mut degree = vec![0.0f64; nodes.len()];
-    let mut total_weight = 0.0f64;
+/// Community degree totals are updated incrementally, so each round is linear
+/// in the edge count while still resisting weak bridges between dense groups.
+fn weighted_label_modules(nodes: &[String], edges: &[(String, String, i64)]) -> Vec<Vec<String>> {
+    let index: HashMap<&str, usize> = nodes.iter().enumerate()
+        .map(|(position, name)| (name.as_str(), position)).collect();
+    let mut adjacency: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nodes.len()];
+    let mut degree = vec![0.0_f64; nodes.len()];
     for (left, right, weight) in edges {
-        let (Some(&a), Some(&b)) = (index.get(left.as_str()), index.get(right.as_str())) else {
-            continue;
-        };
+        let (Some(&a), Some(&b)) = (index.get(left.as_str()), index.get(right.as_str())) else { continue };
         let weight = *weight as f64;
-        *adjacency[a].entry(b).or_default() += weight;
-        *adjacency[b].entry(a).or_default() += weight;
+        adjacency[a].push((b, weight));
+        adjacency[b].push((a, weight));
         degree[a] += weight;
         degree[b] += weight;
-        total_weight += weight;
     }
-    if total_weight <= 0.0 || nodes.len() < 2 {
-        return Vec::new();
-    }
+    let total_degree: f64 = degree.iter().sum();
+    if total_degree == 0.0 || nodes.len() < 2 { return Vec::new(); }
 
-    let mut community: Vec<usize> = (0..nodes.len()).collect();
-    let mut switch_total = module_terms(&[0], &adjacency, &degree, total_weight).0 * nodes.len() as f64;
-
+    // One deterministic Louvain-style local-moving level. Community degree is
+    // maintained incrementally, so every round is O(edges) rather than
+    // rebuilding and rescanning every candidate community.
+    let mut labels: Vec<usize> = (0..nodes.len()).collect();
+    let mut community_degree = degree.clone();
     let mut order: Vec<usize> = (0..nodes.len()).collect();
-    order.sort_by(|&a, &b| {
-        degree[b]
-            .partial_cmp(&degree[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| nodes[a].cmp(&nodes[b]))
-    });
-
-    let members_of = |community: &Vec<usize>, label: usize| -> Vec<usize> {
-        (0..community.len())
-            .filter(|other| community[*other] == label)
-            .collect()
-    };
-
+    order.sort_by(|&a, &b| degree[b].total_cmp(&degree[a]).then_with(|| nodes[a].cmp(&nodes[b])));
     for _ in 0..MAX_PROPAGATION_ROUNDS {
-        let mut improved = false;
+        let mut changed = false;
         for &node in &order {
-            if adjacency[node].is_empty() {
-                continue;
+            if adjacency[node].is_empty() { continue; }
+            let current = labels[node];
+            let node_degree = degree[node];
+            community_degree[current] -= node_degree;
+            let mut inside_weight: HashMap<usize, f64> = HashMap::new();
+            for &(neighbour, weight) in &adjacency[node] {
+                *inside_weight.entry(labels[neighbour]).or_default() += weight;
             }
-            let current = community[node];
-            let current_members = members_of(&community, current);
-            let (q_current, t_current) =
-                module_terms(&current_members, &adjacency, &degree, total_weight);
-
-            let mut candidates: Vec<usize> = adjacency[node]
-                .keys()
-                .map(|neighbour| community[*neighbour])
-                .filter(|candidate| *candidate != current)
-                .collect();
-            candidates.sort_unstable();
-            candidates.dedup();
-
             let mut best = current;
-            let mut best_gain = 0.0;
-            for candidate in candidates {
-                let mut shrunk = current_members.clone();
-                shrunk.retain(|member| *member != node);
-                let mut grown = members_of(&community, candidate);
-                grown.push(node);
-
-                let (q_candidate, t_candidate) =
-                    module_terms(&members_of(&community, candidate), &adjacency, &degree, total_weight);
-                let (q_shrunk, t_shrunk) =
-                    module_terms(&shrunk, &adjacency, &degree, total_weight);
-                let (q_grown, t_grown) = module_terms(&grown, &adjacency, &degree, total_weight);
-
-                // Only these two modules and the global switch probability move.
-                let switch_before = switch_total;
-                let switch_after = switch_before - q_current - q_candidate + q_shrunk + q_grown;
-                let before = -xlogx(q_current) - xlogx(q_candidate) + xlogx(switch_before)
-                    - (t_current + t_candidate) / (2.0 * total_weight);
-                let after = -xlogx(q_shrunk) - xlogx(q_grown) + xlogx(switch_after)
-                    - (t_shrunk + t_grown) / (2.0 * total_weight);
-
-                let gain = before - after;
-                if gain > best_gain + EPSILON {
+            let mut best_gain = inside_weight.get(&current).copied().unwrap_or(0.0)
+                - node_degree * community_degree[current] / total_degree;
+            for (candidate, weight) in inside_weight {
+                let gain = weight - node_degree * community_degree[candidate] / total_degree;
+                if gain > best_gain + 1e-9 || (gain - best_gain).abs() <= 1e-9 && candidate < best {
                     best = candidate;
                     best_gain = gain;
                 }
             }
-
-            if best != current {
-                community[node] = best;
-                improved = true;
-            }
+            labels[node] = best;
+            community_degree[best] += node_degree;
+            changed |= best != current;
         }
-        if !improved {
-            break;
-        }
-        // Refresh the cached switch probability after a full pass.
-        switch_total = (0..nodes.len())
-            .map(|node| community[node])
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .map(|label| {
-                module_terms(&members_of(&community, label), &adjacency, &degree, total_weight).0
-            })
-            .sum();
+        if !changed { break; }
     }
 
     let mut buckets: BTreeMap<usize, Vec<String>> = BTreeMap::new();
-    for (position, label) in community.iter().enumerate() {
-        buckets.entry(*label).or_default().push(nodes[position].clone());
+    for (position, label) in labels.into_iter().enumerate() {
+        buckets.entry(label).or_default().push(nodes[position].clone());
     }
     buckets.into_values().collect()
 }
 
-/// `x·log2(x)`, defined as 0 at 0 so empty modules contribute nothing.
-fn xlogx(x: f64) -> f64 {
-    if x > 0.0 {
-        x * x.log2()
-    } else {
-        0.0
-    }
-}
-
-/// Map-equation quantities for one module: `(exit flow, internal transitions)`.
-///
-/// The transition term is `Σ w·log2(w/k_α)` over directed internal moves, which
-/// is what makes a module's own code short when the walker stays put.
-fn module_terms(
-    members: &[usize],
-    adjacency: &[HashMap<usize, f64>],
-    degree: &[f64],
-    total_weight: f64,
-) -> (f64, f64) {
-    if members.is_empty() || total_weight <= 0.0 {
-        return (0.0, 0.0);
-    }
-    let set: HashSet<usize> = members.iter().copied().collect();
-    let mut internal = 0.0;
-    let mut transitions = 0.0;
-    for &node in members {
-        for (&neighbour, &weight) in &adjacency[node] {
-            if !set.contains(&neighbour) || weight <= 0.0 {
-                continue;
-            }
-            internal += weight;
-            transitions += weight * (weight / degree[node]).log2();
-        }
-    }
-    let internal = internal / 2.0;
-    let degree_sum: f64 = members.iter().map(|node| degree[*node]).sum();
-    let exit_flow = (degree_sum - 2.0 * internal) / (2.0 * total_weight);
-    (exit_flow, transitions)
-}
-
-/// Upper bound on refinement rounds. Local moving converges quickly; the cap
-/// only stops a pathological oscillation from running forever.
-const MAX_PROPAGATION_ROUNDS: usize = 50;
+/// Local moving converges quickly; this cap bounds pathological graphs.
+const MAX_PROPAGATION_ROUNDS: usize = 20;
 
 #[tauri::command]
 pub async fn get_tag_catalog(state: State<'_, AppState>) -> Result<Vec<TagCatalogEntry>> {
@@ -548,8 +438,8 @@ fn weighted_degrees(names: &[String], edges: &[(String, String, i64)]) -> HashMa
     degrees
 }
 
-/// Index raw tag membership once so every community count is a set union,
-/// rather than another full `feed_items` + `json_each` scan.
+/// Index canonical tag membership once so every community count is a set
+/// union rather than another full `feed_items` + `json_each` scan.
 fn build_article_ids_by_tag(rows: &[(i64, String)]) -> HashMap<String, HashSet<i64>> {
     let mut index: HashMap<String, HashSet<i64>> = HashMap::new();
     for (item_id, tag) in rows {
@@ -571,10 +461,9 @@ fn count_articles_for_members(
     item_ids.len() as i64
 }
 
-/// The community map: raw-tag co-occurrence, partitioned locally.
+/// The community map: canonical-tag co-occurrence, partitioned locally.
 ///
-/// Read-only by construction: it never calls `map_tag`, `set_tag_adopted` or
-/// the topic writer, so looking at the map cannot change the library. The
+/// Read-only by construction: looking at the map cannot change the library. The
 /// partition reuses the same map-equation implementation as the old
 /// community command, but keeps singletons and reports coverage, because a
 /// map that silently drops most of its nodes is not an overview.
@@ -584,10 +473,10 @@ pub async fn get_tag_overview(
     subscription_id: Option<i64>,
 ) -> Result<TagOverview> {
     let repo = state.feed_repo.as_ref();
-    let usage = repo.find_raw_tag_usage(subscription_id).await?;
-    let edges = repo.find_raw_tag_cooccurrence(subscription_id).await?;
-    let raw_tag_items = repo.find_raw_tag_items(subscription_id).await?;
-    let article_ids_by_tag = build_article_ids_by_tag(&raw_tag_items);
+    let usage = repo.find_tag_usage(subscription_id).await?;
+    let edges = repo.find_tag_cooccurrence(subscription_id).await?;
+    let tag_items = repo.find_tag_items(subscription_id).await?;
+    let article_ids_by_tag = build_article_ids_by_tag(&tag_items);
     let blocked: HashSet<String> = repo.find_blocked_tags().await?.into_iter().collect();
     let coverage = repo.tag_overview_coverage(subscription_id).await?;
     let assignments: HashMap<String, i64> = repo
@@ -619,7 +508,7 @@ pub async fn get_tag_overview(
     let mut structuring = "cooccurrence".to_string();
     if names.len() >= 2 {
         let weighted_degree = weighted_degrees(&names, &kept);
-        let mut parts = map_equation_modules(&names, &kept);
+        let mut parts = weighted_label_modules(&names, &kept);
         let largest = parts.iter().map(Vec::len).max().unwrap_or(0);
         if names.len() > OVERVIEW_DEGENERATE_MIN
             && largest * 100 / names.len().max(1) >= OVERVIEW_DEGENERATE_SHARE
@@ -781,16 +670,12 @@ async fn load_topic_workspace(state: &State<'_, AppState>) -> Result<TopicWorksp
     let repo = state.feed_repo.as_ref();
     let categories = repo.find_topic_categories().await?;
     let assignments = repo.find_topic_assignments().await?;
-    let usage = repo.find_raw_tag_usage(None).await?;
     let catalog = repo.find_tag_catalog().await?;
-
-    let mut names: Vec<String> = usage.keys().cloned().collect();
-    for entry in &catalog {
-        if !names.contains(&entry.name) {
-            names.push(entry.name.clone());
-        }
-    }
-    names.sort();
+    let usage: HashMap<String, i64> = catalog
+        .iter()
+        .map(|entry| (entry.name.clone(), entry.usage_count))
+        .collect();
+    let names: Vec<String> = catalog.iter().map(|entry| entry.name.clone()).collect();
 
     let by_name: HashMap<&str, &crate::repositories::TopicAssignment> = assignments
         .iter()
@@ -1008,7 +893,7 @@ fn subdivide(
         .collect();
     let mut names = members.to_vec();
     names.sort();
-    let parts = map_equation_modules(&names, &induced);
+    let parts = weighted_label_modules(&names, &induced);
     // No split, or a split that is still one blob: keep the plain field.
     if parts.len() < 2 || parts.len() == 1 && parts[0].len() == names.len() {
         return Vec::new();
@@ -1193,6 +1078,49 @@ pub async fn suggest_topic_assignments(
     })
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct TagConsolidationResult {
+    pub single_use: i64,
+    pub merged: i64,
+    pub unmatched: i64,
+}
+
+fn single_use_merge_pairs(catalog: &[TagCatalogEntry], vectors: &[Vec<f32>], threshold: f32) -> Vec<(String, String)> {
+    if catalog.len() != vectors.len() { return Vec::new(); }
+    let targets: Vec<usize> = catalog.iter().enumerate()
+        .filter_map(|(index, tag)| (tag.usage_count > 1).then_some(index)).collect();
+    catalog.iter().enumerate()
+        .filter(|(_, tag)| tag.usage_count == 1)
+        .filter_map(|(index, tag)| {
+            let mut best: Option<(usize, f32)> = None;
+            for &target in &targets {
+                let similarity = cosine_similarity(&vectors[index], &vectors[target]);
+                if similarity >= threshold && best.is_none_or(|(_, score)| similarity > score) {
+                    best = Some((target, similarity));
+                }
+            }
+            best.map(|(target, _)| (tag.name.clone(), catalog[target].name.clone()))
+        })
+        .collect()
+}
+
+/// Merge one-article entries into their nearest established tag when the
+/// configured similarity threshold is met. Established targets prevent cycles.
+#[tauri::command]
+pub async fn consolidate_single_use_tags(state: State<'_, AppState>) -> Result<TagConsolidationResult> {
+    let catalog = state.feed_repo.find_tag_catalog().await?;
+    let single_use = catalog.iter().filter(|tag| tag.usage_count == 1).count() as i64;
+    if single_use == 0 {
+        return Ok(TagConsolidationResult { single_use: 0, merged: 0, unmatched: 0 });
+    }
+    let names: Vec<String> = catalog.iter().map(|tag| tag.name.clone()).collect();
+    let vectors = tag_vectors(&state, &names).await?;
+    let threshold = state.tag_matcher.config().await.similarity_threshold;
+    let pairs = single_use_merge_pairs(&catalog, &vectors, threshold);
+    let merged = state.feed_repo.merge_tag_pairs(&pairs).await? as i64;
+    Ok(TagConsolidationResult { single_use, merged, unmatched: single_use - merged })
+}
+
 #[tauri::command]
 pub async fn create_tag(state: State<'_, AppState>, name: String) -> Result<()> {
     state.feed_repo.create_tag(&name).await
@@ -1256,11 +1184,37 @@ pub async fn set_tag_match_config(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::time::{Duration, Instant};
 
     use super::{
-        build_article_ids_by_tag, count_articles_for_members, map_equation_modules,
-        semantic_partition, topic_state_hash, validate_topic_changes, weighted_degrees,
+        build_article_ids_by_tag, count_articles_for_members, semantic_partition,
+        single_use_merge_pairs, topic_state_hash, validate_topic_changes, weighted_degrees,
+        weighted_label_modules,
     };
+    use crate::repositories::TagCatalogEntry;
+
+    #[test]
+    fn single_use_cleanup_only_targets_a_similar_established_tag() {
+        let catalog = vec![
+            TagCatalogEntry { name: "machine_learning".into(), usage_count: 12, aliases: vec![] },
+            TagCatalogEntry { name: "ml".into(), usage_count: 1, aliases: vec![] },
+            TagCatalogEntry { name: "gardening".into(), usage_count: 1, aliases: vec![] },
+        ];
+        let vectors = vec![vec![1.0, 0.0], vec![0.99, 0.01], vec![0.0, 1.0]];
+        assert_eq!(single_use_merge_pairs(&catalog, &vectors, 0.85), vec![("ml".into(), "machine_learning".into())]);
+    }
+
+    #[test]
+    fn a_library_sized_partition_stays_interactive() {
+        let nodes: Vec<String> = (0..2_000).map(|index| format!("tag_{index}")).collect();
+        let edges: Vec<(String, String, i64)> = (1..nodes.len())
+            .map(|index| (nodes[index - 1].clone(), nodes[index].clone(), 3))
+            .collect();
+        let started = Instant::now();
+        let parts = weighted_label_modules(&nodes, &edges);
+        assert_eq!(parts.iter().map(Vec::len).sum::<usize>(), nodes.len());
+        assert!(started.elapsed() < Duration::from_secs(1), "partition took {:?}", started.elapsed());
+    }
 
     #[test]
     fn the_partition_keeps_weak_links_from_fusing_two_groups() {
@@ -1276,7 +1230,7 @@ mod tests {
             ("c".to_string(), "d".to_string(), 9),
             ("b".to_string(), "c".to_string(), 1),
         ];
-        let parts = map_equation_modules(&nodes, &edges);
+        let parts = weighted_label_modules(&nodes, &edges);
         assert!(
             parts.len() >= 2,
             "a weight-1 bridge must not fuse two tight groups, got {parts:?}"

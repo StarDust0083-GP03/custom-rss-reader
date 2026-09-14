@@ -46,6 +46,8 @@ const state = {
 };
 let dictionary: TagDictionaryStatus | null = null;
 let dictionaryBusy = false;
+let consolidationBusy = false;
+let footerMessage: string | null = null;
 
 function $<T extends HTMLElement>(id: string): T | null {
   return document.getElementById(id) as T | null;
@@ -156,8 +158,13 @@ function renderList() {
 function renderFooter() {
   const status = $("tag-graph-status");
   const subtitle = $("tag-graph-subtitle");
+  const consolidate = $<HTMLButtonElement>("tag-consolidate-single-use");
   if (subtitle) subtitle.textContent = `All subscriptions · ${state.catalog.length} tags`;
-  if (status) status.textContent = "Tags are vocabulary entries; Topics are the navigation layer.";
+  if (status) status.textContent = footerMessage ?? "";
+  if (consolidate) {
+    consolidate.disabled = consolidationBusy || !state.catalog.some(tag => tag.usage_count === 1);
+    consolidate.textContent = consolidationBusy ? "Comparing tags…" : "Merge single-use tags";
+  }
 }
 
 function renderAll() {
@@ -260,6 +267,28 @@ async function load() {
   }
 }
 
+async function consolidateSingleUseTags() {
+  if (consolidationBusy) return;
+  consolidationBusy = true;
+  footerMessage = "Comparing one-article tags with established vocabulary…";
+  renderFooter();
+  try {
+    const result = await tagsApi.consolidateSingleUse();
+    footerMessage = result.merged
+      ? `Merged ${result.merged}/${result.single_use} single-use tags · ${result.unmatched} below the similarity threshold`
+      : `${result.single_use} single-use tags checked · none were similar enough to merge`;
+    toastSuccess(result.merged ? `Merged ${result.merged} single-use tags.` : "No safe single-use tag merges found.");
+    await Promise.all([load(), loadTopics(), loadOverview()]);
+    window.dispatchEvent(new CustomEvent("rss-tags-changed", { detail: { kind: "consolidate" } }));
+  } catch (error) {
+    footerMessage = "Single-use tag cleanup failed.";
+    toastError(`Could not merge single-use tags: ${error}`);
+  } finally {
+    consolidationBusy = false;
+    renderFooter();
+  }
+}
+
 let communityMap: CommunityMap | null = null;
 let topicManager: TopicManager | null = null;
 
@@ -328,6 +357,7 @@ export function initTagGraph() {
     renderList();
   });
   $("tag-graph-manage")?.addEventListener("click", () => void openTagManager());
+  $("tag-consolidate-single-use")?.addEventListener("click", () => void consolidateSingleUseTags());
   $("tag-dictionary-build")?.addEventListener("click", () => void buildDictionary());
   document.querySelectorAll<HTMLButtonElement>("[data-tag-view]").forEach(tab => {
     tab.addEventListener("click", () => showView(tab.dataset.tagView ?? "overview"));

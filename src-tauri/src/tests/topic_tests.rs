@@ -1,9 +1,7 @@
 //! The topic navigation layer and the community map's source data.
 //!
-//! These tests pin the two things the design depends on: an article keeps the
-//! names the classifier actually returned (so an adoption or grouping change
-//! is reversible), and the map is built from those raw names rather than from
-//! the display column a previous mapping already rewrote.
+//! Raw classifier output remains available for reversible vocabulary changes,
+//! but every user-facing Topic and Community read uses canonical display tags.
 
 use std::collections::HashSet;
 
@@ -73,7 +71,7 @@ async fn raw_names_survive_the_display_cap() {
 }
 
 #[tokio::test]
-async fn overview_counts_raw_names_after_a_mapping_rewrites_the_display() {
+async fn overview_counts_canonical_names_after_a_mapping_rewrites_the_display() {
     let env = TestEnv::new().await;
     env.feed_repo.create_tag("machine_learning").await.unwrap();
     let id = seed_item_with_tags(&env, "raw", &["deep_learning"]).await;
@@ -86,16 +84,13 @@ async fn overview_counts_raw_names_after_a_mapping_rewrites_the_display() {
         .unwrap();
     let item = env.feed_repo.find_by_id(id).await.unwrap();
     assert_eq!(item.tags.as_deref(), Some(r#"["machine_learning"]"#));
-    let usage = env.feed_repo.find_raw_tag_usage(None).await.unwrap();
-    assert_eq!(usage.get("deep_learning").copied(), Some(1));
-    assert!(
-        !usage.contains_key("machine_learning"),
-        "the map must not be built from the rewritten display names: {usage:?}"
-    );
+    let usage = env.feed_repo.find_tag_usage(None).await.unwrap();
+    assert_eq!(usage.get("machine_learning").copied(), Some(1));
+    assert!(!usage.contains_key("deep_learning"), "raw aliases must not enter the map: {usage:?}");
 }
 
 #[tokio::test]
-async fn catalog_usage_and_raw_usage_keep_distinct_name_spaces() {
+async fn catalog_and_overview_usage_share_the_canonical_name_space() {
     let env = TestEnv::new().await;
     env.feed_repo.create_tag("machine_learning").await.unwrap();
     seed_item_with_tags(&env, "raw-name", &["deep_learning"]).await;
@@ -114,16 +109,9 @@ async fn catalog_usage_and_raw_usage_keep_distinct_name_spaces() {
         Some(1),
         "catalog usage follows the display column"
     );
-    assert_eq!(
-        env.feed_repo
-            .find_raw_tag_usage(None)
-            .await
-            .unwrap()
-            .get("deep_learning")
-            .copied(),
-        Some(1),
-        "overview usage follows the original raw name"
-    );
+    let usage = env.feed_repo.find_tag_usage(None).await.unwrap();
+    assert_eq!(usage.get("machine_learning").copied(), Some(1));
+    assert!(!usage.contains_key("deep_learning"));
 }
 
 #[tokio::test]
@@ -133,7 +121,7 @@ async fn cooccurrence_and_coverage_describe_the_scope_honestly() {
     seed_item_with_tags(&env, "b", &["docker"]).await;
     let untagged = seed_item_with_tags(&env, "c", &[]).await;
 
-    let edges = env.feed_repo.find_raw_tag_cooccurrence(None).await.unwrap();
+    let edges = env.feed_repo.find_tag_cooccurrence(None).await.unwrap();
     let pair = edges
         .iter()
         .find(|(left, right, _)| left == "containerization" && right == "docker")
@@ -147,9 +135,9 @@ async fn cooccurrence_and_coverage_describe_the_scope_honestly() {
 
     // A territory counts articles, so an article carrying two of its names is
     // counted once rather than once per name. The overview builds this union
-    // from the one raw `(article_id, tag)` query.
-    let raw_rows = env.feed_repo.find_raw_tag_items(None).await.unwrap();
-    let both: HashSet<i64> = raw_rows
+    // from the one canonical `(article_id, tag)` query.
+    let tag_rows = env.feed_repo.find_tag_items(None).await.unwrap();
+    let both: HashSet<i64> = tag_rows
         .into_iter()
         .filter(|(_, tag)| tag == "docker" || tag == "containerization")
         .map(|(item_id, _)| item_id)
@@ -158,7 +146,7 @@ async fn cooccurrence_and_coverage_describe_the_scope_honestly() {
 
     // An article with no readable tags must be reported, not silently counted
     // as covered.
-    sqlx::query("UPDATE feed_items SET raw_tags = '{not json' WHERE id = $1")
+    sqlx::query("UPDATE feed_items SET tags = '{not json' WHERE id = $1")
         .bind(untagged)
         .execute(&env.pool)
         .await

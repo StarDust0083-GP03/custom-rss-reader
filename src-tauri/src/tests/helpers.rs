@@ -132,7 +132,6 @@ impl crate::ai::service::AiService for FakeAi {
     async fn classify_batch(
         &self,
         entries: &[crate::ai::BatchClassifyEntry],
-        _existing_tags: &[String],
     ) -> Result<Vec<crate::ai::ClassificationResponse>> {
         self.calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);

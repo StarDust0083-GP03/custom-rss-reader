@@ -273,7 +273,6 @@ pub struct ClassificationRequest {
     pub description: Option<String>,
     pub content_snippet: Option<String>,
     pub rss_title: Option<String>,
-    pub existing_tags: Option<Vec<String>>,
 }
 
 /// Response from AI classification.

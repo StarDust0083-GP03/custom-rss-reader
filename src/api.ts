@@ -27,6 +27,7 @@ import type {
   TagDictionaryStatus,
   TagExplanationProgress,
   TagIndexResult,
+  TagConsolidationResult,
   TagMatchConfig,
   TagOverview,
   TopicAssignment,
@@ -194,6 +195,12 @@ export const tags = {
     call<void>("rename_tag", { oldName, newName }, "tags.rename"),
   merge: (canonicalName: string, members: string[]) =>
     call<void>("merge_tags", { canonicalName, members }, "tags.merge"),
+  consolidateSingleUse: () =>
+    call<TagConsolidationResult>(
+      "consolidate_single_use_tags",
+      undefined,
+      "tags.consolidateSingleUse",
+    ),
   remove: (name: string) => call<void>("delete_tag", { name }, "tags.remove"),
   restore: (name: string) => call<void>("restore_tag", { name }, "tags.restore"),
   dictionaryStatus: () =>

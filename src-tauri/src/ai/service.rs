@@ -624,12 +624,11 @@ pub trait AiService: Send + Sync {
     ///
     /// Returns one response per entry, aligned with the input order. Entries
     /// the model skipped or mis-indexed come back as empty tags (never an
-    /// error), so one bad row can't fail the whole batch. `existing_tags`
-    /// is the current global canonical vocabulary offered to the model.
+    /// error), so one bad row can't fail the whole batch. Generated names are
+    /// matched to the vocabulary locally after this call.
     async fn classify_batch(
         &self,
         entries: &[crate::ai::BatchClassifyEntry],
-        existing_tags: &[String],
     ) -> Result<Vec<ClassificationResponse>>;
 
     /// Recommend the most worthwhile reads from a candidate list (one LLM
@@ -1062,11 +1061,10 @@ impl AiService for LlmAiService {
             .collect::<String>();
 
         let user_message = format!(
-            "Title: {}\nDescription: {}\nContent: {}\nExisting tags: {:?}",
+            "Title: {}\nDescription: {}\nContent: {}",
             request.title,
             request.description.as_deref().unwrap_or(""),
             content_snippet,
-            request.existing_tags.as_deref().unwrap_or(&[]),
         );
 
         let model = self.config.model.clone();
@@ -1093,16 +1091,16 @@ impl AiService for LlmAiService {
     async fn classify_batch(
         &self,
         entries: &[crate::ai::BatchClassifyEntry],
-        existing_tags: &[String],
     ) -> Result<Vec<ClassificationResponse>> {
         if entries.is_empty() {
             return Ok(Vec::new());
         }
 
-        let system_prompt = format!("You are an article classification assistant. You will receive a numbered list of article titles. For EACH article, classify it by title alone and return a JSON array where every element is:\n\
-            {{\"index\": <the article number>, \"tags\": [1-3 durable subject tags], \"category\": \"<one of: technology, science, politics, entertainment, sports, business, health, education, other>\"}}\n\
-            Reuse an existing canonical tag exactly when it describes the same or a closely related subject. Only propose a new tag when no existing tag represents the subject. New tags must be lowercase English snake_case. Avoid generic labels such as news, article, or important. Existing canonical tags: {}\n\
-            Respond with ONLY the JSON array, one element per input article, no other text.", existing_tags.join(", "));
+        let system_prompt = "You are an article classification assistant. You will receive a numbered list of article titles. For EACH article, classify it by title alone and return a JSON array where every element is:\n\
+            {\"index\": <the article number>, \"tags\": [1-3 durable subject tags], \"category\": \"<one of: technology, science, politics, entertainment, sports, business, health, education, other>\"}\n\
+            Tags must be durable subjects in lowercase English snake_case. Avoid generic labels such as news, article, or important. The application matches generated names to its vocabulary locally.\n\
+            Respond with ONLY the JSON array, one element per input article, no other text."
+            .to_string();
 
         let mut user_message = String::new();
         for e in entries {

@@ -132,16 +132,9 @@ pub async fn classify_item(
 ) -> Result<ClassificationResponse> {
     let ai_service = get_ai_service(&state).await?;
 
-    // The backend is the source of truth for the global vocabulary. Ignore
-    // stale or missing frontend suggestions and pass the current catalog to
-    // the classifier on every manual classification.
-    let request = ClassificationRequest {
-        title,
-        description,
-        content_snippet,
-        rss_title,
-        existing_tags: Some(state.feed_repo.find_vocabulary_names().await?),
-    };
+    // The model proposes short subject names. Matching against the potentially
+    // huge vocabulary happens locally below, so prompt size stays bounded.
+    let request = ClassificationRequest { title, description, content_snippet, rss_title };
 
     let task = state
         .ai_activity

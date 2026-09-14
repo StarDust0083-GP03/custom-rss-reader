@@ -67,7 +67,8 @@ const S = state;
 type TagChangeDetail =
   | { kind: "rename"; oldName: string; newName: string | null }
   | { kind: "merge"; canonicalName: string; members: string[] }
-  | { kind: "delete"; name: string };
+  | { kind: "delete"; name: string }
+  | { kind: "consolidate" };
 
 async function refreshAfterTagChange(detail: TagChangeDetail) {
   if (S.currentFilter === "tag" && S.currentTagFilter) {

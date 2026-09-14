@@ -187,6 +187,13 @@ export interface TagIndexResult {
   total: number;
 }
 
+/** Result of consolidating one-article vocabulary entries. */
+export interface TagConsolidationResult {
+  single_use: number;
+  merged: number;
+  unmatched: number;
+}
+
 /** How Auto-group proposes groups. */
 export type GroupingMethod = "embedding" | "community";
 

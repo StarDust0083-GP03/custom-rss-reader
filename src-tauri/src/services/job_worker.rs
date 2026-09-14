@@ -420,11 +420,9 @@ impl JobWorker {
             })
             .collect();
 
-        let result = async {
-            let existing_tags = self.repo.find_vocabulary_names().await?;
-            ai.classify_batch(&entries, &existing_tags).await
-        }
-        .await;
+        // Vocabulary matching runs locally after classification. Sending every
+        // known tag here made prompt size grow without bound with the library.
+        let result = ai.classify_batch(&entries).await;
 
         let responses = match result {
             Ok(responses) => responses,
