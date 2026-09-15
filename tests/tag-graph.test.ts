@@ -69,7 +69,7 @@ describe("tag workspace after category removal", () => {
     expect(commands).not.toContain("unmap_tag");
   });
 
-  it("consolidates single-use tags from the Tags footer", async () => {
+  it("consolidates low-use tags from the Tags footer", async () => {
     const commands: string[] = [];
     mockIPC(command => {
       commands.push(command);
@@ -78,7 +78,7 @@ describe("tag workspace after category removal", () => {
       if (command === "get_tag_overview") return OVERVIEW;
       if (command === "tag_dictionary_status") return { tags: 3, explained: 3, indexed: 3 };
       if (command === "get_tag_match_config") return { enabled: true, similarity_threshold: 0.85, grouping_method: "embedding", community_min_weight: 1 };
-      if (command === "consolidate_single_use_tags") return { single_use: 1, merged: 1, unmatched: 0 };
+      if (command === "consolidate_single_use_tags") return { candidates: 1, merged: 1, unmatched: 0 };
       return undefined;
     });
     const { initTagGraph, openTagGraph } = await import("../src/ui/tag-graph");

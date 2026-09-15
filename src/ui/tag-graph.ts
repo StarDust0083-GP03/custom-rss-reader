@@ -162,8 +162,8 @@ function renderFooter() {
   if (subtitle) subtitle.textContent = `All subscriptions · ${state.catalog.length} tags`;
   if (status) status.textContent = footerMessage ?? "";
   if (consolidate) {
-    consolidate.disabled = consolidationBusy || !state.catalog.some(tag => tag.usage_count === 1);
-    consolidate.textContent = consolidationBusy ? "Comparing tags…" : "Merge single-use tags";
+    consolidate.disabled = consolidationBusy || !state.catalog.some(tag => tag.usage_count < 5);
+    consolidate.textContent = consolidationBusy ? "Comparing tags…" : "Merge low-use tags";
   }
 }
 
@@ -270,19 +270,19 @@ async function load() {
 async function consolidateSingleUseTags() {
   if (consolidationBusy) return;
   consolidationBusy = true;
-  footerMessage = "Comparing one-article tags with established vocabulary…";
+  footerMessage = "Comparing tags used fewer than five times with established vocabulary…";
   renderFooter();
   try {
     const result = await tagsApi.consolidateSingleUse();
     footerMessage = result.merged
-      ? `Merged ${result.merged}/${result.single_use} single-use tags · ${result.unmatched} below the similarity threshold`
-      : `${result.single_use} single-use tags checked · none were similar enough to merge`;
-    toastSuccess(result.merged ? `Merged ${result.merged} single-use tags.` : "No safe single-use tag merges found.");
+      ? `Merged ${result.merged}/${result.candidates} low-use tags · ${result.unmatched} below the similarity threshold`
+      : `${result.candidates} low-use tags checked · none were similar enough to merge`;
+    toastSuccess(result.merged ? `Merged ${result.merged} low-use tags.` : "No safe low-use tag merges found.");
     await Promise.all([load(), loadTopics(), loadOverview()]);
     window.dispatchEvent(new CustomEvent("rss-tags-changed", { detail: { kind: "consolidate" } }));
   } catch (error) {
-    footerMessage = "Single-use tag cleanup failed.";
-    toastError(`Could not merge single-use tags: ${error}`);
+    footerMessage = "Low-use tag cleanup failed.";
+    toastError(`Could not merge low-use tags: ${error}`);
   } finally {
     consolidationBusy = false;
     renderFooter();

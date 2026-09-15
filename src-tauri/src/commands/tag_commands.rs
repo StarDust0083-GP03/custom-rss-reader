@@ -1080,17 +1080,19 @@ pub async fn suggest_topic_assignments(
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TagConsolidationResult {
-    pub single_use: i64,
+    pub candidates: i64,
     pub merged: i64,
     pub unmatched: i64,
 }
 
-fn single_use_merge_pairs(catalog: &[TagCatalogEntry], vectors: &[Vec<f32>], threshold: f32) -> Vec<(String, String)> {
+const LOW_USAGE_LIMIT: i64 = 5;
+
+fn low_usage_merge_pairs(catalog: &[TagCatalogEntry], vectors: &[Vec<f32>], threshold: f32) -> Vec<(String, String)> {
     if catalog.len() != vectors.len() { return Vec::new(); }
     let targets: Vec<usize> = catalog.iter().enumerate()
-        .filter_map(|(index, tag)| (tag.usage_count > 1).then_some(index)).collect();
+        .filter_map(|(index, tag)| (tag.usage_count >= LOW_USAGE_LIMIT).then_some(index)).collect();
     catalog.iter().enumerate()
-        .filter(|(_, tag)| tag.usage_count == 1)
+        .filter(|(_, tag)| tag.usage_count < LOW_USAGE_LIMIT)
         .filter_map(|(index, tag)| {
             let mut best: Option<(usize, f32)> = None;
             for &target in &targets {
@@ -1104,21 +1106,21 @@ fn single_use_merge_pairs(catalog: &[TagCatalogEntry], vectors: &[Vec<f32>], thr
         .collect()
 }
 
-/// Merge one-article entries into their nearest established tag when the
-/// configured similarity threshold is met. Established targets prevent cycles.
+/// Merge entries used fewer than five times into their nearest established tag
+/// when the configured similarity threshold is met. Established targets prevent cycles.
 #[tauri::command]
 pub async fn consolidate_single_use_tags(state: State<'_, AppState>) -> Result<TagConsolidationResult> {
     let catalog = state.feed_repo.find_tag_catalog().await?;
-    let single_use = catalog.iter().filter(|tag| tag.usage_count == 1).count() as i64;
-    if single_use == 0 {
-        return Ok(TagConsolidationResult { single_use: 0, merged: 0, unmatched: 0 });
+    let candidates = catalog.iter().filter(|tag| tag.usage_count < LOW_USAGE_LIMIT).count() as i64;
+    if candidates == 0 {
+        return Ok(TagConsolidationResult { candidates: 0, merged: 0, unmatched: 0 });
     }
     let names: Vec<String> = catalog.iter().map(|tag| tag.name.clone()).collect();
     let vectors = tag_vectors(&state, &names).await?;
     let threshold = state.tag_matcher.config().await.similarity_threshold;
-    let pairs = single_use_merge_pairs(&catalog, &vectors, threshold);
+    let pairs = low_usage_merge_pairs(&catalog, &vectors, threshold);
     let merged = state.feed_repo.merge_tag_pairs(&pairs).await? as i64;
-    Ok(TagConsolidationResult { single_use, merged, unmatched: single_use - merged })
+    Ok(TagConsolidationResult { candidates, merged, unmatched: candidates - merged })
 }
 
 #[tauri::command]
@@ -1188,20 +1190,20 @@ mod tests {
 
     use super::{
         build_article_ids_by_tag, count_articles_for_members, semantic_partition,
-        single_use_merge_pairs, topic_state_hash, validate_topic_changes, weighted_degrees,
+        low_usage_merge_pairs, topic_state_hash, validate_topic_changes, weighted_degrees,
         weighted_label_modules,
     };
     use crate::repositories::TagCatalogEntry;
 
     #[test]
-    fn single_use_cleanup_only_targets_a_similar_established_tag() {
+    fn low_usage_cleanup_only_targets_a_similar_established_tag() {
         let catalog = vec![
             TagCatalogEntry { name: "machine_learning".into(), usage_count: 12, aliases: vec![] },
-            TagCatalogEntry { name: "ml".into(), usage_count: 1, aliases: vec![] },
+            TagCatalogEntry { name: "ml".into(), usage_count: 4, aliases: vec![] },
             TagCatalogEntry { name: "gardening".into(), usage_count: 1, aliases: vec![] },
         ];
         let vectors = vec![vec![1.0, 0.0], vec![0.99, 0.01], vec![0.0, 1.0]];
-        assert_eq!(single_use_merge_pairs(&catalog, &vectors, 0.85), vec![("ml".into(), "machine_learning".into())]);
+        assert_eq!(low_usage_merge_pairs(&catalog, &vectors, 0.85), vec![("ml".into(), "machine_learning".into())]);
     }
 
     #[test]

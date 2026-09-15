@@ -187,9 +187,9 @@ export interface TagIndexResult {
   total: number;
 }
 
-/** Result of consolidating one-article vocabulary entries. */
+/** Result of consolidating vocabulary entries used fewer than five times. */
 export interface TagConsolidationResult {
-  single_use: number;
+  candidates: number;
   merged: number;
   unmatched: number;
 }
