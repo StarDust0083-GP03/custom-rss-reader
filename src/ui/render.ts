@@ -705,6 +705,7 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
       const html = renderMarkdown(raw);
       setSafeHtml(el, html);
     });
+
     body.appendChild(bilingualEl);
 
     // Streaming: keep the untranslated remainder visible below the
@@ -724,6 +725,16 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
     // translated side never claims a URL.
     resolveRelativeMedia(body, item.link);
     dedupeImages(body, ".paragraph-translated");
+
+    // Image-only model output becomes whitespace after translated-side image
+    // cleanup. Image deduplication can also empty a repeated figure's pair,
+    // so prune empty sides only after both operations have finished.
+    bilingualEl.querySelectorAll(".paragraph-original, .paragraph-translated").forEach((el) => {
+      if (!(el.textContent ?? "").trim() && !el.querySelector("img")) el.remove();
+    });
+    bilingualEl.querySelectorAll(".translation-paragraph, .paragraph-block").forEach((el) => {
+      if (!(el.textContent ?? "").trim() && !el.querySelector("img")) el.remove();
+    });
     return;
   }
 

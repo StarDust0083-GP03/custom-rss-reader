@@ -383,22 +383,16 @@ fn wrap_bilingual(body: &str, cached: bool) -> String {
 
 /// Clean one bilingual pair block (or a whole bilingual document):
 /// - translated side: echoed images are stripped (`strip_images_from_translated`)
-/// - original side: redundant images and links are removed so the two
-///   sides of each pair stay format-aligned (issue #10 comment — the
-///   original used to keep `![img](…)` / `[link](…)` noise that had no
-///   counterpart in the translation).
+/// - original side: images stay visible once, while redundant links become text.
 fn clean_bilingual_block(html: &str) -> String {
     let translated_clean = strip_images_from_translated(html);
     clean_original_side(&translated_clean)
 }
 
-/// Strip images and redundant links from within `.paragraph-original` divs.
+/// Reduce links within `.paragraph-original` divs while preserving images.
 ///
 /// Pairs the `<div class="paragraph-original">` marker with its matching
-/// `</div>` (depth-counted), then inside it:
-/// - removes `<img>` tags and markdown `![alt](url)` images
-/// - reduces markdown links `[text](url)` to just `text`
-/// - reduces HTML anchors `<a …>text</a>` to just `text`
+/// `</div>` (depth-counted), then reduces Markdown and HTML links to text.
 fn clean_original_side(html: &str) -> String {
     let marker = r#"<div class="paragraph-original">"#;
     let mut out = String::with_capacity(html.len());
@@ -411,9 +405,7 @@ fn clean_original_side(html: &str) -> String {
 
         if let Some(end) = find_matching_div_close(&html[scan_from..]) {
             let inner = &html[scan_from..scan_from + end];
-            let cleaned = strip_anchor_tags(&strip_markdown_links(&strip_markdown_images(
-                &strip_img_tags(inner),
-            )));
+            let cleaned = strip_anchor_tags(&strip_markdown_links(inner));
             out.push_str(&cleaned);
             out.push_str("</div>");
             pos = scan_from + end + "</div>".len();
@@ -436,9 +428,9 @@ fn strip_markdown_links(s: &str) -> String {
     let mut out = String::with_capacity(len);
     let mut i = 0;
     while i < len {
-        // Images (`![`) are handled by strip_markdown_images — skip them
-        // here so their alt text isn't left behind.
-        if bytes[i] == b'[' {
+        // A Markdown image (`![`) is not a link. Preserve it for the original
+        // side instead of reducing it to broken `!alt` text.
+        if bytes[i] == b'[' && (i == 0 || bytes[i - 1] != b'!') {
             let after = &s[i + 1..];
             if let Some(close_bracket) = after.find("](") {
                 let text = &s[i + 1..i + 1 + close_bracket];
@@ -595,8 +587,7 @@ fn strip_images_from_translated(html: &str) -> String {
 
     while let Some(start) = html[pos..].find(marker) {
         let abs_start = pos + start;
-        // Copy everything up to and including the marker
-        out.push_str(&html[pos..abs_start + marker.len()]);
+        out.push_str(&html[pos..abs_start]);
         let scan_from = abs_start + marker.len();
 
         // Find the matching </div> using depth counting so nested divs work
@@ -605,12 +596,17 @@ fn strip_images_from_translated(html: &str) -> String {
             // Remove HTML <img> AND markdown ![alt](url) images inside this
             // translated block — either way the image must not be echoed.
             let stripped = strip_markdown_images(&strip_img_tags(inner));
-            out.push_str(&stripped);
-            out.push_str("</div>");
+            // An image-only translation becomes blank after deduplication.
+            // Drop that side entirely instead of rendering an empty segment.
+            if !stripped.trim().is_empty() {
+                out.push_str(marker);
+                out.push_str(&stripped);
+                out.push_str("</div>");
+            }
             pos = scan_from + end + "</div>".len();
         } else {
             // Unmatched — copy rest verbatim and stop
-            out.push_str(&html[scan_from..]);
+            out.push_str(&html[abs_start..]);
             return out;
         }
     }
@@ -882,16 +878,22 @@ mod tests {
         );
     }
 
-    /// Issue #10 comment: the ORIGINAL side of a bilingual pair must lose
-    /// redundant images and links so both sides of the pair stay
-    /// format-aligned.
     #[test]
-    fn test_clean_original_side_strips_images_and_links() {
+    fn image_only_pair_keeps_one_image_without_an_empty_translation() {
+        let html = r#"<div class="translation-paragraph"><div class="paragraph-original">![figure](https://x.com/a.png)</div><div class="paragraph-translated">![figure](https://x.com/a.png)</div></div>"#;
+        assert_eq!(
+            clean_bilingual_block(html),
+            r#"<div class="translation-paragraph"><div class="paragraph-original">![figure](https://x.com/a.png)</div></div>"#,
+        );
+    }
+
+    #[test]
+    fn test_clean_original_side_strips_links_but_keeps_images() {
         let html = r#"<div class="paragraph-original">See [the docs](https://x.com/a) and ![fig](x.png) and <a href="https://x.com/b">more</a></div><div class="paragraph-translated">看文档</div>"#;
         let result = clean_bilingual_block(html);
         assert_eq!(
             result,
-            r#"<div class="paragraph-original">See the docs and  and more</div><div class="paragraph-translated">看文档</div>"#
+            r#"<div class="paragraph-original">See the docs and ![fig](x.png) and more</div><div class="paragraph-translated">看文档</div>"#
         );
     }
 

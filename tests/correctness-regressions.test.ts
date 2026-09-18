@@ -235,6 +235,35 @@ describe('explicit state, not timers', () => {
   });
 });
 
+describe('translation display', () => {
+  it('keeps the original image and removes an empty bilingual segment', () => {
+    const article = {
+      ...item(),
+      translated_content: `<div class="bilingual-content">
+        <div class="translation-paragraph"><div class="paragraph-original"> </div><div class="paragraph-translated"> </div></div>
+        <div class="translation-paragraph"><div class="paragraph-original">![figure](./figure.png)</div></div>
+        <div class="translation-paragraph"><div class="paragraph-original">![duplicate](./figure.png)</div></div>
+      </div>`,
+    };
+    state.translationStateByItemId.set(article.id, {
+      runId: 0,
+      useTranslation: true,
+      inProgressContent: null,
+      abortController: null,
+      hasError: false,
+      errorMessage: null,
+    });
+
+    renderItemDetail(article);
+
+    expect(document.querySelectorAll('.translation-paragraph')).toHaveLength(1);
+    expect(document.querySelector<HTMLImageElement>('.paragraph-original img')?.src).toBe(
+      'https://example.com/posts/figure.png',
+    );
+    expect(document.querySelector('.paragraph-translated')).toBeNull();
+  });
+});
+
 describe('markdown fidelity', () => {
   it('keeps an image title out of the image URL', () => {
     const div = document.createElement('div');
