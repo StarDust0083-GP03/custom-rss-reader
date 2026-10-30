@@ -999,10 +999,11 @@ body::after {
 }
 
 /* Bionic reading — fixation marks on the leading letters of English words.
-   Weight 600 (not the browser's default <b> 700) so author bold still reads
-   as emphasis; colour is always inherited, including in dark mode. */
+   Body text is 400; 800 is the top of Monaspace Radon's weight axis. 600 was
+   only ~25% heavier in WebKitGTK and did not read as an anchor. Colour is
+   always inherited, including in dark mode. */
 .bionic-fix {
-    font-weight: 600;
+    font-weight: 800;
     color: inherit;
 }
 

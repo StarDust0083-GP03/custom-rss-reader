@@ -587,7 +587,7 @@ p:empty, div:empty { display: none; }
 
 /* Bionic reading — word-leading fixation marks (matches host .bionic-fix) */
 .bionic-fix {
-  font-weight: 600;
+  font-weight: 800;
   color: inherit;
 }
 </style>

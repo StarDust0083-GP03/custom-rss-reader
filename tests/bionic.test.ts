@@ -8,6 +8,7 @@
  * description fallback) and the sandboxed local-markdown iframe.
  */
 
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // features/actions pulls Tauri dialog/opener plugins and cycles back into
@@ -314,5 +315,14 @@ describe("local markdown iframe integration", () => {
       "https://example.com/x",
     );
     expect(html).toContain(".bionic-fix");
+  });
+});
+
+describe("bionic typography", () => {
+  it("uses the heaviest Monaspace Radon weight for fixations in both render paths", () => {
+    // Body text is 400. 600 measured only ~25% more ink, too close to read as an anchor.
+    const rule = /\.bionic-fix\s*\{[^}]*font-weight:\s*800/;
+    expect(readFileSync("src/styles.css", "utf8")).toMatch(rule);
+    expect(readFileSync("src/iframe.ts", "utf8")).toMatch(rule);
   });
 });
