@@ -1,7 +1,9 @@
 /**
  * Bionic reading: English fixation marks on article text.
  *
- * Unit coverage for the DOM transformer, then render-level integration for
+ * Unit coverage for the DOM transformer (including the word-boundary cases
+ * that regressed once: inline markup, contractions, compounds, URL
+ * boundaries, pathological punctuation), then render-level integration for
  * the three host-DOM paths (markdown, bilingual + streaming tail,
  * description fallback) and the sandboxed local-markdown iframe.
  */
@@ -71,10 +73,57 @@ describe("applyBionic", () => {
     expect(fixationTexts(root)).toEqual(["Se", "or", "ma", "an", "st", "pu"]);
   });
 
-  it("leaves dotted domains and hyphenated runs alone", () => {
+  it("leaves dotted domains alone but fixates hyphenated prose", () => {
     const root = wrap("<p>Visit example.com or a well-known source.</p>");
     applyBionic(root);
-    expect(fixationTexts(root)).toEqual(["Vis", "or", "a", "sou"]); // "source" is a plain word
+    expect(fixationTexts(root)).toEqual(["Vis", "or", "a", "we", "kno", "sou"]);
+  });
+
+  it("fixates each component of a multi-part compound", () => {
+    const root = wrap("<p>state-of-the-art open-source</p>");
+    const before = root.textContent;
+    applyBionic(root);
+    expect(root.textContent).toBe(before);
+    expect(fixationTexts(root)).toEqual(["sta", "of", "th", "ar", "op", "sou"]);
+  });
+
+  it("keeps one leading mark on contractions and possessives", () => {
+    const root = wrap("<p>don't reader’s can't</p>");
+    const before = root.textContent;
+    applyBionic(root);
+    expect(root.textContent).toBe(before);
+    // No suffix anchors: "don't" must not become **do**n'**t**.
+    expect(fixationTexts(root)).toEqual(["do", "read", "ca"]);
+  });
+
+  it("uses one word unit across inline markup", () => {
+    const root = wrap("<p>rea<em>ding</em> text</p>");
+    const before = root.textContent;
+    applyBionic(root);
+    expect(root.textContent).toBe(before);
+    // The same word must get the same fixation no matter how it is marked up.
+    expect(fixationTexts(root)).toEqual(["read", "te"]);
+    expect(root.querySelector("b.bionic-fix em")).toBeTruthy();
+    const marked = root.querySelector("b.bionic-fix em")!.textContent ?? "";
+    const rest = root.querySelectorAll("em")[1]?.textContent ?? "";
+    expect(marked + rest).toBe("ding");
+  });
+
+  it("stops URL protection at prose punctuation", () => {
+    const root = wrap("<p>https://example.com。English正文</p>");
+    const before = root.textContent;
+    applyBionic(root);
+    expect(root.textContent).toBe(before);
+    expect(fixationTexts(root)).toEqual(["Engl"]);
+  });
+
+  it("protects a URL that inline markup splits", () => {
+    const root = wrap('<p>https://example.com/<span>article</span> here</p>');
+    const before = root.textContent;
+    applyBionic(root);
+    expect(root.textContent).toBe(before);
+    expect(fixationTexts(root)).toEqual(["he"]);
+    expect(root.querySelector("span")?.textContent).toBe("article");
   });
 
   it("skips code, pre and author bold but still processes link text", () => {
@@ -106,6 +155,30 @@ describe("applyBionic", () => {
     applyBionic(root);
     expect(root.innerHTML).toBe(first);
     expect(root.querySelector("b.bionic-fix b.bionic-fix")).toBeNull();
+  });
+
+  it("is idempotent across inline markup too", () => {
+    const root = wrap("<p>rea<em>ding</em> text</p>");
+    applyBionic(root);
+    const first = root.innerHTML;
+    applyBionic(root);
+    expect(root.innerHTML).toBe(first);
+  });
+
+  it("stays linear on pathological punctuation runs", () => {
+    // A long run of separator characters must be scanned as ONE protected
+    // lexeme. The earlier regex-based version re-tried an email candidate at
+    // every position: ~800 ms at this size.
+    const root = wrap("<p></p>");
+    root.firstElementChild!.textContent = "+".repeat(32000) + "a";
+    const before = root.textContent;
+    const started = performance.now();
+    applyBionic(root);
+    const elapsed = performance.now() - started;
+
+    expect(root.textContent).toBe(before);
+    expect(fixationTexts(root)).toEqual([]);
+    expect(elapsed).toBeLessThan(400);
   });
 });
 
@@ -167,6 +240,13 @@ describe("renderItemDetail bionic integration", () => {
     expect(el.querySelector("code b.bionic-fix")).toBeNull();
     expect(el.querySelector("a")?.getAttribute("href")).toBe("https://example.com/a");
     expect(el.querySelector("a b.bionic-fix")).toBeTruthy();
+  });
+
+  it("keeps emphasised words whole in rendered markdown", () => {
+    renderItemDetail(item({ content_md: "A rea*ding* test." }));
+    const el = detailBody();
+    // Same word unit across <em>: one mark, not "re" + "di".
+    expect(fixationTexts(el)).toEqual(["A", "read", "te"]);
   });
 
   it("processes bilingual originals and the streaming tail, not pure Chinese", () => {
