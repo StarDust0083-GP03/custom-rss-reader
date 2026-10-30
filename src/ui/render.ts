@@ -8,6 +8,7 @@
 import { items as itemsApi } from "../api";
 import type { FeedItem, FeedItemSummary } from "../types";
 import { setSafeHtml, setText, htmlToPlainText, dedupeImages } from "../sanitize";
+import { applyBionic } from "../bionic";
 import { IframeManager } from "../iframe";
 import { configureMarked, renderMarkdown } from "../markdown";
 import { state } from "../state";
@@ -609,6 +610,10 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
     // untranslated tail — keep only the first occurrence. The hidden
     // translated side never claims a URL.
     dedupeImages(body, ".paragraph-translated");
+    // Bionic reading (English fixation marks) — last DOM pass so sanitising
+    // and re-rendering can't strip it; covers originals, translated side
+    // and the streaming tail in one sweep.
+    applyBionic(body);
     return;
   }
 
@@ -651,9 +656,12 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
     // The same image often appears twice in one article (hero + inline) —
     // render it once.
     dedupeImages(body);
+    // Bionic reading — after sanitise + dedupe, on the whole body.
+    applyBionic(body);
   } else if (item.description) {
     // Same untrusted-HTML handling as the list-item summary above.
     setText(body, htmlToPlainText(item.description));
+    applyBionic(body);
   } else {
     setText(body, "No content available");
   }

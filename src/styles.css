@@ -998,6 +998,14 @@ body::after {
     text-decoration-color: var(--accent-color);
 }
 
+/* Bionic reading — fixation marks on the leading letters of English words.
+   Weight 600 (not the browser's default <b> 700) so author bold still reads
+   as emphasis; colour is always inherited, including in dark mode. */
+.bionic-fix {
+    font-weight: 600;
+    color: inherit;
+}
+
 .detail-source {
     font-family: var(--font-ui);
     font-size: 0.72rem;

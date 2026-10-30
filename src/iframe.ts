@@ -16,6 +16,7 @@
  */
 
 import { setSafeHtml, escapeHtml, dedupeImages } from "./sanitize";
+import { applyBionic } from "./bionic";
 import { configureMarked, renderMarkdown } from "./markdown";
 
 configureMarked();
@@ -299,6 +300,9 @@ function renderMarkdownBody(markdown: string, baseUrl: string): string {
   setSafeHtml(wrapper, html);
   // 4. Same image policy as the host DOM path: one occurrence per URL.
   dedupeImages(wrapper);
+  // 5. Bionic reading — last pass on the sanitised DOM, before the innerHTML
+  //    is serialised into the sandboxed iframe document.
+  applyBionic(wrapper);
   return wrapper.innerHTML;
 }
 
@@ -580,6 +584,12 @@ body { overflow-wrap: anywhere; word-break: break-word; }
 
 /* Hide empty elements */
 p:empty, div:empty { display: none; }
+
+/* Bionic reading — word-leading fixation marks (matches host .bionic-fix) */
+.bionic-fix {
+  font-weight: 600;
+  color: inherit;
+}
 </style>
 </head>
 <body>
