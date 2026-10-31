@@ -1,0 +1,45 @@
+text-vide: fixation boundary tables and length calculation adapted in src/bionic.ts
+Source: https://github.com/Gumball12/text-vide/blob/1353987f2bf12fae8553a90ab424a9c417a2aaa1/packages/text-vide/src/getFixationLength.ts
+Upstream commit: 1353987f2bf12fae8553a90ab424a9c417a2aaa1
+This adaptation is not the official Bionic Reading implementation.
+
+MIT License
+
+Copyright (c) 2022 shj
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Bundled fonts — SIL Open Font License 1.1
+=======================================
+
+Instrument Sans
+Files: src/assets/fonts/instrument-sans-latin-wght-normal.woff2
+License: licenses/instrument-sans-OFL.txt
+Source: https://github.com/google/fonts/tree/main/ofl/instrumentsans
+
+Source Sans 3
+Files: src/assets/fonts/source-sans-3-latin-wght-normal.woff2
+       src/assets/fonts/source-sans-3-latin-wght-italic.woff2
+License: licenses/source-sans-3-OFL.txt
+Source: https://github.com/google/fonts/tree/main/ofl/sourcesans3
+
+JetBrains Mono
+Files: src/assets/fonts/jetbrains-mono-latin-wght-normal.woff2
+License: licenses/jetbrains-mono-OFL.txt
+Source: https://github.com/google/fonts/tree/main/ofl/jetbrainsmono
