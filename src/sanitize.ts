@@ -24,6 +24,14 @@ const BLOCKED_TAGS = new Set([
 
 const SAFE_ATTRS: Record<string, Set<string>> = {
   a: new Set(["href", "title", "target", "rel"]),
+  // Headings may carry an anchor id so in-article links (`#section`) work.
+  // The id is namespaced below so an article can never claim an app id.
+  h1: new Set(["id"]),
+  h2: new Set(["id"]),
+  h3: new Set(["id"]),
+  h4: new Set(["id"]),
+  h5: new Set(["id"]),
+  h6: new Set(["id"]),
   img: new Set(["src", "alt", "title", "width", "height", "loading"]),
   blockquote: new Set(["cite"]),
   th: new Set(["colspan", "rowspan", "scope"]),
@@ -52,6 +60,12 @@ const SAFE_CLASSES = new Set([
 const ALLOWED_URL_SCHEMES = ["http:", "https:", "mailto:"];
 
 /** Replace every HTML-special character with its entity. */
+/** Namespace article anchors without losing Chinese or other Unicode letters. */
+export function articleAnchorId(raw: string): string {
+  const cleaned = raw.normalize("NFC").replace(/[^\p{L}\p{N}_:.-]/gu, "").slice(0, 128);
+  return cleaned ? (cleaned.startsWith("art-") ? cleaned : `art-${cleaned}`) : "";
+}
+
 export function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -181,6 +195,12 @@ function sanitizeAttributes(el: Element): void {
       el.removeAttributeNode(attr);
       continue;
     }
+    if (name === "id") {
+      const cleaned = articleAnchorId(attr.value);
+      if (cleaned) el.setAttribute("id", cleaned);
+      else el.removeAttributeNode(attr);
+      continue;
+    }
     if ((name === "href" || name === "src") && !isSafeUrl(attr.value)) {
       el.removeAttributeNode(attr);
       continue;
@@ -223,7 +243,10 @@ export function dedupeImages(root: Element, skipSelector?: string): void {
     const src = (img.getAttribute("src") ?? "").trim();
     if (!src) return;
     if (seen.has(src)) {
+      const figure = img.closest("figure.article-figure");
       img.remove();
+      // Generated captions belong to the image, not to a now-empty figure.
+      if (figure && !figure.querySelector("img")) figure.remove();
       return;
     }
     seen.add(src);
