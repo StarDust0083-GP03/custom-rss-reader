@@ -1,10 +1,20 @@
 /**
- * Bionic-reading support for English article text.
+ * Custom word-prefix emphasis for English article text.
+ *
+ * Fixation lengths follow text-vide's five boundary tables (MIT), pinned to
+ * commit 1353987f2bf12fae8553a90ab424a9c417a2aaa1. See the attribution and
+ * full license in public/third-party-licenses.txt. Default fixationPoint is 1,
+ * matching text-vide. This is not the official Bionic Reading algorithm and
+ * does not add Saccade or Opacity controls. CSS weight is our presentation
+ * choice, not an upstream setting or a validated reading-speed improvement.
+ *
+ * Only the length calculation is adapted: our existing DOM walker continues
+ * to protect URLs, identifiers, code, images, Chinese and author emphasis.
  *
  * Emphasises the leading "fixation" letters of each word so the eye has
  * anchors while scanning. The pass works on WORD units rather than text
  * nodes: a word keeps one fixation even when the source markup splits it with
- * inline elements (`rea<em>ding</em>` → **read**ing), and URLs, emails,
+ * inline elements (`rea<em>ding</em>` → **readi**ng), and URLs, emails,
  * identifiers, code and author bold stay exactly as rendered.
  *
  * Applied as a DOM pass AFTER sanitisation (both the host-DOM article path
@@ -55,16 +65,24 @@ const URL_TRAILING = /[.,:;!?]/;
 const LEXEME_TRAILING = /[._@+-]/;
 
 /**
- * Number of leading letters to bold for a word of `len` letters.
- *
- * Short words are split roughly in half ("the" -> **th**e); longer words
- * bold a slightly smaller share (~45%) so a paragraph doesn't turn into a
- * wall of bold.
+ * Adapted from text-vide/packages/text-vide/src/getFixationLength.ts (MIT).
+ * Keep these tables in upstream order, including the repeated 0 in profile 4:
+ * both the first matching index and the full table length affect the output.
+ * Copyright (c) 2022 shj. Full MIT notice: public/third-party-licenses.txt.
  */
-export function fixationLength(len: number): number {
-  if (len <= 2) return len;
-  if (len <= 5) return Math.ceil(len / 2);
-  return Math.ceil(len * 0.45);
+const FIXATION_BOUNDARIES = [
+  [0, 4, 12, 17, 24, 29, 35, 42, 48],
+  [1, 2, 7, 10, 13, 14, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46, 49],
+  [1, 2, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39, 41, 43, 45, 47, 49],
+  [0, 2, 4, 5, 6, 8, 9, 11, 14, 15, 17, 18, 20, 0, 21, 23, 24, 26, 27, 29, 30, 32, 33, 35, 36, 38, 39, 41, 42, 44, 45, 47, 48],
+  [0, 2, 3, 5, 6, 7, 8, 10, 11, 12, 14, 15, 17, 19, 20, 21, 23, 24, 25, 26, 28, 29, 30, 32, 33, 34, 35, 37, 38, 39, 41, 42, 43, 44, 46, 47, 48],
+];
+
+/** Number of leading letters to mark, using text-vide's table lookup. */
+export function fixationLength(len: number, fixationPoint = 1): number {
+  const boundaries = FIXATION_BOUNDARIES[fixationPoint - 1] ?? FIXATION_BOUNDARIES[0];
+  const index = boundaries.findIndex(boundary => len <= boundary);
+  return Math.max(len - (index === -1 ? boundaries.length : index), 0);
 }
 
 /** Scheme or bare-"www." URL start at `index`, if any. */
@@ -85,17 +103,16 @@ function urlLengthAt(text: string, index: number): number {
 
 /**
  * Length of the fixation prefix of one word, counted in letters so a
- * contraction keeps a single leading anchor (`don't` -> **do**n't, not
- * **do**n'**t**).
+ * contraction keeps a single leading anchor (`don't` -> **don**'t).
  */
-function wordFixation(part: string): number {
+function wordFixation(part: string, fixationPoint: number): number {
   let letters = 0;
   for (const ch of part) {
     if (!APOSTROPHE.test(ch)) letters++;
   }
   if (letters === 0) return 0;
 
-  const fixation = fixationLength(letters);
+  const fixation = fixationLength(letters, fixationPoint);
   let seen = 0;
   let end = 0;
   while (end < part.length && seen < fixation) {
@@ -111,10 +128,10 @@ function wordFixation(part: string): number {
  *
  * Digits, `@`, `.`, `_` and `+` mark identifiers, emails, domains and
  * versions — those stay whole. Everything else is prose: hyphens separate
- * compounds (`well-known` -> **we**ll-**kno**wn) and apostrophes stay inside
+ * compounds (`well-known` -> **wel**l-**kno**wn) and apostrophes stay inside
  * their word.
  */
-function lexemeFixations(lexeme: string): Array<[number, number]> {
+function lexemeFixations(lexeme: string, fixationPoint: number): Array<[number, number]> {
   if (/[0-9@._+]/.test(lexeme)) return [];
 
   const ranges: Array<[number, number]> = [];
@@ -122,7 +139,7 @@ function lexemeFixations(lexeme: string): Array<[number, number]> {
   for (let i = 0; i <= lexeme.length; i++) {
     if (i < lexeme.length && lexeme[i] !== "-") continue;
     if (i > start) {
-      const length = wordFixation(lexeme.slice(start, i));
+      const length = wordFixation(lexeme.slice(start, i), fixationPoint);
       if (length > 0) ranges.push([start, start + length]);
     }
     start = i + 1;
@@ -134,7 +151,7 @@ function lexemeFixations(lexeme: string): Array<[number, number]> {
  * Fixation ranges over a whole readable segment (words may span nodes).
  * One linear walk: no per-position rescanning.
  */
-function collectFixations(text: string): Array<[number, number]> {
+function collectFixations(text: string, fixationPoint: number): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
   let i = 0;
   while (i < text.length) {
@@ -154,7 +171,7 @@ function collectFixations(text: string): Array<[number, number]> {
     let wordEnd = end;
     while (wordEnd > i && LEXEME_TRAILING.test(text[wordEnd - 1])) wordEnd--;
     if (wordEnd > i) {
-      for (const [from, to] of lexemeFixations(text.slice(i, wordEnd))) {
+      for (const [from, to] of lexemeFixations(text.slice(i, wordEnd), fixationPoint)) {
         ranges.push([i + from, i + to]);
       }
     }
@@ -196,7 +213,9 @@ function collectSegments(root: Element): Segment[] {
 
   const visit = (node: Node) => {
     if (node.nodeType === Node.TEXT_NODE) {
-      if (/[A-Za-z\u00C0-\u024F]/.test(node.nodeValue ?? "")) nodes.push(node as Text);
+      // Whitespace and CJK nodes still separate Latin words. Dropping them
+      // would turn `<span>Reading</span> <em>text</em>` into "Readingtext".
+      nodes.push(node as Text);
       return;
     }
     if (node.nodeType !== Node.ELEMENT_NODE) return;
@@ -261,8 +280,28 @@ function pruneEmptyClones(fragment: DocumentFragment): void {
 }
 
 /** Wrap each fixation range of one segment in `<b class="bionic-fix">`. */
-function markSegment(doc: Document, segment: Segment): void {
-  const ranges = collectFixations(segment.text);
+function markSegment(doc: Document, segment: Segment, fixationPoint: number): void {
+  const ranges = collectFixations(segment.text, fixationPoint);
+  if (ranges.length === 0) return;
+
+  // Most paragraphs are one text node. Build their markers off-DOM and swap
+  // once: thousands of live Ranges make later DOM mutations increasingly
+  // expensive. Inline-spanning words still use the format-preserving path.
+  if (segment.nodes.length === 1) {
+    const fragment = doc.createDocumentFragment();
+    let offset = 0;
+    for (const [start, end] of ranges) {
+      if (start > offset) fragment.appendChild(doc.createTextNode(segment.text.slice(offset, start)));
+      const marker = doc.createElement("b");
+      marker.className = "bionic-fix";
+      marker.textContent = segment.text.slice(start, end);
+      fragment.appendChild(marker);
+      offset = end;
+    }
+    if (offset < segment.text.length) fragment.appendChild(doc.createTextNode(segment.text.slice(offset)));
+    segment.nodes[0].replaceWith(fragment);
+    return;
+  }
 
   // Right-to-left: marking a later range only splits or truncates text nodes
   // at or after its own start, so the offsets of earlier ranges stay valid.
@@ -291,12 +330,12 @@ function markSegment(doc: Document, segment: Segment): void {
  *
  * `textContent` is preserved exactly; only the markup granularity changes.
  */
-export function applyBionic(root: Element): void {
+export function applyBionic(root: Element, fixationPoint = 1): void {
   const doc = root.ownerDocument;
   if (!doc) return;
 
   unwrapFixations(root);
   for (const segment of collectSegments(root)) {
-    markSegment(doc, segment);
+    markSegment(doc, segment, fixationPoint);
   }
 }

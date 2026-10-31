@@ -14,6 +14,7 @@ import {
 import { setFilter, showTagSelector, updateFilterTabs } from "./ui/filters";
 import { attachMenu, closeMenu } from "./ui/menu";
 import { initColumnLayout } from "./ui/layout";
+import { initReadingLayout } from "./ui/reading-layout";
 import {
   loadSubscriptions,
   refreshAllFeeds,
@@ -113,6 +114,15 @@ async function init() {
     if (!link) return;
     const href = link.getAttribute("href") || "";
     if (!href || href === "#" || link.target === "_self") return;
+    // In-article jump (heading anchors from the source HTML): scroll instead of
+    // navigating the app shell or opening the system browser.
+    if (link.hasAttribute("data-article-anchor")) {
+      e.preventDefault();
+      const id = href.replace(/^#/, "");
+      const target = id ? document.getElementById(id) : null;
+      target?.scrollIntoView({ block: "start", behavior: "auto" });
+      return;
+    }
     if (!/^https?:\/\//i.test(href)) return;
     e.preventDefault();
     misc.openUrl(href);
@@ -120,6 +130,12 @@ async function init() {
 
   // 列宽恢复 + 折叠/拖动
   initColumnLayout(document.querySelector(".app-container") as HTMLElement);
+
+  // 阅读布局：Quiet Desk 默认；Reading Room 可选；Parallel 仅在翻译时出现
+  initReadingLayout();
+  document.addEventListener("reading-layout-change", () => {
+    if (S.selectedItem) renderItemDetail(S.selectedItem);
+  });
 
   // 主题恢复 + 色板切换
   const currentTheme = localStorage.getItem("rss.theme") || "paper";
@@ -269,7 +285,7 @@ async function init() {
   //   text. This is a persistent, backend setting; the active state mirrors
   //   the subscription's use_website value.
   // - Markdown button: within webview mode, switches the transient render
-  //   between Markdown and the live Web page (in-memory, per session only).
+  //   between host Markdown and a media-blocked reader frame (per session).
   //   In text mode (use_website off) it is disabled — only text is shown.
   document.getElementById("webview-btn")?.addEventListener("click", async () => {
     const item = S.selectedItem;
@@ -467,7 +483,6 @@ async function init() {
 
   // 初始化图片缩放功能
   initImageZoom();
-  addZoomHintToImages();
 }
 
 // ==================== 图片缩放功能 ====================
@@ -476,59 +491,40 @@ async function init() {
  * 初始化图片缩放功能
  */
 function initImageZoom(): void {
-  // 使用事件委托处理图片点击
-  document.getElementById('detail-content')?.addEventListener('click', (e) => {
-    // Cancel ignore timer on user interaction
+  const dialog = document.createElement("dialog");
+  dialog.className = "image-viewer";
+  dialog.setAttribute("aria-label", "Image preview");
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "Close · Esc";
+  const preview = document.createElement("img");
+  preview.referrerPolicy = "no-referrer";
+  dialog.append(close, preview);
+  document.body.appendChild(dialog);
+  close.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) dialog.close();
+  });
+  dialog.addEventListener("close", () => preview.removeAttribute("src"));
+
+  document.getElementById("detail-content")?.addEventListener("keydown", (event) => {
+    const image = (event.target as Element).closest('img[role="button"]');
+    if (image && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      image.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    }
+  });
+
+  // Delegation works after article selection and every streaming re-render.
+  // Linked images keep their link action instead of opening two surfaces.
+  document.getElementById("detail-content")?.addEventListener("click", (event) => {
+    const image = (event.target as Element).closest("img");
+    if (!image || image.closest("a") || !image.naturalWidth) return;
+    event.preventDefault();
     cancelIgnoreTimer();
-    const target = e.target as HTMLElement;
-
-    // 检查是否点击了图片
-    if (target.tagName === 'IMG') {
-      const img = target as HTMLImageElement;
-
-      // 切换缩放状态
-      if (img.classList.contains('zoomed')) {
-        // 缩小图片
-        img.classList.remove('zoomed');
-        img.style.maxWidth = '400px';
-        img.style.maxHeight = '300px';
-      } else {
-        // 放大图片
-        img.classList.add('zoomed');
-        img.style.maxWidth = '100%';
-        img.style.maxHeight = 'none';
-      }
-    }
-  });
-
-  // 添加键盘支持：ESC 键退出缩放
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      const zoomedImages = document.querySelectorAll('.detail-body img.zoomed');
-      zoomedImages.forEach(img => {
-        img.classList.remove('zoomed');
-        (img as HTMLImageElement).style.maxWidth = '400px';
-        (img as HTMLImageElement).style.maxHeight = '300px';
-      });
-    }
-  });
-}
-
-/**
- * 为图片容器添加缩放提示
- */
-function addZoomHintToImages(): void {
-  const detailBody = document.querySelector('.detail-body');
-  if (!detailBody) return;
-
-  detailBody.querySelectorAll('img').forEach(img => {
-    // 添加 title 提示用户可以点击缩放
-    if (!img.title) {
-      img.title = '点击图片查看大图，按 ESC 键退出';
-    }
-
-    // 添加 data 属性标记
-    img.dataset.zoomable = 'true';
+    preview.src = image.currentSrc || image.src;
+    preview.alt = image.alt;
+    dialog.showModal();
   });
 }
 

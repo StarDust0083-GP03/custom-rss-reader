@@ -42,16 +42,26 @@ function fixationTexts(root: Element): (string | null)[] {
 }
 
 describe("fixationLength", () => {
-  it("splits short words near the middle and long words at ~45%", () => {
-    expect(fixationLength(1)).toBe(1);
-    expect(fixationLength(2)).toBe(2);
-    expect(fixationLength(3)).toBe(2);
-    expect(fixationLength(4)).toBe(2);
-    expect(fixationLength(5)).toBe(3);
-    expect(fixationLength(6)).toBe(3);
-    expect(fixationLength(7)).toBe(4);
-    expect(fixationLength(10)).toBe(5);
-    expect(fixationLength(20)).toBe(9);
+  // Golden outputs from text-vide's getFixationLength.ts at commit
+  // 1353987f2bf12fae8553a90ab424a9c417a2aaa1, not calculated by our code.
+  const lengths = [0,1,2,3,4,5,6,7,8,9,10,12,13,16,17,18,20,24,25,29,30,35,36,42,43,48,49,50,64,128];
+  const profiles = [
+    [0,0,1,2,3,3,4,5,6,7,8,10,10,13,14,14,16,20,20,24,24,29,29,35,35,40,40,41,55,119],
+    [0,1,1,1,2,3,4,5,5,6,7,8,9,10,11,12,13,16,17,19,20,23,24,28,29,32,33,33,47,111],
+    [0,1,1,1,2,3,3,4,4,5,5,6,7,8,9,9,10,12,13,15,15,18,18,21,22,24,25,25,39,103],
+    [0,0,1,1,2,2,2,2,3,3,3,4,5,6,7,7,8,8,8,10,10,12,12,14,14,16,16,17,31,95],
+    [0,0,1,1,1,2,2,2,2,2,3,3,3,4,5,5,6,7,7,8,8,9,9,11,11,12,12,13,27,91],
+  ];
+
+  it.each([1, 2, 3, 4, 5])("matches upstream fixation profile %i at every boundary", (point) => {
+    expect(lengths.map(len => fixationLength(len, point))).toEqual(profiles[point - 1]);
+  });
+
+  it("uses upstream profile 1 by default and for an unknown profile", () => {
+    expect(lengths.map(len => fixationLength(len))).toEqual(profiles[0]);
+    for (const point of [0, 6, NaN, 1.5]) {
+      expect(fixationLength(7, point)).toBe(5);
+    }
   });
 });
 
@@ -61,7 +71,7 @@ describe("applyBionic", () => {
     const before = root.textContent;
     applyBionic(root);
     expect(root.textContent).toBe(before);
-    expect(fixationTexts(root)).toEqual(["Read", "is", "ea"]);
+    expect(fixationTexts(root)).toEqual(["Readi", "i", "eas"]);
   });
 
   it("leaves URLs, emails and identifiers whole", () => {
@@ -71,13 +81,13 @@ describe("applyBionic", () => {
     const before = root.textContent;
     applyBionic(root);
     expect(root.textContent).toBe(before);
-    expect(fixationTexts(root)).toEqual(["Se", "or", "ma", "an", "st", "pu"]);
+    expect(fixationTexts(root)).toEqual(["Se", "o", "mai", "an", "sta", "pu"]);
   });
 
   it("leaves dotted domains alone but fixates hyphenated prose", () => {
     const root = wrap("<p>Visit example.com or a well-known source.</p>");
     applyBionic(root);
-    expect(fixationTexts(root)).toEqual(["Vis", "or", "a", "we", "kno", "sou"]);
+    expect(fixationTexts(root)).toEqual(["Vis", "o", "wel", "kno", "sour"]);
   });
 
   it("fixates each component of a multi-part compound", () => {
@@ -85,7 +95,7 @@ describe("applyBionic", () => {
     const before = root.textContent;
     applyBionic(root);
     expect(root.textContent).toBe(before);
-    expect(fixationTexts(root)).toEqual(["sta", "of", "th", "ar", "op", "sou"]);
+    expect(fixationTexts(root)).toEqual(["sta", "o", "th", "ar", "ope", "sour"]);
   });
 
   it("keeps one leading mark on contractions and possessives", () => {
@@ -94,7 +104,7 @@ describe("applyBionic", () => {
     applyBionic(root);
     expect(root.textContent).toBe(before);
     // No suffix anchors: "don't" must not become **do**n'**t**.
-    expect(fixationTexts(root)).toEqual(["do", "read", "ca"]);
+    expect(fixationTexts(root)).toEqual(["don", "reade", "can"]);
   });
 
   it("uses one word unit across inline markup", () => {
@@ -103,11 +113,24 @@ describe("applyBionic", () => {
     applyBionic(root);
     expect(root.textContent).toBe(before);
     // The same word must get the same fixation no matter how it is marked up.
-    expect(fixationTexts(root)).toEqual(["read", "te"]);
+    expect(fixationTexts(root)).toEqual(["readi", "tex"]);
     expect(root.querySelector("b.bionic-fix em")).toBeTruthy();
     const marked = root.querySelector("b.bionic-fix em")!.textContent ?? "";
     const rest = root.querySelectorAll("em")[1]?.textContent ?? "";
     expect(marked + rest).toBe("ding");
+  });
+
+  it("does not merge words across whitespace-only or Chinese text nodes", () => {
+    for (const html of [
+      '<p><span>Reading</span> <em>text</em></p>',
+      '<p><span>Reading</span>中文<em>text</em></p>',
+    ]) {
+      const root = wrap(html);
+      const before = root.textContent;
+      applyBionic(root);
+      expect(fixationTexts(root)).toEqual(["Readi", "tex"]);
+      expect(root.textContent).toBe(before);
+    }
   });
 
   it("stops URL protection at prose punctuation", () => {
@@ -115,7 +138,7 @@ describe("applyBionic", () => {
     const before = root.textContent;
     applyBionic(root);
     expect(root.textContent).toBe(before);
-    expect(fixationTexts(root)).toEqual(["Engl"]);
+    expect(fixationTexts(root)).toEqual(["Engli"]);
   });
 
   it("protects a URL that inline markup splits", () => {
@@ -123,7 +146,7 @@ describe("applyBionic", () => {
     const before = root.textContent;
     applyBionic(root);
     expect(root.textContent).toBe(before);
-    expect(fixationTexts(root)).toEqual(["he"]);
+    expect(fixationTexts(root)).toEqual(["her"]);
     expect(root.querySelector("span")?.textContent).toBe("article");
   });
 
@@ -146,7 +169,21 @@ describe("applyBionic", () => {
     const before = root.textContent;
     applyBionic(root);
     expect(root.textContent).toBe(before);
-    expect(fixationTexts(root)).toEqual(["Engl", "te"]);
+    expect(fixationTexts(root)).toEqual(["Engli", "tex"]);
+  });
+
+  it("changes fixation profile without losing markup or stacking marks", () => {
+    const root = wrap('<p><a href="https://example.com">Reading</a> is easy.</p><img src="https://example.com/hero.png">');
+    const before = root.textContent;
+    applyBionic(root);
+    const normal = root.innerHTML;
+    applyBionic(root, 5);
+    expect(fixationTexts(root)).toEqual(["Re", "i", "e"]);
+    expect(root.textContent).toBe(before);
+    expect(root.querySelector("a")?.getAttribute("href")).toBe("https://example.com");
+    expect(root.querySelector("img")?.getAttribute("src")).toBe("https://example.com/hero.png");
+    applyBionic(root);
+    expect(root.innerHTML).toBe(normal);
   });
 
   it("is idempotent: a second pass yields the same DOM", () => {
@@ -247,7 +284,7 @@ describe("renderItemDetail bionic integration", () => {
     renderItemDetail(item({ content_md: "A rea*ding* test." }));
     const el = detailBody();
     // Same word unit across <em>: one mark, not "re" + "di".
-    expect(fixationTexts(el)).toEqual(["A", "read", "te"]);
+    expect(fixationTexts(el)).toEqual(["readi", "tes"]);
   });
 
   it("processes bilingual originals and the streaming tail, not pure Chinese", () => {
@@ -271,8 +308,9 @@ describe("renderItemDetail bionic integration", () => {
     });
 
     const el = detailBody();
-    // 8 English words in the original — one fixation mark each.
-    expect(el.querySelectorAll(".paragraph-original b.bionic-fix")).toHaveLength(8);
+    // Profile 1 leaves single-letter words alone; other words use the table.
+    expect(fixationTexts(el.querySelector(".paragraph-original")!))
+      .toEqual(["usef", "readi", "too", "kee", "th", "origin", "structu"]);
     expect(el.querySelector(".paragraph-translated b.bionic-fix")).toBeNull();
     expect(el.querySelector(".untranslated-tail b.bionic-fix")).toBeTruthy();
     expect(el.textContent).toContain("Remaining English text stays visible.");
@@ -319,9 +357,9 @@ describe("local markdown iframe integration", () => {
 });
 
 describe("bionic typography", () => {
-  it("uses the heaviest Monaspace Radon weight for fixations in both render paths", () => {
-    // Body text is 400. 600 measured only ~25% more ink, too close to read as an anchor.
-    const rule = /\.bionic-fix\s*\{[^}]*font-weight:\s*800/;
+  it("uses bold fixation marks consistently in both render paths", () => {
+    // Preserve the text-vide lengths; tune only the contrast against 400 body text.
+    const rule = /\.bionic-fix\s*\{[^}]*font-weight:\s*700/;
     expect(readFileSync("src/styles.css", "utf8")).toMatch(rule);
     expect(readFileSync("src/iframe.ts", "utf8")).toMatch(rule);
   });
