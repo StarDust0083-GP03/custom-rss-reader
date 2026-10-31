@@ -637,14 +637,16 @@ impl FeedItemRepository for SqliteFeedItemRepository {
     }
 
     async fn find_all_tags(&self, subscription_id: Option<i64>) -> Result<Vec<String>> {
+        // Expand each article's JSON once, not once per catalog entry. The
+        // NOCASE lookup uses the catalog index; the second, binary comparison
+        // preserves the old exact JSON-element matching for legacy tags.
         let rows: Vec<(String,)> = if let Some(sub_id) = subscription_id {
             sqlx::query_as(
                 r#"SELECT DISTINCT t.name
-                   FROM tag_catalog t
-                   JOIN feed_items f
-                     ON json_valid(f.tags)
-                    AND f.subscription_id = $1
-                    AND EXISTS (SELECT 1 FROM json_each(f.tags) j WHERE j.value = t.name)
+                   FROM feed_items f
+                   JOIN json_each(CASE WHEN json_valid(f.tags) THEN f.tags ELSE '[]' END) j
+                   JOIN tag_catalog t ON t.name = j.value AND j.value = t.name
+                   WHERE f.subscription_id = $1
                    ORDER BY t.name"#,
             )
             .bind(sub_id)
@@ -653,10 +655,9 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         } else {
             sqlx::query_as(
                 r#"SELECT DISTINCT t.name
-                   FROM tag_catalog t
-                   JOIN feed_items f
-                     ON json_valid(f.tags)
-                    AND EXISTS (SELECT 1 FROM json_each(f.tags) j WHERE j.value = t.name)
+                   FROM feed_items f
+                   JOIN json_each(CASE WHEN json_valid(f.tags) THEN f.tags ELSE '[]' END) j
+                   JOIN tag_catalog t ON t.name = j.value AND j.value = t.name
                    ORDER BY t.name"#,
             )
             .fetch_all(&self.pool)
@@ -668,12 +669,16 @@ impl FeedItemRepository for SqliteFeedItemRepository {
 
     async fn find_tag_catalog(&self) -> Result<Vec<TagCatalogEntry>> {
         let rows: Vec<(String, i64)> = sqlx::query_as(
-            r#"SELECT t.name, COUNT(DISTINCT f.id) AS usage_count
+            r#"WITH usage AS (
+                   SELECT t.name, COUNT(DISTINCT f.id) AS usage_count
+                   FROM feed_items f
+                   JOIN json_each(CASE WHEN json_valid(f.tags) THEN f.tags ELSE '[]' END) j
+                   JOIN tag_catalog t ON t.name = j.value AND j.value = t.name
+                   GROUP BY t.name
+               )
+               SELECT t.name, COALESCE(u.usage_count, 0) AS usage_count
                FROM tag_catalog t
-               LEFT JOIN feed_items f
-                 ON json_valid(f.tags)
-                AND EXISTS (SELECT 1 FROM json_each(f.tags) j WHERE j.value = t.name)
-               GROUP BY t.name
+               LEFT JOIN usage u ON u.name = t.name
                ORDER BY t.name"#,
         )
         .fetch_all(&self.pool)
