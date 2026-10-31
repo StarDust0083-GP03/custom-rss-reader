@@ -73,6 +73,9 @@ export async function selectItem(item: FeedItemSummary) {
 
   renderItems(true);
   renderItemDetail(fullItem);
+  // CSS switches compact windows to an article overlay. Also set this on
+  // desktop so shrinking the window never hides the selected article.
+  document.querySelector(".detail-panel")?.classList.add("visible");
 
   if (!fullItem.is_read) {
     await markAsRead(fullItem.id, true);

@@ -1,35 +1,53 @@
 /* ============================================================
    THE READING ROOM — editorial print design, handwriting type
    ------------------------------------------------------------
-   Type (issue #5): Monaspace Radon (handwriting mono) carries all
-   Latin display + reading text; Chinese falls through to system
-   heiti sans; Public Sans stays for dense UI chrome only.
+   Type (Quiet Desk): Instrument Sans sets headlines (wordmark, section
+   titles, list titles, article h1); Source Sans 3 sets article prose,
+   list excerpts and UI chrome; JetBrains Mono is reserved for code.
+   Sans only — issue #5's "no serifs" still holds. Chinese falls through
+   to the system heiti sans.
    Palette: warm paper, deep ink, vermilion accent.
    All structural selectors are preserved from the original
    stylesheet — this is a reskin, not a relayout.
    ============================================================ */
 
-/* ---------- Self-hosted fonts ----------
-   Monaspace Radon (githubnext/monaspace v1.400, OFL): handwriting-flavored
-   monospace for ALL Latin text (issue #5 — no serifs anywhere).
+/* ---------- Self-hosted fonts (all OFL, latin subsets) ----------
+   Three sans/mono families, each with one job:
+     Instrument Sans  — headlines; tight, modern grotesk, character at size.
+     Source Sans 3    — prose + UI; humanist, tall x-height, comfortable
+                        for long reading and it echoes heiti's rhythm.
+     JetBrains Mono   — code; unambiguous 0/O and 1/l/I.
    Chinese glyphs fall through to the system heiti/sans stack below —
    self-hosting CJK is out of scope (10MB+); every desktop OS ships a
-   good heiti. Public Sans stays for dense UI chrome (buttons/labels). */
+   good heiti. The old Monaspace Radon file (796KB) is gone: replacing the
+   handwriting mono with these three saves roughly 650KB of bundle. */
 @font-face {
-    font-family: 'Monaspace Radon';
-    font-style: normal;
-    font-weight: 200 800;
-    font-stretch: 100% 125%;
-    font-display: swap;
-    src: url('./assets/fonts/MonaspaceRadon-Var.woff2') format('woff2');
-}
-@font-face {
-    font-family: 'Public Sans';
+    font-family: 'Instrument Sans';
     font-style: normal;
     font-weight: 400 700;
     font-display: swap;
-    src: url('./assets/fonts/PublicSans-normal-400-700.woff2') format('woff2');
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    src: url('./assets/fonts/instrument-sans-latin-wght-normal.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'Source Sans 3';
+    font-style: normal;
+    font-weight: 200 900;
+    font-display: swap;
+    src: url('./assets/fonts/source-sans-3-latin-wght-normal.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'Source Sans 3';
+    font-style: italic;
+    font-weight: 200 900;
+    font-display: swap;
+    src: url('./assets/fonts/source-sans-3-latin-wght-italic.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 100 800;
+    font-display: swap;
+    src: url('./assets/fonts/jetbrains-mono-latin-wght-normal.woff2') format('woff2');
 }
 
 /* Heiti-style CJK fallback: every major desktop ships one of these.
@@ -59,9 +77,25 @@
     --warning-color: #b07d10;   /* ochre */
     --shadow: 0 2px 10px rgba(60, 48, 32, 0.10);
     --shadow-lg: 0 12px 40px rgba(60, 48, 32, 0.22);
-    --font-display: 'Monaspace Radon', var(--cjk-sans);
-    --font-body: 'Monaspace Radon', var(--cjk-sans);
-    --font-ui: 'Public Sans', var(--cjk-sans);
+    /* One sans voice, two cuts: Instrument Sans shouts the headlines,
+       Source Sans 3 carries prose and chrome. Swap a token to retune. */
+    --font-display: 'Instrument Sans', 'Inter', var(--cjk-sans);
+    --font-body: 'Source Sans 3', 'Segoe UI', var(--cjk-sans);
+    --font-ui: 'Source Sans 3', 'Segoe UI', var(--cjk-sans);
+    --font-code: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, var(--cjk-sans);
+
+    /* Semantic roles — surfaces, selection and state. They alias the palette
+       above, so all 17 theme IDs keep these relationships without a
+       per-theme override; a theme only has to keep its palette honest. */
+    --surface-well: var(--bg-secondary);
+    --surface-raised: var(--bg-primary);
+    --row-hover: var(--bg-secondary);
+    --row-selected: var(--accent-soft);
+    --selection-mark: var(--accent-color);
+    --unread-mark: var(--accent-color);
+    --status-ok: var(--success-color);
+    --status-error: var(--danger-color);
+    --focus-ring: var(--accent-color);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -123,7 +157,7 @@ body::after {
 }
 
 :focus-visible {
-    outline: 2px solid var(--accent-color);
+    outline: 2px solid var(--focus-ring);
     outline-offset: 2px;
 }
 
@@ -237,12 +271,15 @@ body::after {
 
 .sidebar-header h1 {
     font-family: var(--font-display);
-    font-optical-sizing: auto;
-    font-size: 1.45rem;
-    font-weight: 600;
-    font-style: italic;
+    font-size: 1.4rem;
+    /* 500, not 600: Noto Sans CJK has no 600, so browsers snap it to Bold 700
+       and a Chinese wordmark ends up heavier than the Latin one. 500 lands on
+       Medium for both. Instrument Sans has no italic cut — no synthetic
+       oblique. Tracking stays 0: negative tracking is a Latin-only trick and
+       makes CJK headings look cramped. */
+    font-weight: 500;
     letter-spacing: 0;
-    line-height: 1.1;
+    line-height: 1.14;
     margin-bottom: 0.7rem;
 }
 
@@ -274,54 +311,73 @@ body::after {
 }
 
 /* Filter tabs — modern icon pills */
-.filter-tabs {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.3rem;
-    padding: 0.55rem 0.7rem 0.5rem;
+/* Library views as a readable navigation list — six pill buttons became six
+   rows you can scan down. Same buttons, same `data-filter` contract. */
+.sidebar-nav {
+    padding: 0.5rem 0.55rem 0.6rem;
     border-bottom: 1px solid var(--border-color);
 }
 
-.filter-tab {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    padding: 0.2rem 0.55rem 0.2rem 0.45rem;
+.nav-heading {
+    display: block;
+    padding: 0.3rem 0.55rem 0.45rem;
     font-family: var(--font-ui);
-    font-size: 0.64rem;
-    font-weight: 600;
-    letter-spacing: 0.02em;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
+    color: var(--muted-color);
+}
+
+.filter-tabs {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.filter-tab {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    width: 100%;
+    padding: 0.42rem 0.55rem;
+    font-family: var(--font-ui);
+    font-size: 0.82rem;
+    font-weight: 500;
+    letter-spacing: 0;
+    text-transform: none;
+    text-align: left;
     color: var(--text-secondary);
     background: transparent;
-    border: 1px solid var(--border-color);
-    border-radius: 999px;
+    border: 1px solid transparent;
+    border-radius: 5px;
     cursor: pointer;
-    transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+    transition: color 0.15s ease, background 0.15s ease;
 }
 
 .filter-tab svg {
-    width: 11px;
-    height: 11px;
+    width: 14px;
+    height: 14px;
     flex-shrink: 0;
+    color: var(--muted-color);
+    transition: color 0.15s ease;
 }
 
 .filter-tab:hover {
     color: var(--text-primary);
-    background: var(--bg-tertiary);
-    border-color: var(--muted-color);
-    transform: translateY(-1px);
-}
-
-.filter-tab:active {
-    transform: translateY(0);
+    background: var(--row-hover);
 }
 
 .filter-tab.active {
     color: var(--accent-color);
-    background: var(--accent-soft);
-    border-color: var(--accent-color);
-    font-weight: 700;
+    background: var(--row-selected);
+    border-color: transparent;
+    box-shadow: inset 2px 0 0 var(--selection-mark);
+    font-weight: 600;
+}
+
+.filter-tab.active svg {
+    color: var(--accent-color);
 }
 
 .subscription-list {
@@ -509,7 +565,7 @@ body::after {
 }
 
 .items-header {
-    padding: 1rem 1rem 0.9rem;
+    padding: 0.85rem 1.15rem 0.8rem;
     border-bottom: 1px solid var(--border-color);
     display: flex;
     flex-direction: column;
@@ -518,9 +574,8 @@ body::after {
 
 .items-header h2 {
     font-family: var(--font-display);
-    font-optical-sizing: auto;
-    font-size: 1.25rem;
-    font-weight: 600;
+    font-size: 1.2rem;
+    font-weight: 500;
     letter-spacing: 0;
 }
 
@@ -601,18 +656,18 @@ body::after {
     border: none;
     border-bottom: 1px solid var(--border-color);
     border-radius: 0;
-    padding: 0.85rem 1.25rem;
+    padding: 0.8rem 1.15rem;
     cursor: pointer;
     transition: background 0.15s ease;
     position: relative;
 }
 
 .item-card:hover {
-    background: var(--bg-secondary);
+    background: var(--row-hover);
 }
 
 .item-card.active {
-    background: var(--accent-soft);
+    background: var(--row-selected);
 }
 
 .item-card.active::before {
@@ -626,7 +681,7 @@ body::after {
 }
 
 .item-card.unread .item-title {
-    font-weight: 600;
+    font-weight: 650;
     color: var(--text-primary);
 }
 
@@ -636,7 +691,7 @@ body::after {
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: var(--accent-color);
+    background: var(--unread-mark);
     margin-right: 0.5rem;
     vertical-align: 0.12em;
 }
@@ -646,15 +701,15 @@ body::after {
     justify-content: space-between;
     align-items: baseline;
     gap: 0.75rem;
-    margin-bottom: 0.35rem;
+    margin-bottom: 0.28rem;
 }
 
 .item-title {
     font-family: var(--font-display);
-    font-optical-sizing: auto;
-    font-size: 1rem;
-    font-weight: 400;
-    line-height: 1.35;
+    font-size: 1.01rem;
+    font-weight: 500;
+    letter-spacing: 0;
+    line-height: 1.4;
     flex: 1;
     overflow: hidden;
     display: -webkit-box;
@@ -664,9 +719,9 @@ body::after {
 
 .item-date {
     font-family: var(--font-ui);
-    font-size: 0.68rem;
+    font-size: 0.66rem;
     font-weight: 500;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--muted-color);
     white-space: nowrap;
@@ -681,8 +736,8 @@ body::after {
 .item-description {
     font-family: var(--font-body);
     color: var(--text-secondary);
-    font-size: 0.92rem;
-    line-height: 1.45;
+    font-size: 0.88rem;
+    line-height: 1.5;
     margin-bottom: 0.45rem;
     overflow: hidden;
     display: -webkit-box;
@@ -720,15 +775,23 @@ body::after {
 
 .item-meta {
     display: flex;
-    gap: 0.5rem;
-    align-items: center;
+    gap: 0.45rem;
+    align-items: baseline;
     flex-wrap: wrap;
+    row-gap: 0.25rem;
+    font-size: 0.7rem;
+}
+
+/* "+N" hint next to the single list tag. */
+.item-more-tags {
+    color: var(--muted-color);
+    font-variant-numeric: tabular-nums;
 }
 
 .item-author {
     font-family: var(--font-body);
     font-style: italic;
-    font-size: 0.8rem;
+    font-size: 0.72rem;
     color: var(--muted-color);
 }
 
@@ -745,7 +808,7 @@ body::after {
 }
 
 .detail-header {
-    padding: 0.7rem 1.5rem;
+    padding: 0.55rem 1.15rem;
     border-bottom: 1px solid var(--border-color);
     display: flex;
     justify-content: space-between;
@@ -777,6 +840,13 @@ body::after {
     background: transparent;
     color: var(--text-primary);
     border-color: var(--border-color);
+}
+
+/* Paint this custom-colored control entirely in CSS. Keep its opacity pulse,
+   but do not layer WebKit's native button appearance over the background. */
+#translate-btn {
+    -webkit-appearance: none;
+    appearance: none;
 }
 
 /* 翻译按钮状态 */
@@ -943,11 +1013,10 @@ body::after {
 /* Article header — kicker + headline */
 .detail-content h1 {
     font-family: var(--font-display);
-    font-optical-sizing: auto;
-    font-size: 1.9rem;
-    font-weight: 600;
+    font-size: 1.85rem;
+    font-weight: 500;
     letter-spacing: 0;
-    line-height: 1.18;
+    line-height: 1.26;
     margin-bottom: 1.1rem;
 }
 
@@ -990,12 +1059,30 @@ body::after {
     color: var(--accent-color);
     cursor: pointer;
     text-decoration: underline;
-    text-decoration-color: rgba(188, 63, 44, 0.4);
-    text-underline-offset: 2px;
+    /* Palette-derived, so every theme keeps a visible-but-quiet underline
+       (the old rule hardcoded the paper accent and vanished on dark themes). */
+    text-decoration-color: color-mix(in srgb, var(--accent-color) 45%, transparent);
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1px;
+    overflow-wrap: anywhere;
+}
+
+/* Jump targets inside the article need breathing room above them. */
+.detail-body h1, .detail-body h2, .detail-body h3,
+.detail-body h4, .detail-body h5, .detail-body h6 {
+    scroll-margin-top: 1.5rem;
 }
 
 .detail-body a:hover {
     text-decoration-color: var(--accent-color);
+}
+
+/* Fixation lengths follow text-vide; weight is a local presentation choice.
+   Bold (700) gives stronger anchors against body text (400) without returning
+   to the heavy black patches of 900. Match the iframe rule. */
+.bionic-fix {
+    font-weight: 700;
+    color: inherit;
 }
 
 .detail-source {
@@ -1019,26 +1106,89 @@ body::after {
     color: var(--accent-color);
 }
 
+/* Images: one predictable box in every render path (markdown, bilingual,
+   streaming tail, iframe). The old rule clamped everything to 400x300 and
+   grew on hover, so figures jumped size under the pointer and small text
+   images were upscaled. Now a figure never exceeds the reading column, keeps
+   its aspect ratio, and never shifts when zoomed. */
 .detail-body img {
-    /* 默认小图样式 */
-    max-width: 400px;
-    max-height: 300px;
-    width: auto;
+    max-width: 100%;
     height: auto;
     object-fit: contain;
-    border-radius: 2px;
-    margin: 0.75rem 0;
-    cursor: zoom-in;
-    transition: max-width 0.3s ease, max-height 0.3s ease;
+    border-radius: 3px;
+    background: var(--bg-secondary);
     display: inline-block;
+    margin: 0.5rem 0;
+    cursor: zoom-in;
 }
 
-/* 鼠标悬停时显示完整图片 */
-.detail-body img:hover {
-    max-width: 100%;
-    max-height: none;
-    cursor: zoom-out;
+/* Standalone image → captioned figure (src/media.ts). */
+.detail-body figure.article-figure {
+    margin: 1.6rem 0;
+    text-align: center;
 }
+
+.detail-body figure.article-figure img {
+    display: block;
+    margin: 0 auto;
+    cursor: zoom-in;
+}
+
+.detail-body figure.article-figure figcaption {
+    margin-top: 0.6rem;
+    font-family: var(--font-ui);
+    font-size: 0.76rem;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    font-style: normal;
+    text-align: center;
+}
+
+/* A separate native dialog previews an image without reflowing the article.
+   Native Escape, focus trapping and focus restoration remain available. */
+.image-viewer {
+    margin: auto;
+    max-width: 96vw;
+    max-height: 94vh;
+    padding: 1rem;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    background: var(--bg-primary);
+}
+
+.image-viewer::backdrop { background: rgb(0 0 0 / 75%); }
+.image-viewer img {
+    display: block;
+    max-width: 100%;
+    max-height: 80vh;
+    width: auto;
+    height: auto;
+    margin: 0.75rem auto 0;
+    object-fit: contain;
+}
+.image-viewer button {
+    display: block;
+    margin-left: auto;
+    padding: 0.4rem 0.7rem;
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    font: inherit;
+    color: inherit;
+    background: var(--bg-secondary);
+    cursor: pointer;
+}
+.detail-body a:has(img) { cursor: pointer; }
+.detail-body a img { cursor: inherit; }
+.detail-body .image-fallback {
+    display: inline-block;
+    padding: 1rem;
+    border: 1px dashed var(--border-color);
+    font: 0.85rem/1.5 var(--font-ui);
+    color: var(--text-secondary);
+}
+.paragraph-original, .paragraph-translated { min-width: 0; }
+.detail-body figcaption { overflow-wrap: anywhere; }
 
 /* 图片加载时的容器 */
 .detail-body .image-container {
@@ -1046,15 +1196,8 @@ body::after {
     margin: 0.5rem 0;
 }
 
-/* 响应式：在小屏幕上默认显示完整图片 */
-@media (max-width: 768px) {
-    .detail-body img {
-        max-width: 100%;
-        max-height: none;
-    }
-}
-
 .detail-body pre {
+    font-family: var(--font-code);
     background: var(--bg-secondary);
     padding: 1rem;
     border: 1px solid var(--border-color);
@@ -1065,6 +1208,7 @@ body::after {
 }
 
 .detail-body code {
+    font-family: var(--font-code);
     background: var(--bg-secondary);
     padding: 0.15rem 0.35rem;
     border-radius: 2px;
@@ -1079,10 +1223,9 @@ body::after {
 .detail-body h3,
 .detail-body h4 {
     font-family: var(--font-display);
-    font-optical-sizing: auto;
-    font-weight: 600;
+    font-weight: 500;
     letter-spacing: 0;
-    line-height: 1.25;
+    line-height: 1.3;
     margin: 1.75rem 0 0.6rem;
 }
 
@@ -1215,10 +1358,11 @@ body::after {
     overflow-y: visible;
 }
 
-/* Translation paragraph styles - paragraph-by-paragraph bilingual display:
-   original set in faded small print, translation as the reading voice. */
+/* Bilingual columns are both reading surfaces, not footnotes. Use normal
+   source text and a relaxed rhythm; colour, rather than oblique small print,
+   distinguishes the original from the translation. */
 .translation-paragraph {
-    margin-bottom: 0.9rem;
+    margin-bottom: 1.25rem;
     padding-bottom: 0;
 }
 
@@ -1227,19 +1371,24 @@ body::after {
 }
 
 .paragraph-original {
-    font-size: 0.92rem;
-    line-height: 1.55;
-    margin-bottom: 0.25rem;
-    color: var(--muted-color);
-    font-style: italic;
+    font-size: 1rem;
+    line-height: 1.8;
+    margin-bottom: 0.75rem;
+    color: var(--text-secondary);
+    font-style: normal;
 }
 
 .paragraph-translated {
-    font-size: 1.05rem;
-    line-height: 1.7;
-    margin-bottom: 0.4rem;
+    font-size: 1rem;
+    line-height: 1.85;
+    margin-bottom: 0.75rem;
     color: var(--text-primary);
 }
+
+.paragraph-original > :first-child,
+.paragraph-translated > :first-child { margin-top: 0; }
+.paragraph-original > :last-child,
+.paragraph-translated > :last-child { margin-bottom: 0; }
 
 /* Hide SVG icons, buttons, and form elements in bilingual view */
 .bilingual-content svg,
@@ -1251,20 +1400,8 @@ body::after {
     display: none !important;
 }
 
-/* Tiny inline images (avatars, icons) in bilingual view — hide them */
-.bilingual-content img[width][height]:not([width="0"]):not([height="0"]) {
-    max-width: 100px;
-    max-height: 80px;
-    margin: 0.2rem;
-}
-/* Hide images under 64px (likely avatars / UI icons) in translation view */
-.bilingual-content img[width][height] {
-    max-width: 100%;
-    max-height: none;
-}
-.bilingual-content img[width] {
-    max-width: 100%;
-}
+/* Bilingual originals use the same responsive image rules as Markdown.
+   Do not guess avatar/figure sizes from source width/height attributes. */
 
 /* Collapse consecutive empty lines in rendered content */
 .detail-body p:empty,
@@ -1794,13 +1931,40 @@ body::after {
         position: fixed;
         top: 0;
         right: 0;
+        bottom: 32px; /* Leave the fixed status bar visible. */
         width: 100%;
-        height: 100%;
+        height: auto;
         z-index: 100;
     }
 
     .detail-panel.visible {
         display: flex;
+    }
+
+    /* One compact toolbar rhythm, including navigation. Let mode buttons
+       share wrapping space with item actions rather than forcing extra rows. */
+    .detail-header { gap: 0.4rem; justify-content: flex-start; }
+    .detail-actions { display: contents; }
+    .detail-item-actions { margin-left: auto; }
+    .detail-actions button,
+    .detail-item-actions button,
+    .detail-item-actions a {
+        min-height: 44px;
+        min-width: 44px;
+    }
+
+    /* Reuse the shared type, padding and radius. The arrow and quiet accent
+       identify Back without introducing a different button design. */
+    .detail-actions #focus-btn {
+        order: -1;
+        color: var(--accent-color);
+        background: var(--accent-soft);
+        border-color: var(--accent-color);
+    }
+
+    .detail-actions #focus-btn:hover {
+        color: var(--bg-primary);
+        background: var(--accent-color);
     }
 }
 
@@ -1867,10 +2031,10 @@ body::after {
 
 .recommend-rank {
     font-family: var(--font-display);
-    font-style: italic;
-    font-weight: 600;
+    font-weight: 700;
     font-size: 0.9rem;
     color: var(--accent-color);
+    font-variant-numeric: tabular-nums;
 }
 
 .recommend-source {
@@ -2351,10 +2515,10 @@ body::after {
     font-family: var(--font-ui);
     font-size: 0.66rem;
     font-weight: 600;
-    letter-spacing: 0.11em;
+    letter-spacing: 0.09em;
     text-transform: uppercase;
     color: var(--text-secondary);
-    margin: 0.4rem 0 0;
+    margin: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -2406,11 +2570,17 @@ body::after {
     color: inherit;
 }
 
+/* The original side is faded small print, but its links must still read as
+   links: accent colour at reduced strength, not an invisible hairline. */
 .paragraph-original a {
-    color: inherit;
+    color: color-mix(in srgb, var(--accent-color) 75%, var(--text-secondary));
     text-decoration: underline;
-    text-decoration-color: var(--border-color);
+    text-decoration-color: color-mix(in srgb, var(--accent-color) 35%, transparent);
     text-underline-offset: 2px;
+}
+
+.paragraph-translated a {
+    text-decoration-color: color-mix(in srgb, var(--accent-color) 45%, transparent);
 }
 
 .paragraph-original code,
@@ -2666,4 +2836,65 @@ html[data-theme="vscode-dark"] {
     0% { background: var(--accent-soft); color: var(--accent-color); }
     70% { background: var(--accent-soft); color: var(--accent-color); }
     100% { background: transparent; color: inherit; }
+}
+
+/* ---------- Reading layout states (src/ui/reading-layout.ts) ---------- */
+
+/* Parallel control is only shown while a bilingual view is active. */
+#parallel-btn[hidden] {
+    display: none;
+}
+
+/* Reading Room: hide the library columns; the detail pane takes the window.
+   Column widths are untouched, so leaving focus restores the layout. Desktop
+   only: below 1024px the sidebar and detail are already overlays, and hiding
+   the sidebar there would leave no navigation. */
+@media (min-width: 1025px) {
+    .app-container.reading-focus {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .app-container.reading-focus > :not(.detail-panel) {
+        display: none;
+    }
+
+    .app-container.reading-focus .detail-content {
+        padding-left: max(3rem, calc((100% - 46rem) / 2));
+        padding-right: max(3rem, calc((100% - 46rem) / 2));
+    }
+}
+
+/* Parallel Text: original and translation share a row per paragraph pair.
+   Narrow panes fall back to the stacked layout via the container query. */
+.detail-body {
+    container-type: inline-size;
+}
+
+.bilingual-content.parallel .translation-paragraph {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 1.75rem;
+    align-items: start;
+}
+
+.bilingual-content.parallel .translation-paragraph > .paragraph-original {
+    margin-bottom: 0;
+    padding-right: 1.25rem;
+    border-right: 1px solid var(--border-color);
+}
+
+.bilingual-content.parallel .translation-paragraph > .paragraph-translated {
+    margin-bottom: 0;
+}
+
+@container (max-width: 480px) {
+    .bilingual-content.parallel .translation-paragraph {
+        grid-template-columns: minmax(0, 1fr);
+        row-gap: 0.4rem;
+    }
+
+    .bilingual-content.parallel .translation-paragraph > .paragraph-original {
+        padding-right: 0;
+        border-right: 0;
+    }
 }

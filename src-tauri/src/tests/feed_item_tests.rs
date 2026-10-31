@@ -950,3 +950,68 @@ async fn test_find_all_tags_is_canonical_and_subscription_scoped() {
         vec!["machine_learning"]
     );
 }
+
+#[tokio::test]
+async fn test_tag_queries_preserve_legacy_json_semantics() {
+    let env = TestEnv::new().await;
+    let sub_id = seed_sub(&env).await;
+    for name in ["rust", "database", "unused", "123"] {
+        env.feed_repo.create_tag(name).await.unwrap();
+    }
+    // Legacy/corrupt data can bypass save_tags: ignore malformed JSON, count
+    // duplicate array entries only once, and keep exact case-sensitive matches.
+    let fixtures = [
+        None,
+        Some("not JSON"),
+        Some("[]"),
+        Some(r#"["rust","rust","Rust","unknown"]"#),
+        Some(r#"["Rust"]"#),
+        Some(r#"["database"]"#),
+        Some(r#"{"subject":"rust"}"#),
+        Some(r#""rust""#),
+        Some("[123,true,null]"),
+    ];
+    for raw in fixtures {
+        let id = create_item(&env, sub_id, "Legacy tags").await;
+        sqlx::query("UPDATE feed_items SET tags = $2 WHERE id = $1")
+            .bind(id)
+            .bind(raw)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+    }
+
+    let expected: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT t.name, COUNT(DISTINCT f.id) FROM tag_catalog t
+         LEFT JOIN feed_items f ON json_valid(f.tags)
+           AND EXISTS (SELECT 1 FROM json_each(f.tags) j WHERE j.value = t.name)
+         GROUP BY t.name ORDER BY t.name",
+    )
+    .fetch_all(&env.pool)
+    .await
+    .unwrap();
+    let catalog = env.feed_repo.find_tag_catalog().await.unwrap();
+    let actual: Vec<_> = catalog
+        .into_iter()
+        .map(|entry| (entry.name, entry.usage_count))
+        .collect();
+    assert_eq!(actual, expected);
+    assert!(actual.contains(&("rust".into(), 3)));
+    assert!(actual.contains(&("unused".into(), 0)));
+    let used: Vec<_> = expected
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(env.feed_repo.find_all_tags(None).await.unwrap(), used);
+    assert_eq!(
+        env.feed_repo.find_all_tags(Some(sub_id)).await.unwrap(),
+        used
+    );
+    assert!(env
+        .feed_repo
+        .find_all_tags(Some(-1))
+        .await
+        .unwrap()
+        .is_empty());
+}

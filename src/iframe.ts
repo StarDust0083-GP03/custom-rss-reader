@@ -16,6 +16,8 @@
  */
 
 import { setSafeHtml, escapeHtml, dedupeImages } from "./sanitize";
+import { normalizeMediaUrls } from "./media";
+import { applyBionic } from "./bionic";
 import { configureMarked, renderMarkdown } from "./markdown";
 
 configureMarked();
@@ -87,8 +89,8 @@ export interface IframeLoadRequest {
   /** Article body in Markdown — produced by the backend `html2md` pipeline. */
   markdown: string;
   /**
-   * Load the REAL website URL directly (webview mode, issue #2). When set,
-   * `markdown` is ignored and the iframe navigates to this address.
+   * Requested original page. Never navigated inside the app: remote scripts
+   * and players bypass the article sanitizer. Render cached Markdown instead.
    */
   url?: string;
   /** Article URL; used to resolve any remaining relative URLs. */
@@ -115,7 +117,7 @@ export class IframeManager {
   private generation = 0;
 
   /**
-   * Load `request.html` into a sandboxed iframe inside `request.container`.
+   * Load sanitized Markdown into a sandboxed iframe inside the container.
    * If a previous load is still in flight, it is cancelled.
    */
   load(request: IframeLoadRequest): number {
@@ -144,13 +146,18 @@ export class IframeManager {
         onError?.(message);
         return;
       }
-      this.renderDirectUrl(request, safeUrl, gen);
-      return;
     }
+
+    // Never navigate a cross-origin webpage: its scripts can start media
+    // downloads before a load handler could stop them, and the parent CSP
+    // cannot restrict resources fetched inside a remote document.
+    const notice = url
+      ? '<p role="status">Audio/video and live webpages are blocked. Showing text and images only. Use “Open in browser” to view the original page.</p>'
+      : "";
 
     // Build the document: minimal head, then the sanitized article body.
     // Pass CSS variables so the iframe matches the parent page styles (including dark mode).
-    const safeBody = renderMarkdownBody(markdown, baseUrl);
+    const safeBody = notice + renderMarkdownBody(markdown, baseUrl);
     const cssVars = getCssVariables();
     const docHtml = buildIframeDocument(safeBody, cssVars, { sourceName, title, date, author, articleLink });
 
@@ -211,63 +218,6 @@ export class IframeManager {
     }, 250);
   }
 
-  /**
-   * Webview mode (issue #2): load the actual website in the iframe.
-   *
-   * The sandbox keeps the page isolated from the host app (opaque origin,
-   * no top-level navigation) while allowing the scripts, forms and popups
-   * real sites need to render. X-Frame-Options-refusing sites can't be
-   * framed by any browser — for those the placeholder turns into a hint
-   * pointing at the "Open in browser" link in the article header.
-   */
-  private renderDirectUrl(request: IframeLoadRequest, url: string, gen: number): void {
-    const { container, loadingEl, onComplete, onError } = request;
-    const placeholder = loadingEl ?? null;
-    container.replaceChildren();
-    if (placeholder) {
-      placeholder.dataset.gen = String(gen);
-      placeholder.textContent = "Loading webpage...";
-      container.appendChild(placeholder);
-    }
-
-    const iframe = document.createElement("iframe");
-    iframe.className = "rss-reader-iframe";
-    iframe.setAttribute(
-      "sandbox",
-      "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-same-origin",
-    );
-    iframe.setAttribute("referrerpolicy", "no-referrer");
-    iframe.setAttribute("data-gen", String(gen));
-    iframe.src = url;
-
-    const finishError = (msg: string) => {
-      if (gen !== this.generation) return;
-      if (placeholder?.isConnected) {
-        placeholder.textContent = `Failed to load: ${msg}`;
-      }
-      if (onError) onError(msg);
-    };
-    iframe.addEventListener("error", () => finishError("iframe load failed"));
-    iframe.addEventListener("load", () => {
-      if (gen !== this.generation) return;
-      if (placeholder?.isConnected) placeholder.remove();
-      if (onComplete) onComplete();
-    });
-
-    container.appendChild(iframe);
-
-    // XFO/CSP-refusing sites often fire `load` with an empty/error document
-    // or never fire anything. Either way, retire the placeholder after a
-    // grace period and hint at the header's "Open in browser" link instead
-    // of spinning forever.
-    window.setTimeout(() => {
-      if (gen !== this.generation) return;
-      if (placeholder?.isConnected) {
-        placeholder.textContent =
-          "Still loading — this site may refuse embedding. Use “Open in browser →” in the article header if it stays blank.";
-      }
-    }, 6000);
-  }
 }
 
 /**
@@ -282,44 +232,20 @@ function renderMarkdownBody(markdown: string, baseUrl: string): string {
   if (!markdown.trim()) return "";
 
   // 1. Markdown -> HTML (gfm on, same as the host DOM path)
-  let html = renderMarkdown(markdown);
+  const html = renderMarkdown(markdown);
 
-  // 2. Resolve relative URLs (markdown keeps them as-is; the iframe is
-  //    loaded from a `data:` URL so relative hrefs would otherwise 404)
-  if (baseUrl) {
-    try {
-      html = resolveRelativeUrls(html, baseUrl);
-    } catch {
-      // Ignore URL parse errors; the browser will still handle them.
-    }
-  }
-
-  // 3. Sanitise via the shared helper (drops scripts, event handlers, etc.)
+  // 2. Sanitise via the shared helper (drops scripts, event handlers, etc.)
   const wrapper = document.createElement("div");
   setSafeHtml(wrapper, html);
-  // 4. Same image policy as the host DOM path: one occurrence per URL.
+  // 3. Same media policy as the host DOM path: resolve article-relative URLs
+  //    (this document is a `data:` URL), caption standalone figures, and keep
+  //    one occurrence per image URL.
+  normalizeMediaUrls(wrapper, baseUrl || null);
   dedupeImages(wrapper);
+  // 5. Bionic reading — last pass on the sanitised DOM, before the innerHTML
+  //    is serialised into the sandboxed iframe document.
+  applyBionic(wrapper);
   return wrapper.innerHTML;
-}
-
-/** Rewrite common relative URL patterns to absolute. Best-effort. */
-function resolveRelativeUrls(html: string, baseUrl: string): string {
-  const base = new URL(baseUrl);
-  return html.replace(
-    /\b(href|src)=("([^"]*)"|'([^']*)')/gi,
-    (_match, attr: string, full: string, dq: string | undefined, sq: string | undefined) => {
-      const raw = dq ?? sq ?? "";
-      if (!raw || /^(https?:|mailto:|data:|#|\/\/)/i.test(raw)) {
-        return `${attr}=${full}`;
-      }
-      try {
-        const absolute = new URL(raw, base).href;
-        return `${attr}="${escapeHtml(absolute)}"`;
-      } catch {
-        return `${attr}=${full}`;
-      }
-    },
-  );
 }
 
 /**
@@ -393,6 +319,7 @@ function buildIframeDocument(body: string, cssVars?: Record<string, string>, hea
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: http: data:; style-src 'unsafe-inline'; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${header?.title ? escapeHtml(header.title) : "Article"}</title>
@@ -401,21 +328,27 @@ function buildIframeDocument(body: string, cssVars?: Record<string, string>, hea
 ${varDecls}
 }
 *, *::before, *::after { box-sizing: border-box; }
-/* data: iframes can't fetch the self-hosted Radon woff2 (opaque origin),
-   so approximate it with the system mono stack; CJK falls through to
-   heiti-style system sans (issue #5). */
+/* The host-rendered markdown document below has an opaque origin, so it cannot
+   fetch the self-hosted woff2 files: these stacks mirror href/host order and
+   resolve to the real faces only when installed locally, otherwise to the
+   platform UI sans. (The only current caller loads a live URL instead, and a
+   live page renders with the site's own fonts.) CJK falls through to
+   heiti-style system sans — issue #5: sans only. */
 :root {
   --cjk-sans: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
               'Noto Sans CJK SC', 'Noto Sans SC', sans-serif;
-  --mono-hand: 'Monaspace Radon', 'Cascadia Code', 'JetBrains Mono', Menlo,
-               Consolas, 'DejaVu Sans Mono', var(--cjk-sans);
+  --sans: 'Source Sans 3', 'Segoe UI', 'Helvetica Neue', Arial, var(--cjk-sans);
+  --display: 'Instrument Sans', 'Source Sans 3', 'Segoe UI', 'Helvetica Neue',
+             Arial, var(--cjk-sans);
+  --mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', Menlo, Consolas,
+          'DejaVu Sans Mono', var(--cjk-sans);
 }
 html, body {
   margin: 0;
   padding: 2.5rem 3rem;
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-family: var(--mono-hand);
+  font-family: var(--sans);
   font-size: 16px;
   line-height: 1.8;
   min-height: 100%;
@@ -423,7 +356,7 @@ html, body {
 
 /* Header section */
 .source {
-  font-family: 'Public Sans', 'Segoe UI', var(--cjk-sans);
+  font-family: var(--sans);
   font-size: 0.72rem;
   color: var(--accent-color);
   font-weight: 700;
@@ -434,7 +367,7 @@ html, body {
 
 /* Title styling - matches .detail-content h1 */
 h1 {
-  font-family: var(--mono-hand);
+  font-family: var(--display);
   font-size: 2rem;
   font-weight: 600;
   letter-spacing: -0.015em;
@@ -453,7 +386,7 @@ h1 {
   padding-bottom: 1rem;
   border-bottom: 1px solid var(--border-color);
   color: var(--text-secondary);
-  font-family: 'Public Sans', 'Segoe UI', var(--cjk-sans);
+  font-family: var(--sans);
   font-size: 0.78rem;
   letter-spacing: 0.03em;
 }
@@ -485,7 +418,7 @@ h1 {
 }
 
 .article-body > p:first-of-type::first-letter {
-  font-family: var(--mono-hand);
+  font-family: var(--sans);
   font-weight: 600;
   font-size: 3.4em;
   float: left;
@@ -499,8 +432,9 @@ a {
   color: var(--accent-color);
   cursor: pointer;
   text-decoration: underline;
-  text-decoration-color: rgba(191, 63, 44, 0.4);
-  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, var(--accent-color) 45%, transparent);
+  text-underline-offset: 3px;
+  overflow-wrap: anywhere;
 }
 a:hover {
   text-decoration-color: var(--accent-color);
@@ -510,13 +444,19 @@ a:hover {
 img, video, table { max-width: 100%; }
 img, video { height: auto; display: inline-block; }
 img {
-  max-width: 400px;
-  max-height: 300px;
+  max-width: 100%;
+  height: auto;
   object-fit: contain;
-  border-radius: 2px;
+  border-radius: 3px;
   margin: 0.75rem 0;
-  cursor: zoom-in;
-  transition: max-width 0.3s ease, max-height 0.3s ease;
+}
+figure.article-figure { margin: 1.6rem 0; text-align: center; }
+figure.article-figure img { display: block; margin: 0 auto; }
+figure.article-figure figcaption {
+  margin-top: 0.6rem;
+  font: 0.76rem/1.45 var(--sans);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
 }
 
 /* Paragraphs */
@@ -524,7 +464,7 @@ p { margin: 0.85rem 0; }
 
 /* Headings */
 h2, h3, h4, h5, h6 {
-  font-family: var(--mono-hand);
+  font-family: var(--sans);
   color: var(--text-primary);
   font-weight: 600;
   letter-spacing: -0.01em;
@@ -549,12 +489,12 @@ blockquote {
   color: var(--text-secondary);
 }
 
-/* Pre and code - matches .detail-body */
+/* Pre and code - matches .detail-body (monospace survives the sans switch) */
 pre, code {
+  font-family: var(--mono);
   background: var(--bg-secondary);
   border-radius: 2px;
   font-size: 0.88rem;
-  font-family: 'Consolas', 'Monaco', monospace;
 }
 code { padding: 0.15em 0.35em; }
 pre {
@@ -568,7 +508,7 @@ table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
 th, td { border: 1px solid var(--border-color); padding: 0.45rem 0.7rem; }
 th {
   background: var(--bg-secondary);
-  font-family: 'Public Sans', 'Segoe UI', var(--cjk-sans);
+  font-family: var(--sans);
   font-size: 0.72rem;
   font-weight: 600;
   letter-spacing: 0.05em;
@@ -580,6 +520,12 @@ body { overflow-wrap: anywhere; word-break: break-word; }
 
 /* Hide empty elements */
 p:empty, div:empty { display: none; }
+
+/* Bionic reading — word-leading fixation marks (matches host .bionic-fix) */
+.bionic-fix {
+  font-weight: 700;
+  color: inherit;
+}
 </style>
 </head>
 <body>

@@ -26,7 +26,7 @@ import {
   handleTranslateAction,
   toggleCachedTranslation,
 } from "../src/features/ai";
-import { markAsRead } from "../src/features/actions";
+import { markAsRead, selectItem, cancelIgnoreTimer } from "../src/features/actions";
 import { resetFiltersForSubscription } from "../src/ui/filter-state";
 
 function item(overrides: Partial<FeedItem> = {}): FeedItem {
@@ -80,6 +80,23 @@ function summary(overrides: Partial<FeedItemSummary> = {}): FeedItemSummary {
     ...overrides,
   };
 }
+
+describe("responsive article selection", () => {
+  afterEach(() => {
+    cancelIgnoreTimer();
+    clearMocks();
+    document.body.replaceChildren();
+    state.selectedItem = null;
+  });
+
+  it("opens the detail view through the real selection action", async () => {
+    document.body.innerHTML = '<section class="detail-panel"></section>';
+    mockIPC(cmd => cmd === "get_item" ? item() : null);
+    await selectItem(summary());
+    expect(renderItemDetail).toHaveBeenCalled();
+    expect(document.querySelector('.detail-panel')?.classList.contains('visible')).toBe(true);
+  });
+});
 
 describe("translation and read-state regressions", () => {
   beforeEach(() => {

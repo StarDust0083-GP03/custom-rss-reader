@@ -27,6 +27,8 @@
                 </div>
 
                 <div class="sidebar-content">
+                    <nav class="sidebar-nav" aria-label="Library views">
+                    <span class="nav-heading">Library</span>
                     <div class="filter-tabs">
                         <button class="filter-tab active" data-filter="all">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
@@ -53,6 +55,7 @@
                             <span class="filter-label">Tags</span>
                         </button>
                     </div>
+                    </nav>
                     <div class="subscription-list" id="subscription-list">
                         <!-- Subscriptions will be rendered here -->
                     </div>
@@ -93,7 +96,9 @@
                     <div class="detail-actions">
                         <button id="markdown-btn" title="View as rendered Markdown" class="active">Markdown</button>
                         <button id="webview-btn" title="View as live webpage">Web View</button>
+                        <button id="focus-btn" type="button" aria-pressed="false" title="Reading Room: hide the library and read full width (Esc to exit)">Focus</button>
                         <button id="translate-btn" title="Translate">Translate</button>
+                        <button id="parallel-btn" type="button" aria-pressed="false" title="Show original and translation side by side" hidden>Parallel</button>
                         <button id="detail-menu-btn" class="menu-btn" title="More">⋯</button>
                     </div>
                     <div id="detail-menu" class="dropdown-menu">

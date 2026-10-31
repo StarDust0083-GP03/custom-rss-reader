@@ -8,9 +8,12 @@
 import { items as itemsApi } from "../api";
 import type { FeedItem, FeedItemSummary } from "../types";
 import { setSafeHtml, setText, htmlToPlainText, dedupeImages } from "../sanitize";
+import { applyBionic } from "../bionic";
+import { normalizeMediaUrls } from "../media";
 import { IframeManager } from "../iframe";
 import { configureMarked, renderMarkdown } from "../markdown";
 import { state } from "../state";
+import { isParallelPreferred, setParallelAvailable } from "./reading-layout";
 import { resetFiltersForSubscription } from "./filter-state";
 // Selection / subscription actions are defined in features/actions.ts and
 // invoked from click handlers below. This is a function-level module cycle:
@@ -48,8 +51,8 @@ let loadItemsSeq = 0;
 //     mode (use_website): whether content is fetched from the website vs RSS
 //     text. Active state = the subscription's use_website value.
 //   - Markdown button  -> within webview mode, switches the transient render
-//     between Markdown and the live Web page. In text mode (use_website off)
-//     it's disabled because only text is shown.
+//     between host Markdown and an isolated, media-blocked reader frame.
+//     In text mode (use_website off), it's disabled because only text is shown.
 export function updateToggleButtonStates() {
   const markdownBtn = document.getElementById("markdown-btn") as HTMLButtonElement | null;
   const webviewBtn = document.getElementById("webview-btn") as HTMLButtonElement | null;
@@ -62,12 +65,12 @@ export function updateToggleButtonStates() {
 
   // Persistent subscription webview mode — controlled by the Web View button.
   const webviewMode = subscription?.use_website ?? false;
-  // Within webview mode, markdown <-> live web — controlled by the Markdown
+  // Within webview mode, host DOM <-> isolated reader — controlled by the Markdown
   // button, remembered in memory for this session only.
   const wantLiveWeb = subId != null
     ? (S.webviewPerSubscription.get(subId) ?? false)
     : false;
-  // Live web only exists when the subscription is in webview mode AND the
+  // The isolated reader is available when the subscription uses website content AND the
   // item has a link.
   const canWeb = webviewMode && !!item?.link;
   const showWeb = canWeb && wantLiveWeb;
@@ -85,9 +88,9 @@ export function updateToggleButtonStates() {
     markdownBtn.classList.toggle("active", !showWeb);
     markdownBtn.title = canWeb
       ? (showWeb
-          ? "Viewing live Web — click for Markdown"
-          : "Showing Markdown — click for live Web")
-      : "Text mode — no live web view";
+          ? "Viewing isolated reader — click for Markdown"
+          : "Showing Markdown — click for isolated reader (audio/video blocked)")
+      : "Text mode — no separate reader frame";
   }
 }
 
@@ -282,19 +285,15 @@ export function renderItems(preserveScroll = false) {
     div.className = `item-card ${!item.is_read ? "unread" : ""} ${S.selectedItem?.id === item.id ? "active" : ""}`;
     div.dataset.id = item.id.toString();
 
-    // Header: title + date
+    // Quiet Desk hierarchy: title → excerpt → one source footer. The date
+    // moved out of the title row so the headline is the only thing competing
+    // for attention; provenance is a single quiet line at the bottom.
     const header = document.createElement("div");
     header.className = "item-header";
     const titleEl = document.createElement("h3");
     titleEl.className = "item-title";
     titleEl.textContent = item.title;
     header.appendChild(titleEl);
-    if (item.published_at) {
-      const date = document.createElement("span");
-      date.className = "item-date";
-      date.textContent = formatDate(item.published_at);
-      header.appendChild(date);
-    }
     div.appendChild(header);
 
     if (item.description) {
@@ -307,39 +306,67 @@ export function renderItems(preserveScroll = false) {
       div.appendChild(desc);
     }
 
-    // Tags — the clickable filter is built with data attributes; the tag
-    // string itself goes into textContent.
-    if (item.tags) {
-      try {
-        const tags = JSON.parse(item.tags) as string[];
-        if (Array.isArray(tags) && tags.length > 0) {
-          const tagWrap = document.createElement("div");
-          tagWrap.className = "item-tags";
-          for (const t of tags) {
-            const tagEl = document.createElement("span");
-            tagEl.className = "tag clickable-tag";
-            tagEl.dataset.tag = t;
-            tagEl.textContent = "#" + t;
-            tagEl.addEventListener("click", (e) => {
-              e.stopPropagation();
-              filterByTagLocal(t);
-            });
-            tagWrap.appendChild(tagEl);
-          }
-          div.appendChild(tagWrap);
-        }
-      } catch {
-        // Invalid JSON — ignore silently
-      }
-    }
-
-    // Meta: badges + author
+    // Meta footer: source · time · first tag · state badges · author. One
+    // line instead of four stacked rows — fewer labels, same information.
     const meta = document.createElement("div");
     meta.className = "item-meta";
     const itemTranslationState = S.translationStateByItemId.get(item.id);
     const isTranslating = !!itemTranslationState?.abortController;
     const hasTranslationError = !!itemTranslationState?.hasError;
     const hasTranslation = item.has_translation;
+    // Source kicker (issue #3) leads the footer: it is the "where" of the
+    // title → excerpt → source hierarchy. Skipped when the summary carries no
+    // source (e.g. synthesized semantic-search hits).
+    const sourceName = item.source_title || item.source_url;
+    if (sourceName) {
+      const src = document.createElement("span");
+      src.className = "item-source";
+      src.textContent = sourceName;
+      src.title = "Go to source";
+      // Peek navigation: scroll + highlight the source in the sidebar
+      // WITHOUT selecting it (and without selecting this article).
+      src.addEventListener("click", (e) => {
+        e.stopPropagation();
+        revealSubscription(item.subscription_id);
+      });
+      meta.appendChild(src);
+    }
+
+    if (item.published_at) {
+      const date = document.createElement("span");
+      date.className = "item-date";
+      date.textContent = formatDate(item.published_at);
+      meta.appendChild(date);
+    }
+
+    // One tag in the list; the rest live in the tag picker and the detail
+    // view. A "+N" hint keeps the count discoverable without a chip wall.
+    if (item.tags) {
+      try {
+        const tags = JSON.parse(item.tags) as string[];
+        if (Array.isArray(tags) && tags.length > 0) {
+          const first = document.createElement("span");
+          first.className = "tag clickable-tag";
+          first.dataset.tag = tags[0];
+          first.textContent = "#" + tags[0];
+          first.addEventListener("click", (e) => {
+            e.stopPropagation();
+            filterByTagLocal(tags[0]);
+          });
+          meta.appendChild(first);
+          if (tags.length > 1) {
+            const more = document.createElement("span");
+            more.className = "item-more-tags";
+            more.textContent = `+${tags.length - 1}`;
+            more.title = tags.slice(1).map(t => "#" + t).join(" ");
+            meta.appendChild(more);
+          }
+        }
+      } catch {
+        // Invalid JSON — ignore silently
+      }
+    }
+
     if (isTranslating) meta.appendChild(makeBadge("translating-badge", "Translating..."));
     else if (hasTranslationError) meta.appendChild(makeBadge("translation-error-badge", "Error"));
     else if (hasTranslation) meta.appendChild(makeBadge("translated-badge", "Translated"));
@@ -353,24 +380,6 @@ export function renderItems(preserveScroll = false) {
       meta.appendChild(authorEl);
     }
     div.appendChild(meta);
-
-    // Source footer (issue #3) — small-caps kicker at the bottom of the
-    // card, matching the detail view's .detail-source. Skipped when the
-    // summary carries no source (e.g. synthesized semantic-search hits).
-    const sourceName = item.source_title || item.source_url;
-    if (sourceName) {
-      const src = document.createElement("div");
-      src.className = "item-source";
-      src.textContent = sourceName;
-      src.title = "Go to source";
-      // Peek navigation: scroll + highlight the source in the sidebar
-      // WITHOUT selecting it (and without selecting this article).
-      src.addEventListener("click", (e) => {
-        e.stopPropagation();
-        revealSubscription(item.subscription_id);
-      });
-      div.appendChild(src);
-    }
 
     div.addEventListener("click", () => selectItemLocal(item));
     list.appendChild(div);
@@ -406,6 +415,46 @@ export function formatDate(dateString: string): string {
 // Untrusted fields use textContent; only known-safe HTML is inserted via
 // setSafeHtml (which sanitises via src/sanitize.ts).
 /** Optional rendering context for streaming translations. */
+// ---------------------------------------------------------------------------
+// Streaming tail computation
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute the untranslated remainder of `source` given the bilingual HTML
+ * accumulated so far.
+ *
+ * Each completed chunk carries its ORIGINAL text inside a
+ * `.paragraph-original` div (the LLM is instructed to preserve it verbatim).
+ * We walk the originals in document order and sequentially cut each one out
+ * of the source; whatever remains after the last completed original is the
+ * untranslated tail that must stay visible while streaming.
+ *
+ * An original that the LLM paraphrased (verbatim match not found) is simply
+ * skipped — worst case one paragraph appears both translated and in the
+ * tail, which is far better than hiding untranslated content.
+ */
+function untranslatedTail(source: string, bilingualHtml: string): string {
+  if (!source.trim() || !bilingualHtml.trim()) {
+    return "";
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = bilingualHtml;
+  const originals = Array.from(
+    template.content.querySelectorAll(".paragraph-original"),
+  );
+
+  let remaining = source;
+  for (const el of originals) {
+    const needle = (el.textContent ?? "").trim();
+    if (!needle) continue;
+    const idx = remaining.indexOf(needle);
+    if (idx === -1) continue; // paraphrased — skip rather than mis-cut
+    remaining = remaining.slice(idx + needle.length);
+  }
+  return remaining.trim();
+}
+
 export interface RenderDetailOptions {
   /**
    * Untranslated remainder of the source markdown during streaming. When
@@ -429,8 +478,8 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
   const subName = subscription?.title || subscription?.url || "Unknown";
   // Persistent subscription webview mode — controlled by the Web View button
   // (use_website: content fetched from website vs RSS text). Within webview
-  // mode the Markdown button switches between rendered markdown and the live
-  // webpage; in text mode only text is shown.
+  // mode the Markdown button switches between host Markdown and an isolated
+  // reader frame; remote scripts and media are never loaded.
   const webviewMode = subscription?.use_website ?? false;
   const wantLiveWeb = S.webviewPerSubscription.get(item.subscription_id) ?? false;
   const showWebView = webviewMode && wantLiveWeb && item.link !== null;
@@ -460,25 +509,31 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
     }
   }
 
-  // Translation button state
+  const ts = S.translationStateByItemId.get(item.id);
+  // Keep the control's DOM and active class stable across streaming renders.
+  // Removing/readding the class or text restarts painting and animations.
   if (translateBtn) {
-    const ts = S.translationStateByItemId.get(item.id);
-    translateBtn.classList.remove("translating", "has-cache", "has-error");
-    if (ts?.abortController) {
-      translateBtn.classList.add("translating");
-      translateBtn.textContent = "Cancel";
-    } else if (ts?.hasError) {
-      translateBtn.classList.add("has-error");
-      translateBtn.textContent = "Retry";
-      translateBtn.title = ts.errorMessage || "Translation failed";
-    } else if (item.translated_content?.trim()) {
-      translateBtn.classList.add("has-cache");
-      translateBtn.textContent = ts?.useTranslation ? "Show Original" : "Translate";
-      translateBtn.title = "Right-click or long-press to re-translate";
-    } else {
-      translateBtn.textContent = "Translate";
-      translateBtn.title = "Right-click or long-press to re-translate";
+    const translating = !!ts?.abortController;
+    const failed = !translating && !!ts?.hasError;
+    const cached = !translating && !failed && !!item.translated_content?.trim();
+    translateBtn.classList.toggle("translating", translating);
+    translateBtn.classList.toggle("has-error", failed);
+    translateBtn.classList.toggle("has-cache", cached);
+    translateBtn.setAttribute("aria-busy", String(translating));
+
+    let label = "Translate";
+    let title = "Right-click or long-press to re-translate";
+    if (translating) {
+      label = "Cancel";
+      title = "Cancel translation";
+    } else if (failed) {
+      label = "Retry";
+      title = ts?.errorMessage || "Translation failed";
+    } else if (cached && ts?.useTranslation) {
+      label = "Show Original";
     }
+    if (translateBtn.textContent !== label) translateBtn.textContent = label;
+    if (translateBtn.title !== title) translateBtn.title = title;
   }
 
   // ---- Header (source + category) ----
@@ -544,15 +599,22 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
   body.className = "detail-body";
   detail.appendChild(body);
 
-  const ts = S.translationStateByItemId.get(item.id);
   const useTranslationForItem = ts?.useTranslation ?? false;
+  // Every caller (layout toggles, reselect, source changes, progress events)
+  // must resolve the same live content, not just the completed item cache.
+  const translatedContent = ts?.inProgressContent ?? item.translated_content;
+  const tail = opts.untranslatedTail ?? (ts?.abortController && ts.inProgressContent
+    ? untranslatedTail(item.content_md ?? item.description ?? "", ts.inProgressContent)
+    : "");
 
   // Translation FIRST (issue #2): the webview branch below returns early, so
   // when it came first an active translation was never rendered in webview
   // mode — the user clicked Translate and nothing happened. With this order,
   // an active bilingual view always displays; toggling "Show Original"
-  // returns to the webpage.
-  if (useTranslationForItem && item.translated_content) {
+  // returns to the media-blocked reader.
+  // Parallel Text is offered only while a bilingual view is actually shown.
+  setParallelAvailable(useTranslationForItem && !!translatedContent);
+  if (useTranslationForItem && translatedContent) {
     const badge = document.createElement("span");
     badge.className = "translation-badge";
     badge.textContent = "Bilingual View";
@@ -560,75 +622,62 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
     // The translation content comes from the LLM — untrusted. Sanitise.
     const bilingualEl = document.createElement("div");
     bilingualEl.className = "bilingual-content";
-    setSafeHtml(bilingualEl, item.translated_content);
-    // The original side carries the article's MARKDOWN (the translation
-    // source is content_md). Render it through marked so `**bold**`,
-    // `[links](…)`, `![images](…)`, `# headers` etc. display as formatting
-    // instead of literal syntax; sanitise again because the markdown is
-    // untrusted.
-    // ONLY pure-text originals are re-parsed: if the original already
-    // contains elements (HTML-mode translations keep real `<img>`/`<a>`
-    // inside paragraph-original), textContent would DROP them — leave
-    // element-bearing originals exactly as sanitised.
-    bilingualEl.querySelectorAll(".paragraph-original").forEach((el) => {
-      if (el.children.length > 0) return; // real HTML (e.g. <img>) — keep
-      const raw = el.textContent ?? "";
-      if (!raw.trim() || !/[\\*\[\]#`_>|~-]/.test(raw)) return; // plain text
-      const html = renderMarkdown(raw);
-      setSafeHtml(el, html);
-    });
-
-    // Translated side: models echo markdown links, bare URLs AND simple
-    // formatting (**bold**, `code`, …) despite the "clean text" instruction
-    // — rendered as raw HTML those show as literal syntax. Re-render them
-    // with the SAME markdown-format trigger as the original side so echoed
-    // formats display properly. Images stay hidden via CSS (original side
-    // already shows them) and element-bearing text is left untouched.
-    bilingualEl.querySelectorAll(".paragraph-translated").forEach((el) => {
-      if (el.children.length > 0) return; // real HTML — keep as-is
-      const raw = el.textContent ?? "";
-      if (!raw.trim() || !/[\\*\[\]#`_>|~-]/.test(raw)) return; // plain text
-      const html = renderMarkdown(raw);
-      setSafeHtml(el, html);
+    if (isParallelPreferred()) bilingualEl.classList.add("parallel");
+    setSafeHtml(bilingualEl, translatedContent);
+    // A Markdown link may span text + a real <img> + text. Processing those
+    // text nodes separately loses the bracket pairing, so normalise the whole
+    // serialised block. Using innerHTML preserves existing images and links;
+    // the result is sanitised again before insertion.
+    bilingualEl.querySelectorAll(".paragraph-original, .paragraph-translated").forEach((el) => {
+      const raw = el.children.length ? el.innerHTML : el.textContent ?? "";
+      if (raw.trim()) setSafeHtml(el, renderMarkdown(raw, item.link, item.author));
     });
     body.appendChild(bilingualEl);
 
     // Streaming: keep the untranslated remainder visible below the
     // finished paragraphs. Completed paragraphs substitute their originals
     // (the bilingual pairs above); the rest of the article is NOT removed.
-    if (opts.untranslatedTail && opts.untranslatedTail.trim()) {
+    if (tail.trim()) {
       const tailEl = document.createElement("div");
       tailEl.className = "untranslated-tail";
-      const html = renderMarkdown(opts.untranslatedTail);
+      const html = renderMarkdown(tail, item.link, item.author);
       setSafeHtml(tailEl, html);
       body.appendChild(tailEl);
     }
+
+    // Relative URLs inside the bilingual pairs resolve against the ARTICLE,
+    // not the app origin, and standalone images become captioned figures.
+    // Include the streaming tail so cross-section anchors see every target.
+    normalizeMediaUrls(body, item.link, { title: item.title, author: item.author });
 
     // One image per URL across the whole bilingual view: the same figure
     // often appears in several translated pairs and again in the
     // untranslated tail — keep only the first occurrence. The hidden
     // translated side never claims a URL.
     dedupeImages(body, ".paragraph-translated");
+    // Bionic reading (English fixation marks) — last DOM pass so sanitising
+    // and re-rendering can't strip it; covers originals, translated side
+    // and the streaming tail in one sweep.
+    applyBionic(body);
     return;
   }
 
-  // Webview mode — load the actual website in a sandboxed iframe. Both
-  // display paths still converge on the same backend pipeline when the
-  // user switches to text: fetch website HTML → html_to_markdown_pipeline
-  // → Markdown → `marked` → `setSafeHtml`.
+  // Isolated reader only: never navigate the original webpage inside the
+  // app, since remote scripts and players can fetch media before onload.
+  // Reuse the cached Markdown; the iframe sanitizer and CSP block players.
   if (showWebView && item.link) {
     detail.classList.add("webview-mode");
     const container = document.createElement("div");
     container.className = "webview-container";
     const loading = document.createElement("div");
     loading.className = "webview-loading";
-    loading.textContent = "Loading webpage...";
+    loading.textContent = "Loading reader (audio/video blocked)...";
     container.appendChild(loading);
     body.appendChild(container);
 
     iframeManager.load({
       container,
-      markdown: "",
+      markdown: item.content_md ?? htmlToPlainText(item.description ?? ""),
       url: item.link,
       baseUrl: item.link,
       loadingEl: loading,
@@ -646,14 +695,21 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
   if (item.content_md) {
     // marked returns sanitised-ish HTML, but we still pass it through our
     // sanitiser to drop event handlers and dangerous schemes.
-    const html = renderMarkdown(item.content_md);
+    const html = renderMarkdown(item.content_md, item.link, item.author);
     setSafeHtml(body, html);
+    // Same media policy as the bilingual view: article-relative URLs, real
+    // captions on standalone figures. Drop a recognisable site header only
+    // when it duplicates the title/byline already displayed by the app.
+    normalizeMediaUrls(body, item.link, { title: item.title, author: item.author });
     // The same image often appears twice in one article (hero + inline) —
     // render it once.
     dedupeImages(body);
+    // Bionic reading — after sanitise + dedupe, on the whole body.
+    applyBionic(body);
   } else if (item.description) {
     // Same untrusted-HTML handling as the list-item summary above.
     setText(body, htmlToPlainText(item.description));
+    applyBionic(body);
   } else {
     setText(body, "No content available");
   }
