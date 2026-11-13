@@ -79,6 +79,9 @@ async fn create_tables(conn: &mut SqliteConnection) -> Result<()> {
             translated_title TEXT,
             translated_content TEXT,
             translated_at DATETIME,
+            translated_source_hash TEXT,
+            translated_model TEXT,
+            translated_prompt_version INTEGER,
             FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
         )
         "#,
@@ -275,6 +278,29 @@ async fn add_missing_columns(conn: &mut SqliteConnection) -> Result<()> {
         "feed_items",
         "translated_at",
         "ALTER TABLE feed_items ADD COLUMN translated_at DATETIME",
+    )
+    .await?;
+    // Translation cache provenance: without these a cached translation can
+    // never be checked against the article it was produced from.
+    ensure_column(
+        conn,
+        "feed_items",
+        "translated_source_hash",
+        "ALTER TABLE feed_items ADD COLUMN translated_source_hash TEXT",
+    )
+    .await?;
+    ensure_column(
+        conn,
+        "feed_items",
+        "translated_model",
+        "ALTER TABLE feed_items ADD COLUMN translated_model TEXT",
+    )
+    .await?;
+    ensure_column(
+        conn,
+        "feed_items",
+        "translated_prompt_version",
+        "ALTER TABLE feed_items ADD COLUMN translated_prompt_version INTEGER",
     )
     .await?;
     ensure_column(

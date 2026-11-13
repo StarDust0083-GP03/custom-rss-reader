@@ -56,6 +56,9 @@ struct FeedItemRow {
     pub translated_title: Option<String>,
     pub translated_content: Option<String>,
     pub translated_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub translated_source_hash: Option<String>,
+    pub translated_model: Option<String>,
+    pub translated_prompt_version: Option<i64>,
 }
 
 /// Row type for summary queries (projection of `feed_items`).
@@ -106,6 +109,9 @@ impl From<FeedItemRow> for FeedItem {
             translated_title: r.translated_title,
             translated_content: r.translated_content,
             translated_at: r.translated_at,
+            translated_source_hash: r.translated_source_hash,
+            translated_model: r.translated_model,
+            translated_prompt_version: r.translated_prompt_version,
         }
     }
 }
@@ -516,15 +522,21 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         item_id: i64,
         translated_title: Option<&str>,
         translated_content: &str,
+        source_hash: &str,
+        model: &str,
+        prompt_version: i64,
     ) -> Result<FeedItem> {
         let row = sqlx::query_as::<_, FeedItemRow>(
             r#"
             UPDATE feed_items
-            -- An empty string clears the translation (force re-translate path):
-            -- NULLIF keeps the column NULL so the cache lookup sees "no
-            -- translation" instead of a stale empty value.
+            -- An empty string clears the translation: NULLIF keeps the column
+            -- NULL so the cache lookup sees "no translation" instead of a
+            -- stale empty value.
             SET translated_content = NULLIF($2, ''),
                 translated_title = COALESCE($3, translated_title),
+                translated_source_hash = CASE WHEN $2 = '' THEN NULL ELSE $4 END,
+                translated_model = CASE WHEN $2 = '' THEN NULL ELSE $5 END,
+                translated_prompt_version = CASE WHEN $2 = '' THEN NULL ELSE $6 END,
                 translated_at = CURRENT_TIMESTAMP
             WHERE id = $1
             RETURNING *
@@ -533,11 +545,33 @@ impl FeedItemRepository for SqliteFeedItemRepository {
         .bind(item_id)
         .bind(translated_content)
         .bind(translated_title)
+        .bind(source_hash)
+        .bind(model)
+        .bind(prompt_version)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("FeedItem with id {} not found", item_id)))?;
 
         Ok(row.into())
+    }
+
+    async fn adopt_translation_provenance(&self, item_id: i64, source_hash: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE feed_items
+               SET translated_source_hash = $2,
+                   translated_model = COALESCE(translated_model, $3),
+                   translated_prompt_version = COALESCE(translated_prompt_version, 0)
+             WHERE id = $1
+            "#,
+        )
+        .bind(item_id)
+        .bind(source_hash)
+        .bind(crate::ai::LEGACY_TRANSLATION_PROVENANCE)
+        .execute(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+        Ok(())
     }
 
     async fn find_all(

@@ -125,13 +125,27 @@ async fn translate_streaming_inner(
     force: bool,
 ) -> Result<String> {
     // 1. Cache lookup — skipped when the user forces a re-translation
-    //    (right-click on the Translate button), which also drops the stale
-    //    stored translation so a failed re-run can't resurrect it.
-    if force {
-        if let Err(e) = state.feed_repo.update_translation(item_id, None, "").await {
-            eprintln!("Failed to clear translation for item {}: {}", item_id, e);
-        }
-    } else if let Some(cached) = lookup_cached_translation(state, item_id).await? {
+    //    (right-click on the Translate button).
+    //
+    //    A forced run no longer deletes the stored translation first: the
+    //    last good result stays available until the replacement actually
+    //    commits, so a failed re-translate doesn't leave the article with
+    //    nothing.
+    let ai_service = get_or_build_ai_service(state).await?;
+    let source_hash = crate::ai::translation_source_hash(&request.content);
+    let cached = if force {
+        None
+    } else {
+        lookup_cached_translation(
+            &state.feed_repo,
+            item_id,
+            &source_hash,
+            &ai_service.model,
+            crate::ai::TRANSLATION_PROMPT_VERSION,
+        )
+        .await?
+    };
+    if let Some(cached) = cached {
         let _ = app_handle.emit_to(
             "main",
             "translation-progress",
@@ -152,7 +166,6 @@ async fn translate_streaming_inner(
 
     // 3. Extract blocks ONCE. The LlmAiService::translate_block method skips
     // re-extraction, so we don't pay the double-extract cost.
-    let ai_service = get_or_build_ai_service(state).await?;
     let is_html = is_html_content(&cleaned);
     let blocks = crate::ai::service::extract_blocks(&cleaned, ai_service.config_max_chars);
     let total = blocks.len();
@@ -231,7 +244,14 @@ async fn translate_streaming_inner(
 
     if let Err(e) = state
         .feed_repo
-        .update_translation(item_id, None, &result_body)
+        .update_translation(
+            item_id,
+            None,
+            &result_body,
+            &source_hash,
+            &ai_service.model,
+            crate::ai::TRANSLATION_PROMPT_VERSION,
+        )
         .await
     {
         eprintln!("Failed to persist translation for item {}: {}", item_id, e);
@@ -257,9 +277,15 @@ async fn translate_streaming_inner(
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn lookup_cached_translation(state: &AppState, item_id: i64) -> Result<Option<String>> {
-    let item = state.feed_repo.find_by_id(item_id).await?;
-    let Some(translated) = item.translated_content else {
+async fn lookup_cached_translation(
+    repo: &std::sync::Arc<dyn crate::repositories::FeedItemRepository>,
+    item_id: i64,
+    source_hash: &str,
+    model: &str,
+    prompt_version: i64,
+) -> Result<Option<String>> {
+    let item = repo.find_by_id(item_id).await?;
+    let Some(translated) = item.translated_content.clone() else {
         return Ok(None);
     };
     // Legacy rows may hold an empty string instead of NULL — treat both as
@@ -274,7 +300,56 @@ async fn lookup_cached_translation(state: &AppState, item_id: i64) -> Result<Opt
     if (Utc::now() - translated_at).num_days() >= TRANSLATION_CACHE_DAYS {
         return Ok(None);
     }
+
+    // A row with no recorded source hash was written before validity tracking
+    // existed. Adopting the stored source as its provenance (once) keeps a
+    // translation that is almost certainly still correct from being re-billed.
+    let mut recorded_hash = item.translated_source_hash.clone();
+    let mut recorded_model = item.translated_model.clone();
+    let mut recorded_prompt = item.translated_prompt_version;
+    if recorded_hash.is_none() {
+        if let Some(stored) = translation_source_of(&item) {
+            let adopted = crate::ai::translation_source_hash(&stored);
+            repo.adopt_translation_provenance(item_id, &adopted).await?;
+            println!(
+                "[translate] adopted the stored source as provenance for item {}",
+                item_id
+            );
+            recorded_hash = Some(adopted);
+            recorded_model = Some(crate::ai::LEGACY_TRANSLATION_PROVENANCE.to_string());
+            recorded_prompt = Some(0);
+        }
+    }
+
+    // A cached translation is only reusable when it describes the SAME source
+    // text and was produced by the SAME model. Rows with unknown provenance
+    // are accepted once their source matches; an unknown model or prompt
+    // revision is not by itself a reason to re-bill the user.
+    let matches_source = recorded_hash.as_deref() == Some(source_hash);
+    let matches_model = recorded_model.as_deref() == Some(model)
+        || recorded_model.as_deref() == Some(crate::ai::LEGACY_TRANSLATION_PROVENANCE);
+    let matches_prompt = recorded_prompt == Some(prompt_version) || recorded_prompt == Some(0);
+    if !matches_source || !matches_model || !matches_prompt {
+        println!(
+            "[translate] cached translation for item {} is stale (source {} model {} prompt {}); re-translating",
+            item_id,
+            if matches_source { "same" } else { "changed" },
+            if matches_model { "same" } else { "changed" },
+            if matches_prompt { "same" } else { "changed" },
+        );
+        return Ok(None);
+    }
     Ok(Some(translated))
+}
+
+/// The text a stored translation was produced from, in the same precedence
+/// the translation pipeline uses (`content_md` → `content` → `description`).
+fn translation_source_of(item: &crate::models::FeedItem) -> Option<String> {
+    [item.content_md.as_ref(), item.content.as_ref(), item.description.as_ref()]
+        .into_iter()
+        .flatten()
+        .find(|text| !text.trim().is_empty())
+        .cloned()
 }
 
 fn wrap_bilingual(body: &str, cached: bool) -> String {
@@ -299,9 +374,11 @@ fn clean_bilingual_block(html: &str) -> String {
 async fn get_or_build_ai_service(state: &AppState) -> Result<AiHandle> {
     if let Some(service) = state.ai_service.read().await.clone() {
         let cfg_max = service.config_max_chars();
+        let cfg_model = service.config_model();
         return Ok(AiHandle {
             service,
             config_max_chars: cfg_max,
+            model: cfg_model,
         });
     }
 
@@ -310,10 +387,12 @@ async fn get_or_build_ai_service(state: &AppState) -> Result<AiHandle> {
         .max_chars_per_segment
         .unwrap_or(crate::ai::MAX_CHARS_PER_SEGMENT);
     let service: Arc<dyn AiService> = Arc::new(LlmAiService::new(config)?);
+    let model = service.config_model();
     *state.ai_service.write().await = Some(service.clone());
     Ok(AiHandle {
         service,
         config_max_chars: max,
+        model,
     })
 }
 
@@ -322,6 +401,7 @@ async fn get_or_build_ai_service(state: &AppState) -> Result<AiHandle> {
 struct AiHandle {
     service: Arc<dyn AiService>,
     config_max_chars: usize,
+    model: String,
 }
 
 /// Load AI configuration from `~/.rss-reader/ai_config.json`.

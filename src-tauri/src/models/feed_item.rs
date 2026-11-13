@@ -29,6 +29,12 @@ pub struct FeedItem {
     pub translated_title: Option<String>,
     pub translated_content: Option<String>,
     pub translated_at: Option<DateTime<Utc>>,
+    /// Provenance of the cached translation: what source text, which model
+    /// and which prompt revision produced it. A cache entry is only reusable
+    /// when all three still describe the article.
+    pub translated_source_hash: Option<String>,
+    pub translated_model: Option<String>,
+    pub translated_prompt_version: Option<i64>,
 }
 
 /// Lightweight projection of [`FeedItem`] for list views.

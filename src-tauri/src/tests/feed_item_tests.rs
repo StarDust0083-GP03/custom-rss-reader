@@ -226,16 +226,19 @@ async fn test_empty_translation_clears_cached_content() {
     let item_id = create_item(&env, sub_id, "Translation cache").await;
 
     env.feed_repo
-        .update_translation(item_id, None, "<div>cached</div>")
+        .update_translation(item_id, None, "<div>cached</div>", "hash-a", "test-model", 1)
         .await
         .unwrap();
     let cleared = env
         .feed_repo
-        .update_translation(item_id, None, "")
+        .update_translation(item_id, None, "", "hash-a", "test-model", 1)
         .await
         .unwrap();
 
     assert!(cleared.translated_content.is_none());
+    // Clearing the translation must also clear the provenance so a later
+    // cache lookup cannot adopt a hash that no longer has content behind it.
+    assert!(cleared.translated_source_hash.is_none());
 }
 
 // ---------------------------------------------------------------------------

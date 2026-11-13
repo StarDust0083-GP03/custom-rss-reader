@@ -129,7 +129,15 @@ pub trait FeedItemRepository: Send + Sync {
         item_id: i64,
         translated_title: Option<&str>,
         translated_content: &str,
+        source_hash: &str,
+        model: &str,
+        prompt_version: i64,
     ) -> Result<FeedItem>;
+
+    /// Record source provenance for a translation cached before validity
+    /// tracking existed, so later lookups can check it instead of re-billing
+    /// the user for a translation that is almost certainly still correct.
+    async fn adopt_translation_provenance(&self, item_id: i64, source_hash: &str) -> Result<()>;
 
     /// List feed item summaries with optional subscription filter and pagination.
     async fn find_all(
