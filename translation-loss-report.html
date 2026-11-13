@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>翻译内容丢失 · 排查报告</title>
+<style>
+  :root {
+    --ink: #1f2933;
+    --ink-soft: #52606d;
+    --accent: #1d4ed8;
+    --accent-soft: #eef2ff;
+    --line: #d5dbe1;
+    --bg: #fbfbfa;
+    --card: #ffffff;
+    --code-bg: #f3f4f6;
+    --danger: #b91c1c;
+    --danger-soft: #fef2f2;
+    --warn-soft: #fffbeb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.75 "Source Sans 3", "Noto Sans SC", -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 56rem; margin: 0 auto; padding: 3rem 1.5rem 6rem; }
+  h1 { font-size: 1.7rem; line-height: 1.3; margin: 0 0 .3rem; letter-spacing: -.01em; }
+  .meta { color: var(--ink-soft); font-size: .9rem; margin-bottom: 2.5rem; }
+  .meta span { margin-right: 1.2rem; }
+  h2 { font-size: 1.18rem; margin: 2.8rem 0 .8rem; padding-bottom: .35rem; border-bottom: 1px solid var(--line); letter-spacing: -.005em; }
+  h3 { font-size: 1.02rem; margin: 1.6rem 0 .5rem; }
+  p { margin: .6rem 0; }
+  ul, ol { margin: .6rem 0; padding-left: 1.4rem; }
+  li { margin: .3rem 0; }
+  code {
+    font: .85em/1.6 "JetBrains Mono", ui-monospace, Consolas, monospace;
+    background: var(--code-bg);
+    padding: .1em .35em;
+    border-radius: 3px;
+    word-break: break-all;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: .9rem 1rem;
+    overflow-x: auto;
+    font-size: .82rem;
+    line-height: 1.55;
+  }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0; font-size: .92rem; }
+  th, td { border: 1px solid var(--line); padding: .45rem .7rem; text-align: left; vertical-align: top; }
+  th { background: var(--code-bg); font-weight: 600; }
+  .summary {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--accent);
+    border-radius: 8px;
+    padding: 1.1rem 1.4rem;
+    margin: 1.5rem 0;
+  }
+  .defect {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 1rem 1.3rem;
+    margin: 1rem 0;
+  }
+  .defect h3 { margin-top: .2rem; display: flex; align-items: baseline; gap: .6rem; }
+  .tag {
+    font-size: .72rem; font-weight: 700; letter-spacing: .04em;
+    padding: .1rem .5rem; border-radius: 999px; white-space: nowrap;
+  }
+  .p0 { background: var(--danger-soft); color: var(--danger); border: 1px solid #fecaca; }
+  .p1 { background: var(--warn-soft); color: #92400e; border: 1px solid #fde68a; }
+  .p2 { background: var(--accent-soft); color: var(--accent); border: 1px solid #c7d2fe; }
+  .defect .loc { color: var(--ink-soft); font-size: .82rem; font-family: ui-monospace, Consolas, monospace; }
+  .evidence {
+    background: var(--accent-soft);
+    border-radius: 6px;
+    padding: .7rem 1rem;
+    font-size: .88rem;
+    margin: .6rem 0;
+  }
+  .evidence b { color: var(--accent); }
+  .fn { color: var(--accent); font-weight: 600; }
+  a { color: var(--accent); }
+  .footer { margin-top: 4rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: .85rem; }
+  kbd { font: .8em ui-monospace, Consolas, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 .35em; background: #fff; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>翻译内容丢失 · 排查报告</h1>
+<div class="meta">
+  <span>日期:2026-11-13</span>
+  <span>对象:custom-rss-reader(实际运行的应用)</span>
+  <span>结论:7 处已验证缺陷,均可从上游仓库移植修复</span>
+</div>
+
+<h2 id="summary">结论摘要</h2>
+<div class="summary">
+<p><b>实际在用的应用是 <code>~/Documents/custom-rss-reader</code>(10 月 31 日构建的 debug 版),而不是 <code>~/Documents/code/rss-reader</code>。</b>
+两个项目共用同一个数据库 <code>~/.rss-reader/rss_reader.db</code>。10 月 31 日之后所有翻译记录都由 fork 写入(数据库中 <code>translated_source_hash</code>/<code>translated_model</code>/<code>translated_prompt_version</code> 三列为空,是 fork 版 <code>update_translation</code> 的特征;上游版本会写入这三列)。</p>
+<p>fork 的代码停在 9 月 2 日的 <code>9a8934c</code> + 阅读功能改动,<b>不包含</b>上游 9 月 13 日(<code>a3c9725</code>)与 9 月 19 日(<code>136c390</code>)提交的整组翻译健壮性修复:段落标记(<code>###P&lt;n&gt;###</code>)、折叠检测与递归恢复、截断拒绝、双语结构校验、强制重译不再先删旧译文、前端以命令返回值为准。我用真实文章 + 真实 MiniMax API 对 fork 的管线做了端到端实测,以下缺陷全部复现。</p>
+<p>你描述的症状可以完全对应:</p>
+<ul>
+<li><b>"只保留最后一部分翻译,失败的部分丢失"</b> —— 块级失败时整个 run 作废(<a href="#d7">D7</a>),强制重译先删旧译文(<a href="#d5">D5</a>),截断/空块静默丢失(<a href="#d2">D2</a>/<a href="#d3">D3</a>);</li>
+<li><b>"翻译不完整、文章读不了"</b> —— 模型把整块折叠成一对、回显原文时丢段落,无检测无恢复,坏结果被缓存 3 天(<a href="#d1">D1</a>/<a href="#d4">D4</a>);</li>
+<li><b>"可能与图片和标记有关"</b> —— 译文侧图片回显清理、Markdown 标记(<code>**</code>、<code>###</code>)在渲染层会转换形态,这部分已逐层验证<b>不是</b>丢内容的原因;真正丢内容发生在翻译管线与缓存,与图片无关。</li>
+</ul>
+</div>
+
+<h2 id="defects">缺陷清单(按严重程度)</h2>
+
+<div class="defect" id="d1">
+<h3><span class="tag p0">P0</span>D1 · 段落折叠无检测、无恢复,模型丢掉的段落永久丢失</h3>
+<p class="loc">src-tauri/src/ai/service.rs — translate_block(第 471 行起)</p>
+<p>MiniMax-M2.7-highspeed 的输出结构不稳定。实测同一篇文章(10 块、每块 3000 字符):一次运行 <b>10 个块全部折叠成 1 对</b>(20–46 个段落被合并成一个 <code>translation-paragraph</code>),另一次运行却返回逐段 352 对。折叠时模型回显原文还会<b>漏掉段落</b>(实测第 9 块漏了 1 段;9716 的缓存译文也漏了引用段落)。</p>
+<p>fork 没有任何折叠检测,坏答案直接 <code>Ok</code> → 入库 → 缓存 3 天。双语视图变成"整块原文 + 整块译文",配对关系被破坏;漏掉的段落读者永远看不到。</p>
+<div class="evidence"><b>实测证据</b>:<code>block 1: OK len=3990 paras=34 pairs=1</code>(10/10 块均如此);上游仓库 <code>ai/service.rs</code> 注释原文:"a real 13-paragraph article came back as a single pair, which renders as 'all the original, then all the translation'" —— 正是你看到的现象。</div>
+<p><b>上游已有修复</b>:<code>mark_paragraphs</code> 给每个段落编号 <code>###P&lt;n&gt;###</code>,<code>collapses_paragraphs</code> 检测,<code>translate_with_recovery</code> 对折叠/截断的块在段落边界对半拆分重译(MAX_SPLIT_DEPTH=2)。实测上游管线对同一篇 29K 文章:10 块全部恢复逐段配对,<b>0 段缺失</b>。</p>
+</div>
+
+<div class="defect" id="d2">
+<h3><span class="tag p0">P0</span>D2 · 截断响应被当作成功,半截译文入库并缓存</h3>
+<p class="loc">src-tauri/src/ai/service.rs — send_request_with_priority(第 303 行起)</p>
+<p>fork 完全不检查 <code>finish_reason</code>。响应在 <code>max_tokens</code> 处被截断时(finish_reason=length),返回的是<b>未闭合的半个双语对</b>,例如实测:</p>
+<pre><code>finish_reason: length
+content 尾部: ...&lt;div class="paragraph-original"&gt;The quick brown   ← 译文名存实亡,original 未闭合</code></pre>
+<p>该块被当作成功:推入 chunks、发进度事件、拼进全文、<b>写入数据库并缓存 3 天</b>。该段落在文章里就是"只有原文没有译文",或整个块缺失。只有最后一个块(通常最短)侥幸完整时,整篇译文就"只剩最后一部分"。</p>
+<p><b>上游已有修复</b>:<code>is_truncation_error</code> + <code>Truncation::Reject</code>,截断视为失败请求,进入拆分恢复;注释写明"Returning it as success cached half a paragraph as the article's finished translation"。</p>
+</div>
+
+<div class="defect" id="d3">
+<h3><span class="tag p1">P1</span>D3 · <code>strip_think_tags</code> 遇到未闭合 <code>&lt;think&gt;</code> 把整个回答丢成空串</h3>
+<p class="loc">src-tauri/src/ai/service.rs — strip_think_tags(第 1261 行)</p>
+<p>当响应在思维链内部被截断(<code>&lt;think&gt;</code> 没有闭合标签)时,该函数把从 <code>&lt;think&gt;</code> 起的所有内容全部丢弃,返回 <code>Ok("")</code>。空块被前端静默跳过(<code>else if (html_chunk)</code> 对空串不成立),<b>该块的正文一个字都不会出现在译文里</b>,而整个 run 仍"成功完成"、提示 Translation complete、入库缓存。多个块如此时即"大部分内容缺失"。</p>
+<p><b>上游已有修复</b>:<code>validate_bilingual_block</code> 拒绝空回答/空译文侧,空回答不再进入缓存。</p>
+</div>
+
+<div class="defect" id="d4">
+<h3><span class="tag p1">P1</span>D4 · 无双语结构校验,拒答/复读也会被缓存为"译文"</h3>
+<p class="loc">src-tauri/src/ai/service.rs — 缺少 validate_bilingual_block</p>
+<p>fork 不校验回答是否真的是双语对(必须同时含 <code>paragraph-original</code> 与 <code>paragraph-translated</code>、译文侧非空)。模型拒答、只回显原文、或输出无 <code>paragraph-translated</code> 的残块时,都被原样缓存。上游的 <code>validate_bilingual_block</code> 正是为此而生。</p>
+</div>
+
+<div class="defect" id="d5">
+<h3><span class="tag p1">P1</span>D5 · 强制重译先删旧译文,重译失败后文章什么都不剩</h3>
+<p class="loc">src-tauri/src/commands/streaming.rs — translate_streaming_inner 第 130 行</p>
+<pre><code>if force {
+    if let Err(e) = state.feed_repo.update_translation(item_id, None, "").await { ... }
+}</code></pre>
+<p>右键强制重译会<b>先把数据库里的旧译文清空</b>再开始。配合 D7(任一块失败则整个 run 失败、不落库),重译失败后旧译文也没了——"失败的部分丢失,文章读不了"。前端 <code>retranslateItem</code> 同样先 <code>item.translated_content = null</code>。</p>
+<p><b>上游已有修复</b>(<code>136c390</code>):"A forced run no longer deletes the stored translation first: the last good result stays available until the replacement actually commits."</p>
+</div>
+
+<div class="defect" id="d6">
+<h3><span class="tag p1">P1</span>D6 · 前端丢弃命令返回值,事件丢失时译文残缺且无法补救</h3>
+<p class="loc">src/features/ai.ts — translateItem(第 244–252 行)</p>
+<pre><code>if (htmlContent) { await invoke&lt;string&gt;("translate_html_content_streaming", {...}); }
+else { await invoke&lt;string&gt;("translate_item_bilingual_streaming", {...}); }
+// 返回值被丢弃</code></pre>
+<p>后端命令的返回值是权威的完整文档,前端却只依赖进度事件累积 <code>inProgressContent</code>。任何一个事件缺失/为空(见 D2/D3),会话内的译文就永久缺块——哪怕数据库里存的是完整的。上游的 <code>reconcileCompletedRun</code> 在命令返回后用返回值兜底校正。</p>
+</div>
+
+<div class="defect" id="d7">
+<h3><span class="tag p2">P2</span>D7 · 任一块失败即全盘作废:直播内容清空、循环中断、无处续传</h3>
+<p class="loc">src-tauri/src/commands/streaming.rs(第 214 行 break)+ src/features/ai.ts(catch 分支)</p>
+<p>块循环遇到第一个错误就 <code>break</code>,返回 Err;前端 catch 把 <code>inProgressContent = null</code>、<code>useTranslation = false</code>——用户眼看着逐块流出的译文<b>瞬间全部消失</b>,退回原文视图。重试永远从第 1 块重来;只要某个块稳定失败(如长段截断),文章就永远翻译不出来。上游通过 D1/D2 的恢复机制把失败消弭在块内部,失败变得罕见。</p>
+</div>
+
+<div class="defect" id="d8">
+<h3><span class="tag p2">P2</span>D8 · 缓存只看年龄,无源文指纹</h3>
+<p class="loc">src-tauri/src/commands/streaming.rs — lookup_cached_translation + feed_item_repo.update_translation</p>
+<p>fork 的 <code>update_translation</code> 不写 <code>translated_source_hash / translated_model / translated_prompt_version</code>,缓存命中只判断 3 天有效期。文章的 <code>content_md</code> 被网站抓取刷新后,旧译文照样命中;换模型、换提示词也不失效。上游以三列指纹判定,不匹配即重译。</p>
+</div>
+
+<div class="defect" id="d9">
+<h3><span class="tag p2">P3</span>D9 · 杂项</h3>
+<ul>
+<li>失败 toast 提示 <code>Check ~/.rss-reader/ai_errors.log</code>,但代码里没有任何地方写这个文件(主仓库、fork 均未写)。</li>
+<li>fork 的 <code>send_request</code> 用无上限的 <code>response.json()</code>,上游已加 4MB <code>read_bounded</code>。</li>
+<li>分块恢复时上游固定以 <code>is_html=false</code> 重建提示词(上游自身的小瑕疵,顺手可修)。</li>
+</ul>
+</div>
+
+<h2 id="evidence">实测证据</h2>
+<h3>1. 折叠复现(真实文章 + 真实 API)</h3>
+<p>对 fork 的 <code>LlmAiService::translate_block</code> 注入临时探针(<code>cargo test --lib translation_live_probe</code>,已清理),对 <code>Build Like an Onion</code>(29,175 字符,10 块)实测:</p>
+<pre><code>block 0: OK len=3515 paras=22 pairs=1    ← 22 段折成 1 对
+block 1: OK len=3990 paras=34 pairs=1
+...
+block 9: OK len=4042 paras=11 pairs=1
+MISSING: His thinking emphasized simplicity, nonviolence...  ← 模型漏段,无恢复</code></pre>
+<p>同一篇文章在<b>上游管线</b>(含标记+恢复)下运行:352 对逐段配对、0 段缺失,折叠的块被自动对半拆分重译(日志 <code>[translate] 45 paragraphs but only 1 pair(s)... splitting into 1484 + 1460</code>)。</p>
+<h3>2. 截断复现(真实 API,小预算)</h3>
+<pre><code>max_tokens=512 → finish_reason: length
+content = &lt;think&gt;…&lt;/think&gt;&lt;div class="translation-paragraph"&gt;&lt;div class="paragraph-original"&gt;The quick brown
+→ 无译文侧、original 未闭合,却被当作成功返回</code></pre>
+<h3>3. 渲染层排查(排除嫌疑)</h3>
+<p>把 9716 的缓存译文逐层过 fork 的渲染链(sanitizer → 逐 pair 重渲染 markdown → 媒体归一 → 图片去重 → bionic),纯文本比对 29 个源段落:正文段落全部保留;仅 Medium 挂件(标签条、登录链接)与被 <code>dedupeImages</code> 去重的重复图按设计消失。<code>stripOrphanLinkFragments</code>、bionic 标记均未丢正文。<b>"图片/标记导致丢失"的猜测不成立,丢失发生在翻译与缓存层。</b></p>
+
+<h2 id="fix">修复建议</h2>
+<p>上游 <code>~/Documents/code/rss-reader</code>(分支 refactor,HEAD <code>136c390</code>)已经把 1–6 全部修好并有回归测试(325 Rust tests + 81 前端 tests 全绿,本次已验证)。建议把以下成果移植进 fork:</p>
+<table>
+<tr><th>修什么</th><th>从哪拿</th><th>落到哪</th></tr>
+<tr><td>段落标记 + 折叠检测 + 截断/折叠递归恢复</td><td><code>code/rss-reader/src-tauri/src/ai/service.rs</code>:<span class="fn">mark_paragraphs</span>、<span class="fn">collapses_paragraphs</span>、<span class="fn">translate_with_recovery</span>、<span class="fn">split_for_translation</span>、<span class="fn">translate_block_sized</span></td><td>fork 的 <code>ai/service.rs</code>(替换 <code>translate_block</code> 直连 <code>with_retry</code> 的实现)</td></tr>
+<tr><td>截断拒绝 + 双语校验</td><td>同文件:<span class="fn">is_truncation_error</span>、<span class="fn">Truncation::Reject</span>(<code>send_request_with_priority</code>)、<span class="fn">validate_bilingual_block</span></td><td>同上</td></tr>
+<tr><td>强制重译不先删旧译文</td><td><code>code/rss-reader/src-tauri/src/commands/streaming.rs</code> 第 1 步注释与实现</td><td>fork 的 <code>streaming.rs</code> force 分支</td></tr>
+<tr><td>前端以命令返回值为准</td><td><code>code/rss-reader/src/features/ai.ts</code>:<span class="fn">reconcileCompletedRun</span></td><td>fork 的 <code>features/ai.ts</code>(invoke 后调用)</td></tr>
+<tr><td>缓存三列指纹</td><td><code>feed_item_repo.update_translation</code>(provenance 版)+ <code>lookup_cached_translation</code></td><td>fork 的 repo 与 streaming 查询(注意 fork 无对应迁移,需补列)</td></tr>
+<tr><td>响应体上限</td><td><span class="fn">read_bounded</span>(4MB)</td><td>fork 的 <code>send_request_with_priority</code></td></tr>
+</table>
+<p>移植后需要一次性的收尾:</p>
+<ul>
+<li>现有 25 条 fork 写入的缓存译文结构上可用但配对粗劣(9716:4 对覆盖 32 段),它们的 3 天缓存期早已过期,重新翻译即可,无需迁移;</li>
+<li>顺手删掉 toast 里的 <code>ai_errors.log</code> 提示,或真的落一个日志文件;</li>
+<li>上游自身的两个小问题也建议顺手修:恢复拆分重建提示词时 <code>is_html</code> 被硬编码为 <code>false</code>(<code>translate_block_sized</code> 闭包),以及错误分支直接清空直播内容(可考虑保留成"部分译文 + 错误徽章"或至少在 toast 中说明已回退)。</li>
+</ul>
+
+<h2 id="appendix">附录 · 排查路径备忘</h2>
+<ol>
+<li>先在 <code>code/rss-reader</code> 排查:管线代码读起来是健全的(事件累积、折叠恢复、强制重译语义都对),测试全绿,且对其真实文章的实测 0 缺失——与"翻译不完整"的现象矛盾。</li>
+<li>数据库取证:10 月 31 日的译文行 <code>translated_source_hash/model/prompt_version</code> 全空,与 <code>code/rss-reader</code> 的写入路径矛盾(它必写三列)→ 这些行不是它写的。</li>
+<li>二进制取证:<code>code/rss-reader</code> 的 debug 构建于 9 月 16 日、release 于 9 月 24 日,但 <code>~/.rss-reader/rss_reader.db</code> 最后写入时间 10 月 31 日 23:49,与 <code>custom-rss-reader/src-tauri/target/debug/tauri-app</code>(10 月 31 日 23:09 构建)吻合 → 真正在用的应用是 fork。</li>
+<li>fork 的 git 历史:分叉自 <code>9a8934c</code>(9 月 2 日),<b>不含</b>上游 <code>a3c9725</code>(9 月 13 日,标记/恢复/校验/来源指纹)与 <code>136c390</code>(9 月 19 日,图片与强制重译修复)。</li>
+<li>对 fork 注入探针实测(已全部清理,两仓库测试恢复全绿)。</li>
+</ol>
+
+<div class="footer">
+报告由排查过程直接生成 · 涉及仓库:<code>~/Documents/custom-rss-reader</code>(实际运行)、<code>~/Documents/code/rss-reader</code>(含全部上游修复)· 数据库:<code>~/.rss-reader/rss_reader.db</code>(两项目共用)
+</div>
+
+</div>
+</body>
+</html>
