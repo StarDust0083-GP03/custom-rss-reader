@@ -624,6 +624,20 @@ export function renderItemDetail(item: FeedItem, opts: RenderDetailOptions = {})
     bilingualEl.className = "bilingual-content";
     if (isParallelPreferred()) bilingualEl.classList.add("parallel");
     setSafeHtml(bilingualEl, translatedContent);
+    // Models occasionally emit a pair without its `.translation-paragraph`
+    // wrapper. The wrapper is the parallel layout's grid row, so a bare pair
+    // falls out of the two-column grid and renders full-width — normalize
+    // before the markdown pass moves any content around.
+    bilingualEl.querySelectorAll(".paragraph-original").forEach((orig) => {
+      if (orig.parentElement?.classList.contains("translation-paragraph")) return;
+      const translated = orig.nextElementSibling;
+      if (!translated?.classList.contains("paragraph-translated")) return;
+      const wrapper = document.createElement("div");
+      wrapper.className = "translation-paragraph";
+      orig.parentElement.insertBefore(wrapper, orig);
+      wrapper.appendChild(orig);
+      wrapper.appendChild(translated);
+    });
     // A Markdown link may span text + a real <img> + text. Processing those
     // text nodes separately loses the bracket pairing, so normalise the whole
     // serialised block. Using innerHTML preserves existing images and links;

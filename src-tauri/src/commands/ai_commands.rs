@@ -271,8 +271,13 @@ pub async fn set_ai_config(
         api_key,
         base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
         model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-        max_tokens: Some(4000),
-        temperature: Some(0.3),
+        // The settings UI has no token-budget field, so keep whatever budget
+        // the existing config carried (file-edited or shipped). Hardcoding a
+        // value here silently re-broke translations: a small budget makes a
+        // reasoning model truncate every bilingual answer, and the truncation
+        // recovery can then only split so deep before failing the block.
+        max_tokens: existing.max_tokens,
+        temperature: existing.temperature.or(Some(0.3)),
         max_chars_per_segment,
     };
 

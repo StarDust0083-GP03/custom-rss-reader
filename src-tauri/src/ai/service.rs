@@ -203,6 +203,14 @@ struct ChatResponseMessage {
     content: String,
 }
 
+/// Token budgets for the small single-call tasks. Reasoning models spend
+/// part of the budget on their chain of thought before the answer starts,
+/// and a truncated answer is now a FAILED request — so these budgets must
+/// leave room for the reasoning overhead, not just the answer.
+pub const CLASSIFY_MAX_TOKENS: u32 = 1_500;
+pub const CLASSIFY_BATCH_MAX_TOKENS: u32 = 8_000;
+pub const RECOMMEND_MAX_TOKENS: u32 = 3_000;
+
 /// Categories of LLM/HTTP failures. Drives the retry policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LlmErrorKind {
@@ -985,7 +993,7 @@ impl AiService for LlmAiService {
                     content: user_message,
                 },
             ],
-            max_tokens: Some(200),
+            max_tokens: Some(CLASSIFY_MAX_TOKENS),
             temperature: Some(0.1),
         };
 
@@ -1024,7 +1032,7 @@ impl AiService for LlmAiService {
                     content: user_message,
                 },
             ],
-            max_tokens: Some(2000),
+            max_tokens: Some(CLASSIFY_BATCH_MAX_TOKENS),
             temperature: Some(0.1),
         };
 
@@ -1066,7 +1074,7 @@ impl AiService for LlmAiService {
                     content: user_message,
                 },
             ],
-            max_tokens: Some(600),
+            max_tokens: Some(RECOMMEND_MAX_TOKENS),
             temperature: Some(0.3),
         };
 
