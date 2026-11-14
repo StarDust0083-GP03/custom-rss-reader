@@ -159,6 +159,15 @@ impl LlmGate {
 // Chat API types (private to this module)
 // ---------------------------------------------------------------------------
 
+/// What to do when the model hits its output limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Truncation {
+    /// The content is the result: a length-limited answer is unusable.
+    Reject,
+    /// Only reachability matters (connection test).
+    Allow,
+}
+
 #[derive(Clone, serde::Serialize)]
 struct ChatMessage {
     role: String,
@@ -183,12 +192,24 @@ struct ChatResponse {
 #[derive(serde::Deserialize)]
 struct ChatChoice {
     message: ChatResponseMessage,
+    /// Why the model stopped. `"length"` means the output was cut off
+    /// mid-answer, which must never be cached as a finished translation.
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
 struct ChatResponseMessage {
     content: String,
 }
+
+/// Token budgets for the small single-call tasks. Reasoning models spend
+/// part of the budget on their chain of thought before the answer starts,
+/// and a truncated answer is now a FAILED request — so these budgets must
+/// leave room for the reasoning overhead, not just the answer.
+pub const CLASSIFY_MAX_TOKENS: u32 = 1_500;
+pub const CLASSIFY_BATCH_MAX_TOKENS: u32 = 8_000;
+pub const RECOMMEND_MAX_TOKENS: u32 = 3_000;
 
 /// Categories of LLM/HTTP failures. Drives the retry policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,6 +218,293 @@ enum LlmErrorKind {
     Transient,
     /// Non-retryable: 4xx (auth, bad request, not found) and parse errors
     Permanent,
+}
+
+// ---------------------------------------------------------------------------
+// Bilingual-structure helpers
+//
+// Reasoning models such as MiniMax-M2.7 produce unstable output: a
+// multi-paragraph block may come back as ONE bilingual pair (with paragraphs
+// of the source silently dropped), and a request that runs out of output
+// budget comes back truncated (finish_reason=length) with an unclosed pair.
+// Accepting either as success caches a broken or incomplete translation for
+// the cache's whole lifetime.
+// ---------------------------------------------------------------------------
+
+/// Largest LLM response body accepted (bytes).
+const MAX_LLM_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+/// How many times a block may be halved before truncation is reported.
+const MAX_SPLIT_DEPTH: usize = 2;
+
+/// Shortest block worth splitting; below this the pieces lose too much context.
+const MIN_SPLITTABLE_CHARS: usize = 600;
+
+/// Check that a model answer really is one bilingual pair.
+///
+/// The downstream pipeline (streaming render, cache) assumes each response
+/// contains a `.paragraph-original` and a `.paragraph-translated` node.
+/// Without this check, a refusal or a plain echo was stored as the article's
+/// "translation" — and an empty answer was silently dropped by the frontend
+/// while the run reported success.
+fn validate_bilingual_block(raw: &str) -> Result<()> {
+    if raw.trim().is_empty() {
+        return Err(AppError::OperationFailed(
+            "LLM returned an empty translation".into(),
+        ));
+    }
+    if !raw.contains("paragraph-original") || !raw.contains("paragraph-translated") {
+        let preview: String = raw.chars().take(200).collect();
+        return Err(AppError::OperationFailed(format!(
+            "LLM returned text that is not a bilingual pair (missing paragraph-original/paragraph-translated): {preview}"
+        )));
+    }
+    // A translated side that is empty means the model produced the wrapper
+    // but no text; treat it as a failed block rather than caching a blank.
+    if let Some(translated) = raw.split_once("paragraph-translated") {
+        let body = translated
+            .1
+            .trim_start_matches(|c: char| c == '>' || c == '"' || c.is_whitespace());
+        if body.trim_start().starts_with("</div>") {
+            return Err(AppError::OperationFailed(
+                "LLM returned an empty translated side".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Marker prefix handed to the model, e.g. `###P3###`.
+///
+/// Batching several paragraphs into one request is what keeps the call count
+/// low, but it also lets the model collapse the whole block into one pair.
+/// Numbering the paragraphs gives the model a stable anchor to repeat and
+/// gives us something exact to verify.
+const PARAGRAPH_MARKER_PREFIX: &str = "###P";
+const PARAGRAPH_MARKER_SUFFIX: &str = "###";
+
+/// Prefix each paragraph of a block with its marker line.
+fn mark_paragraphs(block: &str) -> String {
+    let mut out = String::with_capacity(block.len() + 32);
+    let mut index = 0usize;
+    let mut current = String::new();
+
+    let flush = |out: &mut String, index: &mut usize, current: &mut String| {
+        if current.trim().is_empty() {
+            current.clear();
+            return;
+        }
+        *index += 1;
+        out.push_str(&format!("{PARAGRAPH_MARKER_PREFIX}{index}{PARAGRAPH_MARKER_SUFFIX}\n"));
+        out.push_str(current);
+        current.clear();
+    };
+
+    for line in block.split_inclusive('\n') {
+        if line.trim().is_empty() {
+            flush(&mut out, &mut index, &mut current);
+            out.push_str(line);
+        } else {
+            current.push_str(line);
+        }
+    }
+    flush(&mut out, &mut index, &mut current);
+
+    if index == 0 {
+        // Nothing paragraph-shaped to mark; send the block untouched.
+        return block.to_string();
+    }
+    out
+}
+
+/// Byte index just past a marker starting at `start`, if one starts there.
+fn marker_end_at(text: &str, start: usize) -> Option<usize> {
+    if !text[start..].starts_with(PARAGRAPH_MARKER_PREFIX) {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut end = start + PARAGRAPH_MARKER_PREFIX.len();
+    let digits_start = end;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end == digits_start || !text[end..].starts_with(PARAGRAPH_MARKER_SUFFIX) {
+        return None;
+    }
+    Some(end + PARAGRAPH_MARKER_SUFFIX.len())
+}
+
+/// Remove marker tokens from a model answer.
+///
+/// The markers must never reach the reader. A marker that occupied its own
+/// line takes the line's newline with it, so no stray blank line is left
+/// behind (and blank lines inside the preserved markdown are not touched).
+fn strip_paragraph_markers(answer: &str) -> String {
+    let mut out = String::with_capacity(answer.len());
+    let mut i = 0usize;
+    while i < answer.len() {
+        if let Some(after) = marker_end_at(answer, i) {
+            i = after;
+            if answer[i..].starts_with('\n') {
+                i += 1;
+            }
+            continue;
+        }
+        let ch = answer[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Marker numbers present in a model answer, in order.
+fn paragraph_markers_in(answer: &str) -> Vec<usize> {
+    let mut found = Vec::new();
+    let mut i = 0usize;
+    while i < answer.len() {
+        if let Some(after) = marker_end_at(answer, i) {
+            let digits =
+                &answer[i + PARAGRAPH_MARKER_PREFIX.len()..after - PARAGRAPH_MARKER_SUFFIX.len()];
+            if let Ok(number) = digits.parse::<usize>() {
+                found.push(number);
+            }
+            i = after;
+            continue;
+        }
+        let ch = answer[i..].chars().next().unwrap_or(' ');
+        i += ch.len_utf8();
+    }
+    found
+}
+
+/// Paragraphs in a source block: non-empty runs separated by a blank line.
+fn count_paragraphs(text: &str) -> usize {
+    let mut count = 0;
+    let mut in_paragraph = false;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            in_paragraph = false;
+        } else if !in_paragraph {
+            in_paragraph = true;
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Bilingual pairs in a model answer.
+fn count_translation_pairs(answer: &str) -> usize {
+    answer.matches("paragraph-original").count()
+}
+
+/// Did the model collapse a multi-paragraph block into a single pair?
+fn collapses_paragraphs(answer: &str, block: &str) -> bool {
+    let paragraphs = count_paragraphs(block);
+    if paragraphs < 2 {
+        return false;
+    }
+    let pairs = count_translation_pairs(answer);
+    let markers = paragraph_markers_in(answer);
+
+    // Markers make the expected count exact: the model was given one per
+    // paragraph and repeated some of them. Fewer pairs than paragraphs means
+    // part of the block was merged away — or silently dropped.
+    if !markers.is_empty() && pairs < paragraphs {
+        println!(
+            "[translate] {paragraphs} paragraphs but only {pairs} pair(s) and {} marker(s)",
+            markers.len()
+        );
+        return true;
+    }
+
+    // Without markers (a model that ignored them) fall back to the ratio: one
+    // pair for a whole multi-paragraph block is the worst case, and fewer
+    // than half the expected pairs is the same problem in a milder form.
+    pairs == 1 || pairs * 2 < paragraphs
+}
+
+fn is_truncation_error(error: &AppError) -> bool {
+    matches!(error, AppError::OperationFailed(message) if message.contains("truncated (finish_reason=length)"))
+}
+
+/// Split a block in half at a paragraph boundary, or `None` when it is too
+/// short to split usefully.
+///
+/// Indices are BYTES throughout: the block is cut with `str::split_at`, which
+/// requires a char boundary. Computing the boundary in characters would cut
+/// CJK text at the wrong place and could panic when the byte index landed
+/// inside a character.
+fn split_for_translation(block: &str) -> Option<(String, String)> {
+    let char_count = block.chars().count();
+    if char_count < MIN_SPLITTABLE_CHARS {
+        return None;
+    }
+
+    let total_bytes = block.len();
+    let mut boundaries: Vec<usize> = Vec::new();
+    let mut offset = 0usize;
+    for line in block.split_inclusive('\n') {
+        offset += line.len();
+        if line.trim().is_empty() {
+            boundaries.push(offset);
+        }
+    }
+
+    let target = total_bytes / 2;
+    let split_at = boundaries
+        .iter()
+        .copied()
+        .filter(|position| *position > total_bytes / 5 && *position < total_bytes * 4 / 5)
+        .min_by_key(|position| position.abs_diff(target))
+        .or_else(|| {
+            // No usable paragraph break: fall back to the last char boundary
+            // before the middle, then to a word boundary there.
+            let safe = block
+                .char_indices()
+                .map(|(index, _)| index)
+                .take_while(|index| *index < target)
+                .last()
+                .unwrap_or(0);
+            block[..safe].rfind(' ')
+        })?;
+    if split_at == 0 || split_at >= total_bytes {
+        return None;
+    }
+    let (first, second) = block.split_at(split_at);
+    if first.trim().is_empty() || second.trim().is_empty() {
+        return None;
+    }
+    Some((first.to_string(), second.to_string()))
+}
+
+/// Read a response body, refusing anything past `limit`.
+///
+/// `reqwest::Response::json()` buffers without a bound; the reader must not
+/// let one bad endpoint decide how much memory the app uses.
+async fn read_bounded(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+    if let Some(length) = response.content_length() {
+        if length as usize > limit {
+            return Err(AppError::OperationFailed(format!(
+                "response body of {} bytes exceeds the {} byte limit",
+                length, limit
+            )));
+        }
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| AppError::Network(format!("failed to read response body: {}", e)))?
+    {
+        if body.len() + chunk.len() > limit {
+            return Err(AppError::OperationFailed(format!(
+                "response body exceeds the {} byte limit",
+                limit
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +564,10 @@ pub trait AiService: Send + Sync {
     /// streaming pipeline) can chunk content consistently with what the
     /// service would do internally.
     fn config_max_chars(&self) -> usize;
+
+    /// The model identifier, so a cached translation can record which model
+    /// produced it.
+    fn config_model(&self) -> String;
 }
 
 /// Shared, replaceable AI service used by commands and the feed pipeline.
@@ -292,18 +604,29 @@ impl LlmAiService {
 
     /// Send an interactive chat completion request.
     async fn send_request(&self, request: &ChatRequest) -> Result<String> {
-        self.send_request_with_priority(request, true).await
+        self.send_request_with_priority(request, true, Truncation::Reject).await
     }
 
     /// Send a background request, behind interactive work in the queue.
     async fn send_request_background(&self, request: &ChatRequest) -> Result<String> {
-        self.send_request_with_priority(request, false).await
+        self.send_request_with_priority(request, false, Truncation::Reject).await
+    }
+
+    /// Reachability probe: any answer proves the endpoint, key and model work.
+    ///
+    /// A reasoning model spends a few tokens of its chain of thought before
+    /// the requested word, so the reply can hit the token limit before it
+    /// says anything. Failing the probe for that would report a working
+    /// configuration as broken.
+    async fn send_request_probe(&self, request: &ChatRequest) -> Result<String> {
+        self.send_request_with_priority(request, true, Truncation::Allow).await
     }
 
     async fn send_request_with_priority(
         &self,
         request: &ChatRequest,
         priority: bool,
+        truncation: Truncation,
     ) -> Result<String> {
         let _permit = llm_acquire(priority).await;
 
@@ -338,17 +661,37 @@ impl LlmAiService {
             )));
         }
 
-        let chat_response: ChatResponse = response
-            .json()
+        // Bound the body: a misconfigured base URL can answer with a
+        // multi-megabyte HTML page, and `json()` would buffer all of it.
+        let body = read_bounded(response, MAX_LLM_RESPONSE_BYTES)
             .await
+            .map_err(|e| AppError::Parse(format!("Failed to read LLM response: {}", e)))?;
+        let chat_response: ChatResponse = serde_json::from_slice(&body)
             .map_err(|e| AppError::Parse(format!("Failed to parse LLM response: {}", e)))?;
 
-        chat_response
+        let choice = chat_response
             .choices
             .into_iter()
             .next()
-            .map(|c| strip_think_tags(&c.message.content))
-            .ok_or_else(|| AppError::Parse("LLM returned no choices".into()))
+            .ok_or_else(|| AppError::Parse("LLM returned no choices".into()))?;
+
+        // A truncated answer is a FAILED request, not a short translation.
+        // Returning it as success cached half a paragraph as the article's
+        // finished translation: an unclosed pair with no translated side,
+        // persisted and then served from cache.
+        if choice.finish_reason.as_deref() == Some("length") && truncation == Truncation::Reject {
+            let budget = request.max_tokens.unwrap_or_default();
+            let source_chars: usize = request
+                .messages
+                .iter()
+                .map(|message| message.content.chars().count())
+                .sum();
+            return Err(AppError::OperationFailed(format!(
+                "LLM response was truncated (finish_reason=length) for a {source_chars}-character request with max_tokens={budget}. Reasoning models spend part of the budget on their chain of thought before the answer starts; raise max_tokens or lower max_chars_per_segment."
+            )));
+        }
+
+        Ok(strip_think_tags(&choice.message.content))
     }
 
     /// Build the (system, user) prompt pair for translating a single block.
@@ -440,6 +783,123 @@ impl LlmAiService {
         }
         Err(last_err.unwrap_or_else(|| AppError::Internal("retry loop exited unexpectedly".into())))
     }
+
+    /// Translate a sized block, recovering from truncation or paragraph
+    /// collapse.
+    ///
+    /// Both failures are handled the same way: halve the block at a paragraph
+    /// boundary and ask again, recursively but bounded. A single long
+    /// paragraph must not be able to fail an article, and a coarse answer is
+    /// still better than a hard failure once the depth budget is spent.
+    #[allow(clippy::too_many_arguments)]
+    async fn translate_block_sized(
+        &self,
+        block: &str,
+        system_prompt: String,
+        user_prompt: String,
+        model: String,
+        max_tokens: Option<u32>,
+        temperature: Option<f32>,
+        source_lang: &str,
+        target_lang: &str,
+        is_html: bool,
+        depth: usize,
+    ) -> Result<String> {
+        let source_lang = source_lang.to_string();
+        let target_lang = target_lang.to_string();
+        self.translate_with_recovery(block, depth, move |part: String| {
+            // Markers are added here, not upstream, so every entry point
+            // (streaming pipeline, whole-article translate, retries) sends the
+            // same contract.
+            let (system, user) = if part == block {
+                (system_prompt.clone(), user_prompt.clone())
+            } else {
+                // A re-prompt for a split half is built fresh, keeping the
+                // same language pair and content mode as the parent request.
+                self.build_translation_prompts(&part, &source_lang, &target_lang, is_html)
+            };
+            // Marked exactly once: the original user prompt is unmarked, and
+            // a re-prompt for a split half is marked fresh above.
+            let user = mark_paragraphs(&user);
+            let request = ChatRequest {
+                model: model.clone(),
+                messages: vec![
+                    ChatMessage {
+                        role: "system".into(),
+                        content: system,
+                    },
+                    ChatMessage {
+                        role: "user".into(),
+                        content: user,
+                    },
+                ],
+                max_tokens,
+                temperature,
+            };
+            // Transient provider errors (429, 5xx, timeouts) are retried here;
+            // the recovery loop only handles truncation and collapse.
+            async move { self.with_retry(|| self.send_request(&request)).await }
+        })
+        .await
+    }
+
+    /// Ask for a block and recover from truncation or paragraph collapse.
+    ///
+    /// `call` is the request function, injected so the recovery behaviour can
+    /// be tested without a network.
+    async fn translate_with_recovery<F, Fut>(
+        &self,
+        block: &str,
+        depth: usize,
+        call: F,
+    ) -> Result<String>
+    where
+        F: Fn(String) -> Fut + Clone,
+        Fut: std::future::Future<Output = Result<String>>,
+    {
+        let answer = call(block.to_string()).await;
+        let failure = match &answer {
+            Err(error) if is_truncation_error(error) => Some("ran out of output budget"),
+            Ok(answer) if collapses_paragraphs(answer, block) => {
+                Some("collapsed several paragraphs into one pair")
+            }
+            _ => None,
+        };
+
+        let Some(reason) = failure else {
+            let answer = answer?;
+            validate_bilingual_block(&answer)?;
+            return Ok(strip_paragraph_markers(&answer));
+        };
+
+        if depth >= MAX_SPLIT_DEPTH {
+            // Out of recovery attempts: keep a correct-but-coarse answer rather
+            // than failing the whole article.
+            if let Ok(answer) = answer {
+                println!(
+                    "[translate] block of {} chars still {reason} at depth {depth}; keeping it",
+                    block.chars().count()
+                );
+                validate_bilingual_block(&answer)?;
+                return Ok(strip_paragraph_markers(&answer));
+            }
+            return answer;
+        }
+
+        let Some((first, second)) = split_for_translation(block) else {
+            return answer;
+        };
+        println!(
+            "[translate] block of {} chars {reason}; splitting into {} + {}",
+            block.chars().count(),
+            first.chars().count(),
+            second.chars().count()
+        );
+        let second_call = call.clone();
+        let a = Box::pin(self.translate_with_recovery(&first, depth + 1, call)).await?;
+        let b = Box::pin(self.translate_with_recovery(&second, depth + 1, second_call)).await?;
+        Ok(format!("{a}\n{b}"))
+    }
 }
 
 #[async_trait]
@@ -482,24 +942,18 @@ impl AiService for LlmAiService {
         let max_tokens = self.config.max_tokens;
         let temperature = self.config.temperature;
 
-        self.with_retry(|| async {
-            let req = ChatRequest {
-                model: model.clone(),
-                messages: vec![
-                    ChatMessage {
-                        role: "system".into(),
-                        content: system_prompt.clone(),
-                    },
-                    ChatMessage {
-                        role: "user".into(),
-                        content: user_prompt.clone(),
-                    },
-                ],
-                max_tokens,
-                temperature,
-            };
-            self.send_request(&req).await
-        })
+        self.translate_block_sized(
+            block,
+            system_prompt,
+            user_prompt,
+            model,
+            max_tokens,
+            temperature,
+            source_lang,
+            target_lang,
+            is_html,
+            0,
+        )
         .await
     }
 
@@ -539,7 +993,7 @@ impl AiService for LlmAiService {
                     content: user_message,
                 },
             ],
-            max_tokens: Some(200),
+            max_tokens: Some(CLASSIFY_MAX_TOKENS),
             temperature: Some(0.1),
         };
 
@@ -578,7 +1032,7 @@ impl AiService for LlmAiService {
                     content: user_message,
                 },
             ],
-            max_tokens: Some(2000),
+            max_tokens: Some(CLASSIFY_BATCH_MAX_TOKENS),
             temperature: Some(0.1),
         };
 
@@ -620,7 +1074,7 @@ impl AiService for LlmAiService {
                     content: user_message,
                 },
             ],
-            max_tokens: Some(600),
+            max_tokens: Some(RECOMMEND_MAX_TOKENS),
             temperature: Some(0.3),
         };
 
@@ -645,11 +1099,15 @@ impl AiService for LlmAiService {
             temperature: Some(0.0),
         };
 
-        self.send_request(&req).await
+        self.send_request_probe(&req).await
     }
 
     fn config_max_chars(&self) -> usize {
         self.max_chars()
+    }
+
+    fn config_model(&self) -> String {
+        self.config.model.clone()
     }
 }
 
@@ -1846,5 +2304,288 @@ mod tests {
             max_chars_per_segment: None,
         };
         assert!(config.is_valid().is_err());
+    }
+
+    // ---------------------------------------------------------------------
+    // Bilingual structure: marking, validation, collapse recovery
+    // ---------------------------------------------------------------------
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn service() -> LlmAiService {
+        LlmAiService::new(AiConfig {
+            api_key: "test-key".into(),
+            base_url: "https://example.invalid/v1".into(),
+            model: "test-model".into(),
+            max_tokens: Some(16_000),
+            temperature: None,
+            max_chars_per_segment: Some(3_000),
+        })
+        .expect("service")
+    }
+
+    fn pair(original: &str) -> String {
+        format!(
+            "<div class=\"translation-paragraph\">\n\
+             <div class=\"paragraph-original\">{original}</div>\n\
+             <div class=\"paragraph-translated\">译文</div>\n</div>"
+        )
+    }
+
+    fn paragraph(text: &str) -> String {
+        format!("{text} {}\n\n", "内容".repeat(200))
+    }
+
+    /// CJK text is three bytes per character, so a byte index computed from a
+    /// character count lands inside a character: the split drifted to roughly a
+    /// third of the way in (and `split_at` would panic on an unlucky boundary).
+    #[test]
+    fn splitting_is_byte_safe_and_balanced() {
+        let block = format!("{}{}", paragraph("第一段"), paragraph("第二段"));
+        let (first, second) = split_for_translation(&block).expect("splittable");
+
+        let total = block.chars().count();
+        let a = first.chars().count();
+        let b = second.chars().count();
+        assert!(a + b == total, "nothing lost: {a} + {b} != {total}");
+        assert!(
+            a > total / 3 && b > total / 3,
+            "split must be balanced, got {a} + {b} of {total}"
+        );
+        assert_eq!(count_paragraphs(&first), 1, "split on the paragraph boundary");
+        assert_eq!(count_paragraphs(&second), 1);
+    }
+
+    #[test]
+    fn marking_and_stripping_round_trip() {
+        let block = "第一段。\n\n第二段。\n\n第三段。";
+        let marked = mark_paragraphs(block);
+        assert_eq!(paragraph_markers_in(&marked), vec![1, 2, 3]);
+        assert!(marked.contains("###P1###\n第一段。"), "{marked}");
+        assert_eq!(strip_paragraph_markers(&marked), block, "round-trip is lossless");
+
+        // A single paragraph still gets a marker.
+        assert_eq!(paragraph_markers_in(&mark_paragraphs("只有一段")), vec![1]);
+        // Nothing paragraph-shaped: leave the block alone.
+        assert_eq!(mark_paragraphs("   \n\n  "), "   \n\n  ");
+    }
+
+    #[test]
+    fn stripping_removes_markers_without_touching_content() {
+        // Marker on its own line: the line disappears entirely.
+        assert_eq!(
+            strip_paragraph_markers("###P1###\n正文一\n###P2###\n正文二"),
+            "正文一\n正文二"
+        );
+        // Marker inline (some models put it inside the div): only the token goes.
+        assert_eq!(
+            strip_paragraph_markers("<div>###P7###正文</div>"),
+            "<div>正文</div>"
+        );
+        // Blank lines inside preserved markdown survive.
+        let answer = "###P1###\n<pre>a\n\nb</pre>";
+        assert_eq!(strip_paragraph_markers(answer), "<pre>a\n\nb</pre>");
+        // Something that only looks like a marker is left alone.
+        assert_eq!(strip_paragraph_markers("###Px###"), "###Px###");
+        assert_eq!(strip_paragraph_markers("###P12##"), "###P12##");
+    }
+
+    /// The contract the prompt asks for: markers repeated, one pair each.
+    #[tokio::test]
+    async fn marked_answers_keep_one_pair_per_paragraph() {
+        let svc = service();
+        let block = format!("{}{}{}", paragraph("第一段"), paragraph("第二段"), paragraph("第三段"));
+
+        let answer = svc
+            .translate_with_recovery(&block, 0, move |marked: String| async move {
+                // A well-behaved model: repeat each marker, one pair per block.
+                let mut out = String::new();
+                for chunk in marked.split("\n\n") {
+                    let chunk = chunk.trim();
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    let (marker, text) = match chunk.split_once('\n') {
+                        Some((head, rest)) if head.starts_with("###P") => (head, rest),
+                        _ => ("", chunk),
+                    };
+                    if !marker.is_empty() {
+                        out.push_str(marker);
+                        out.push('\n');
+                    }
+                    out.push_str(&pair(text.trim()));
+                    out.push('\n');
+                }
+                Ok(out)
+            })
+            .await
+            .expect("well-formed answer");
+
+        assert_eq!(count_translation_pairs(&answer), 3);
+        assert!(
+            !answer.contains("###P"),
+            "markers must never reach the reader: {answer}"
+        );
+    }
+
+    /// A model that answers only part of the block must not be accepted just
+    /// because the pairs it did return look proportionate.
+    #[test]
+    fn missing_paragraphs_are_detected_from_the_markers() {
+        let block = (1..=14)
+            .map(|n| format!("段落{n} {}\n\n", "内容".repeat(40)))
+            .collect::<String>();
+        assert_eq!(count_paragraphs(&block), 14);
+
+        // 8 of 14 answered: `8 * 2 >= 14` would pass the ratio check.
+        let partial: String = (1..=8)
+            .map(|n| format!("###P{n}###\n{}", pair(&format!("第{n}段"))))
+            .collect::<String>();
+        assert!(
+            collapses_paragraphs(&partial, &block),
+            "a partial answer must be treated as a structural failure"
+        );
+
+        // All 14 answered in 14 pairs: accepted.
+        let complete: String = (1..=14)
+            .map(|n| format!("###P{n}###\n{}", pair(&format!("第{n}段"))))
+            .collect::<String>();
+        assert!(!collapses_paragraphs(&complete, &block));
+
+        // Markers ignored but the pairs are all there: accepted on the ratio.
+        let unmarked: String = (1..=14).map(|n| pair(&format!("第{n}段"))).collect();
+        assert!(!collapses_paragraphs(&unmarked, &block));
+    }
+
+    #[test]
+    fn paragraph_and_pair_counting() {
+        let block = "one
+
+still one
+
+
+ two
+
+three";
+        assert_eq!(
+            count_paragraphs(block),
+            4,
+            "blank-line-separated runs are paragraphs; consecutive blanks collapse"
+        );
+        assert_eq!(count_paragraphs("   \n\n  "), 0, "whitespace is not a paragraph");
+        assert_eq!(count_translation_pairs(&pair("x")), 1);
+        assert_eq!(count_translation_pairs(&format!("{}{}", pair("x"), pair("y"))), 2);
+    }
+
+    /// The model returned the whole block as one pair: the reader would see all
+    /// the original text followed by all the translation instead of paragraph
+    /// pairs. Recovery splits the block so each paragraph gets its own pair.
+    #[tokio::test]
+    async fn collapsed_answer_is_recovered_by_splitting_at_paragraph_boundaries() {
+        let svc = service();
+        let block = format!("{}{}", paragraph("第一段"), paragraph("第二段"));
+        assert_eq!(count_paragraphs(&block), 2);
+        assert!(block.chars().count() > MIN_SPLITTABLE_CHARS);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let answer = svc
+            .translate_with_recovery(&block, 0, move |part: String| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                // Always one pair, whatever the input — the collapse case.
+                async move { Ok(pair(&part)) }
+            })
+            .await
+            .expect("recovery should succeed");
+
+        assert!(
+            count_translation_pairs(&answer) >= 2,
+            "the collapsed answer must be split into per-paragraph pairs: {answer}"
+        );
+        assert!(calls.load(Ordering::SeqCst) >= 2, "the block was re-asked in parts");
+    }
+
+    /// A model that answers correctly is not split (no wasted calls).
+    #[tokio::test]
+    async fn a_correct_multi_pair_answer_is_used_as_is() {
+        let svc = service();
+        let block = format!("{}{}", paragraph("第一段"), paragraph("第二段"));
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let answer = svc
+            .translate_with_recovery(&block, 0, move |part: String| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let per_paragraph: String = part
+                    .split("\n\n")
+                    .filter(|p| !p.trim().is_empty())
+                    .map(pair)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                async move { Ok(per_paragraph) }
+            })
+            .await
+            .expect("passthrough");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "one call, no splitting");
+        assert_eq!(count_translation_pairs(&answer), 2);
+    }
+
+    /// Truncation (reasoning models run out of budget) is recovered the same
+    /// way, and the two halves are concatenated in order.
+    #[tokio::test]
+    async fn truncation_is_recovered_by_splitting() {
+        let svc = service();
+        let block = format!("{}{}", paragraph("第一段"), paragraph("第二段"));
+
+        let answer = svc
+            .translate_with_recovery(&block, 0, move |part: String| {
+                let length = part.chars().count();
+                async move {
+                    if length > MIN_SPLITTABLE_CHARS {
+                        Err(AppError::OperationFailed(
+                            "LLM response was truncated (finish_reason=length) for a block with max_tokens=10"
+                                .into(),
+                        ))
+                    } else {
+                        Ok(pair(&part))
+                    }
+                }
+            })
+            .await
+            .expect("recovery should succeed");
+
+        assert_eq!(count_translation_pairs(&answer), 2);
+        let first = answer.find("第一段").unwrap_or(usize::MAX);
+        let second = answer.find("第二段").unwrap_or(usize::MAX);
+        assert!(first < second, "halves are concatenated in source order");
+    }
+
+    /// Once the depth budget is spent, a coarse-but-valid answer beats failing
+    /// the whole article.
+    #[tokio::test]
+    async fn exhausted_depth_keeps_a_valid_answer() {
+        let svc = service();
+        let block = format!("{}{}", paragraph("第一段"), paragraph("第二段"));
+        let answer = svc
+            .translate_with_recovery(&block, MAX_SPLIT_DEPTH, move |part: String| {
+                async move { Ok(pair(&part)) }
+            })
+            .await
+            .expect("no split attempts left, but the answer is usable");
+        assert_eq!(count_translation_pairs(&answer), 1);
+    }
+
+    /// Nothing usable in the answer: fail loudly rather than cache junk.
+    #[tokio::test]
+    async fn a_non_bilingual_answer_is_rejected() {
+        let svc = service();
+        let error = svc
+            .translate_with_recovery("short paragraph", 0, move |_: String| async move {
+                Ok("I cannot help with that.".to_string())
+            })
+            .await
+            .expect_err("must not be accepted");
+        assert!(error.to_string().contains("not a bilingual pair"), "{error}");
     }
 }

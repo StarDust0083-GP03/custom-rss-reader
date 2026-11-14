@@ -78,10 +78,20 @@ pub async fn translate_item_bilingual(state: State<'_, AppState>, item_id: i64) 
         bilingual
     );
 
-    // Persist via the repository (no direct SQL in the command layer).
+    // Persist via the repository (no direct SQL in the command layer), with
+    // the identity of what produced this result so a later cache lookup can
+    // tell whether it still describes the article.
+    let source_hash = crate::ai::translation_source_hash(content);
     state
         .feed_repo
-        .update_translation(item_id, None, &result)
+        .update_translation(
+            item_id,
+            None,
+            &result,
+            &source_hash,
+            &ai_service.config_model(),
+            crate::ai::TRANSLATION_PROMPT_VERSION,
+        )
         .await?;
 
     Ok(result)
@@ -261,8 +271,13 @@ pub async fn set_ai_config(
         api_key,
         base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
         model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-        max_tokens: Some(4000),
-        temperature: Some(0.3),
+        // The settings UI has no token-budget field, so keep whatever budget
+        // the existing config carried (file-edited or shipped). Hardcoding a
+        // value here silently re-broke translations: a small budget makes a
+        // reasoning model truncate every bilingual answer, and the truncation
+        // recovery can then only split so deep before failing the block.
+        max_tokens: existing.max_tokens,
+        temperature: existing.temperature.or(Some(0.3)),
         max_chars_per_segment,
     };
 

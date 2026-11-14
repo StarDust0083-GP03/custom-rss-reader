@@ -25,6 +25,7 @@ import {
   cancelTranslation,
   handleTranslateAction,
   toggleCachedTranslation,
+  translateItem,
 } from "../src/features/ai";
 import { markAsRead, selectItem, cancelIgnoreTimer } from "../src/features/actions";
 import { resetFiltersForSubscription } from "../src/ui/filter-state";
@@ -150,7 +151,26 @@ describe("translation and read-state regressions", () => {
       cmd: "translate_item_bilingual_streaming",
       args: { itemId: selected.id, force: true },
     });
-    expect(selected.translated_content).toBeNull();
+    // A forced re-translate no longer wipes the old translation first and the
+    // command's return value is terminal truth: the returned document is
+    // what the pane shows, whatever the progress events delivered.
+    expect(selected.translated_content).toBe("ok");
+  });
+
+  it("finishes from the command result when no progress event arrives", async () => {
+    document.body.innerHTML = '<section class="detail-panel"></section>';
+    const article = item();
+    state.selectedItem = article;
+    state.currentItems = [summary()];
+    // The command resolves with the finished document, but every progress
+    // event is lost — the session must still end up with the full translation
+    // instead of waiting for events that were never delivered.
+    mockIPC(() => '<div class="bilingual-content">COMPLETE</div>', { shouldMockEvents: false });
+
+    await translateItem(article);
+
+    expect(state.translationStateByItemId.get(article.id)?.abortController).toBeNull();
+    expect(article.translated_content).toContain("COMPLETE");
   });
 
   it("removes the translating state immediately on cancellation", () => {

@@ -98,6 +98,25 @@ pub struct Recommendation {
 
 /// Max characters per translation segment.
 pub const MAX_CHARS_PER_SEGMENT: usize = 3000;
+
+/// Hash of the exact source text a translation was produced from. Cached
+/// translations record it so a changed article is not served a stale cache.
+pub fn translation_source_hash(source: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(source.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Provenance recorded for translations cached before validity tracking
+/// existed. Such rows are accepted when their source hash matches, but they
+/// never claim to come from a specific model or prompt revision.
+pub const LEGACY_TRANSLATION_PROVENANCE: &str = "legacy";
+
+/// Bumped whenever the translation prompts change. Cached translations
+/// record it so a prompt change does not silently reuse old text.
+pub const TRANSLATION_PROMPT_VERSION: i64 = 1;
+
 /// Max retry attempts for LLM calls.
 pub const MAX_RETRIES: usize = 2;
 /// Max articles per batch classification call.

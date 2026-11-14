@@ -2887,6 +2887,30 @@ html[data-theme="vscode-dark"] {
     margin-bottom: 0;
 }
 
+/* Formatted originals render real block elements inside a half-width
+   column. Tables and code have intrinsic width; without a scroll
+   container they bleed across the column gap into the translated side. */
+.bilingual-content .paragraph-original table,
+.bilingual-content .paragraph-translated table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.bilingual-content .paragraph-original pre,
+.bilingual-content .paragraph-translated pre {
+    overflow-x: auto;
+    max-width: 100%;
+}
+
+/* Markdown headings inside a pair also inherit heading margins tuned for
+   the full-width article flow; in the narrow parallel column that gap
+   reads as a broken row. Tighten them inside bilingual pairs. */
+.bilingual-content .paragraph-original :is(h1, h2, h3, h4, h5, h6),
+.bilingual-content .paragraph-translated :is(h1, h2, h3, h4, h5, h6) {
+    margin: 0.3rem 0 0.4rem;
+}
+
 @container (max-width: 480px) {
     .bilingual-content.parallel .translation-paragraph {
         grid-template-columns: minmax(0, 1fr);

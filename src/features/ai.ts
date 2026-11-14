@@ -160,7 +160,7 @@ export async function translateItem(
               // 只有当前选中的文章才渲染
               if (S.selectedItem?.id === item.id) {
                 renderItemDetail(item);
-                toastError(`Translation failed: ${currentState.errorMessage}. Check ~/.rss-reader/ai_errors.log for details.`);
+                toastError(`Translation failed: ${currentState.errorMessage}`);
               }
               errorNotified = true;
               return;
@@ -221,19 +221,21 @@ export async function translateItem(
 
       // 如果提供了 htmlContent（从 webview iframe 获取），使用新的翻译命令
       // 否则使用原来的翻译命令（翻译 RSS 内容）
+      let result: string;
       if (htmlContent) {
-        await invoke<string>("translate_html_content_streaming", {
+        result = await invoke<string>("translate_html_content_streaming", {
           itemId: item.id,
           content: htmlContent,
           force,
         });
       } else {
         // 使用流式双语对照翻译
-        await invoke<string>("translate_item_bilingual_streaming", {
+        result = await invoke<string>("translate_item_bilingual_streaming", {
           itemId: item.id,
           force,
         });
       }
+      reconcileCompletedRun(item, runState, result);
     } finally {
       // Always clean up listeners
       if (unlistenProgress) unlistenProgress();
@@ -272,6 +274,33 @@ export async function translateItem(
     renderItems(true);
     if (S.selectedItem?.id === item.id) renderItemDetail(item);
   }
+}
+
+/**
+ * Accept a command result as terminal truth.
+ *
+ * Progress events are a delivery mechanism, not a guarantee: if the final
+ * event is dropped — or a chunk event carried an empty payload after a
+ * truncated/failed model answer — the run used to leave the session's
+ * translation missing blocks even though the command had already returned
+ * the finished document. The returned value is the authoritative snapshot,
+ * so reconcile it before cleanup.
+ */
+function reconcileCompletedRun(item: FeedItem, runState: TranslationState, result: string) {
+  const currentState = S.translationStateByItemId.get(item.id);
+  if (currentState !== runState) return;
+  if (runState.hasError) return;
+  if (runState.abortController?.signal.aborted) return; // cancelTranslation owns cleanup
+
+  runState.abortController = null;
+  runState.inProgressContent = null;
+  if (result?.trim()) {
+    if (!item.translated_content?.trim()) item.translated_content = result;
+    runState.hasError = false;
+    runState.useTranslation = true;
+  }
+  renderItems(true);
+  if (S.selectedItem?.id === item.id) renderItemDetail(item);
 }
 
 /** Cancel the visible translation run without allowing its late events to
